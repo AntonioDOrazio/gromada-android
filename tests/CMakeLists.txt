@@ -22,3 +22,5 @@ set_tests_properties(script_run_demo PROPERTIES PASS_REGULAR_EXPRESSION
     "\\[1\\] > main\\(\\)\n\\[1\\] Notify\\(100, \"begin\"\\)\n\\[2\\] > main\\(\\)\n\\[3\\] > main\\(\\)\n\\[3\\] > Report\\(20\\)\n\\[3\\] Notify\\(20, \"unit2\"\\)")
 gromada_add_test(ui_text_test ui_text_test.cpp)
 gromada_add_test(ui_data_test ui_data_test.cpp)
+gromada_add_test(input_mapper_test input_mapper_test.cpp)
+gromada_add_test(cursor_file_test cursor_file_test.cpp)

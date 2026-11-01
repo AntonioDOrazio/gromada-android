@@ -10,8 +10,11 @@ Il core **non contiene asset del gioco**: legge i file della tua copia originale
   (sprite indicizzati, ombre, luce, trasparenze) e li fa scorrere col pad.
 - Opzioni core: **Frame rate 60/120**, **Formato 4:3 (640×480) / 16:9 (854×480)**, livello di anteprima.
 - Opzioni audio: **Volume musica** e **Volume effetti**.
-- Controlli: stick sinistro o d-pad = scorrimento, Y = veloce, L/R = livello precedente/successivo,
-  A/B = prova effetto sonoro successivo/precedente.
+- Comandi (dettagli e motivazioni in `docs/controls.md`): cursore virtuale o schema diretto
+  (twin-stick) da opzione core, touchscreen (tocco = click sinistro, pressione lunga o due dita =
+  click destro), mouse, cursori originali `.CUR`. A = click sinistro, B = click destro,
+  L1/R1 = armi, Start = Esc, Select = TAB. Nel viewer: d-pad o cursore ai bordi = scorrimento,
+  Y = veloce, L2/R2 = livello, L3/R3 = prova effetti sonori.
 - Audio: mixer interno, sincronizzato al campione a 60 e 120 fps.
   - Effetti dal `fw.res` (WAV mono 8 bit 11/22 kHz, ricampionati a 44,1 kHz).
   - Musica: le tracce CD Audio originali (2–12) in OGG, con la playlist di ogni livello
@@ -53,6 +56,8 @@ e `gromada_libretro.info` nella cartella info.
     tools/harness build/gromada_libretro.so /percorso/gioco/gromada.exe 240 shot \
         gromada_level=5 gromada_fps=120 hold=right shots=0,239
 
+Input a tempo per l'harness (stick, touch, mouse): vedi `docs/controls.md`.
+
 ## Struttura
 - `src/libgromada`, `src/core`: lettura dei formati di Gromada, portata da
   [gromada-viewer](https://github.com/allcreater/gromada-viewer) (MIT, commit 3fb84f4)
@@ -61,5 +66,6 @@ e `gromada_libretro.info` nella cartella info.
   il core è compilato come singola unità di traduzione.
 - `src/engine`: livello runtime, renderer e mixer audio.
 - `src/script`: interprete degli script `.INI` del gioco (vedi `docs/script-language.md`).
+- `src/input`: schemi di controllo, cursore virtuale, touch/mouse/tastiera, cursori `.CUR`.
 - `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT).
 - `src/gromada_libretro.cpp`: API libretro.

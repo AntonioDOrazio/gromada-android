@@ -2,8 +2,13 @@
 // usage: harness <core.so> <content> <frames> <out_prefix> [key=value ...]
 //   options:  gromada_fps=120 gromada_aspect=16:9 gromada_level=5
 //   input:    hold=right|left|up|down|y   (held for the whole run)
-//             press_r_at=<frame>          (pulse R / next level)
+//             press_r_at=<frame>          (pulse R: next weapon; the viewer's next level is now R2)
 //             shots=<f1,f2,...>           (frames to dump as PPM)
+//   timed input (repeatable; "@from-to" or "@frame", default = whole run):
+//             btn=<a|b|x|y|l|r|l2|r2|l3|r3|start|select|up|down|left|right>@10-20
+//             lstick=<x>,<y>@...  rstick=<x>,<y>@...   (-1..1, y down)
+//             touch=<px>,<py>[;<px>,<py>]@...         (fingers, in game-image pixels)
+//             mouse=<dx>,<dy>@...  mouse_btn=<left|right>@...
 #include <dlfcn.h>
 #include <chrono>
 #include <cstdarg>
@@ -24,6 +29,53 @@ static double fps = 0;
 static size_t audioFrames = 0;
 static std::vector<int16_t> audioCapture;
 static std::set<int> pressA;
+static unsigned imageW = 640, imageH = 480;
+
+struct Timed {
+    std::string kind;        // btn, lstick, rstick, touch, mouse, mouse_btn
+    unsigned id = 0;         // button id or mouse button id
+    std::vector<std::pair<float, float>> xy;
+    int from = 0, to = 1 << 30;
+    bool active() const { return frame >= from && frame <= to; }
+};
+static std::vector<Timed> timed;
+
+static bool parseTimed(const std::string& k, const std::string& v) {
+    static const std::map<std::string, unsigned> buttons = {
+        {"b", RETRO_DEVICE_ID_JOYPAD_B}, {"y", RETRO_DEVICE_ID_JOYPAD_Y}, {"select", RETRO_DEVICE_ID_JOYPAD_SELECT},
+        {"start", RETRO_DEVICE_ID_JOYPAD_START}, {"up", RETRO_DEVICE_ID_JOYPAD_UP}, {"down", RETRO_DEVICE_ID_JOYPAD_DOWN},
+        {"left", RETRO_DEVICE_ID_JOYPAD_LEFT}, {"right", RETRO_DEVICE_ID_JOYPAD_RIGHT}, {"a", RETRO_DEVICE_ID_JOYPAD_A},
+        {"x", RETRO_DEVICE_ID_JOYPAD_X}, {"l", RETRO_DEVICE_ID_JOYPAD_L}, {"r", RETRO_DEVICE_ID_JOYPAD_R},
+        {"l2", RETRO_DEVICE_ID_JOYPAD_L2}, {"r2", RETRO_DEVICE_ID_JOYPAD_R2}, {"l3", RETRO_DEVICE_ID_JOYPAD_L3},
+        {"r3", RETRO_DEVICE_ID_JOYPAD_R3}};
+    if (k != "btn" && k != "lstick" && k != "rstick" && k != "touch" && k != "mouse" && k != "mouse_btn") return false;
+    Timed t;
+    t.kind = k;
+    const auto at = v.find('@');
+    const std::string what = v.substr(0, at);
+    if (at != std::string::npos) {
+        const std::string range = v.substr(at + 1);
+        const auto dash = range.find('-');
+        t.from = std::atoi(range.c_str());
+        t.to = dash == std::string::npos ? t.from : std::atoi(range.c_str() + dash + 1);
+    }
+    if (k == "btn") {
+        auto it = buttons.find(what);
+        if (it == buttons.end()) { std::fprintf(stderr, "unknown button %s\n", what.c_str()); std::exit(1); }
+        t.id = it->second;
+    } else if (k == "mouse_btn") {
+        t.id = what == "right" ? RETRO_DEVICE_ID_MOUSE_RIGHT : RETRO_DEVICE_ID_MOUSE_LEFT;
+    } else {
+        for (size_t p = 0; p < what.size();) {
+            size_t q = what.find(';', p); if (q == std::string::npos) q = what.size();
+            const std::string pair = what.substr(p, q - p);
+            t.xy.emplace_back(std::atof(pair.c_str()), std::atof(pair.c_str() + pair.find(',') + 1));
+            p = q + 1;
+        }
+    }
+    timed.push_back(t);
+    return true;
+}
 
 static void logcb(enum retro_log_level, const char* fmt, ...) {
     va_list a; va_start(a, fmt); std::vfprintf(stderr, fmt, a); va_end(a);
@@ -50,7 +102,7 @@ static bool env(unsigned cmd, void* data) {
 }
 
 static void video(const void* data, unsigned w, unsigned h, size_t pitch) {
-    lastW = w; lastH = h;
+    lastW = w; lastH = h; imageW = w; imageH = h;
     if (!data || !shots.count(frame)) return;
     std::string path = outPrefix + "_" + std::to_string(frame) + ".ppm";
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -68,8 +120,39 @@ static void video(const void* data, unsigned w, unsigned h, size_t pitch) {
 
 static size_t audio(const int16_t* d, size_t frames) { audioFrames += frames; audioCapture.insert(audioCapture.end(), d, d + frames * 2); return frames; }
 static void poll() {}
-static int16_t input(unsigned port, unsigned device, unsigned, unsigned id) {
-    if (port != 0 || device != RETRO_DEVICE_JOYPAD) return 0;
+static int16_t timedInput(unsigned device, unsigned index, unsigned id) {
+    auto clamp16 = [](float v) { return int16_t(v > 32767 ? 32767 : v < -32767 ? -32767 : v); };
+    if (device == RETRO_DEVICE_ANALOG) {
+        const char* kind = index == RETRO_DEVICE_INDEX_ANALOG_LEFT ? "lstick" : "rstick";
+        for (const Timed& t : timed)
+            if (t.kind == kind && t.active())
+                return clamp16((id == RETRO_DEVICE_ID_ANALOG_X ? t.xy[0].first : t.xy[0].second) * 32767);
+    } else if (device == RETRO_DEVICE_POINTER) {
+        for (const Timed& t : timed)
+            if (t.kind == "touch" && t.active()) {
+                if (index >= t.xy.size()) return 0;
+                if (id == RETRO_DEVICE_ID_POINTER_PRESSED) return 1;
+                if (id == RETRO_DEVICE_ID_POINTER_X) return clamp16(t.xy[index].first / imageW * 2 * 0x7fff - 0x7fff);
+                if (id == RETRO_DEVICE_ID_POINTER_Y) return clamp16(t.xy[index].second / imageH * 2 * 0x7fff - 0x7fff);
+            }
+    } else if (device == RETRO_DEVICE_MOUSE) {
+        for (const Timed& t : timed) {
+            if (!t.active()) continue;
+            if (t.kind == "mouse" && id == RETRO_DEVICE_ID_MOUSE_X) return clamp16(t.xy[0].first);
+            if (t.kind == "mouse" && id == RETRO_DEVICE_ID_MOUSE_Y) return clamp16(t.xy[0].second);
+            if (t.kind == "mouse_btn" && t.id == id) return 1;
+        }
+    } else if (device == RETRO_DEVICE_JOYPAD) {
+        for (const Timed& t : timed)
+            if (t.kind == "btn" && t.id == id && t.active()) return 1;
+    }
+    return 0;
+}
+
+static int16_t input(unsigned port, unsigned device, unsigned index, unsigned id) {
+    if (port != 0) return 0;
+    if (int16_t v = timedInput(device, index, id)) return v;
+    if (device != RETRO_DEVICE_JOYPAD) return 0;
     if (id == RETRO_DEVICE_ID_JOYPAD_R && frame == pressRAt) return 1;
     if (id == RETRO_DEVICE_ID_JOYPAD_A && pressA.count(frame)) return 1;
     static const std::map<std::string, unsigned> names = {
@@ -95,6 +178,7 @@ int main(int argc, char** argv) {
     for (int i = 5; i < argc; ++i) {
         std::string kv = argv[i]; auto eq = kv.find('=');
         std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+        if (parseTimed(k, v)) continue;
         if (k == "hold") hold = v;
         else if (k == "press_r_at") pressRAt = std::atoi(v.c_str());
         else if (k == "press_a_at") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) pressA.insert(std::atoi(t)); }
@@ -112,6 +196,7 @@ int main(int argc, char** argv) {
     retro_game_info game{argv[2], nullptr, 0, nullptr};
     if (!retro_load_game(&game)) { std::fprintf(stderr, "load_game failed\n"); return 2; }
     retro_system_av_info av{}; retro_get_system_av_info(&av); fps = av.timing.fps;
+    imageW = av.geometry.base_width; imageH = av.geometry.base_height;
     std::fprintf(stderr, "av: %ux%u aspect=%.3f fps=%.0f rate=%.0f\n", av.geometry.base_width, av.geometry.base_height,
                  av.geometry.aspect_ratio, av.timing.fps, av.timing.sample_rate);
 
