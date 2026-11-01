@@ -1,0 +1,150 @@
+#pragma once
+#include <cstdint>
+#include <cassert>
+
+
+#include "core/std.hpp"
+#include "libgromada/resource_reader.hpp"
+
+#include "libgromada/resources.hpp"
+#include "libgromada/resources_sound.hpp"
+
+
+	class GameResources;
+
+	// NOTE: in current implementation VidRefs are bound to the GameResources lifetime!
+	class VidRef {
+	public:
+		VidRef() noexcept = default;
+		VidRef(const VidRef&) noexcept = default;
+		VidRef& operator=(const VidRef&) noexcept = default;
+
+		const GameResources&	parent() const;
+
+		const Vid&				vid() const noexcept { return *m_vid; }
+		std::uint16_t			nvid() const;
+
+		operator const Vid&() const noexcept { return *m_vid; }
+		operator bool () const noexcept { return m_parent; }
+		const Vid* operator->() const noexcept { return m_vid; }
+
+		auto operator<=>(const VidRef &) const = default;
+
+	private:
+		friend class GameResources;
+		VidRef(const GameResources& resources, const Vid* vid);
+
+	private:
+		const Vid* m_vid = &nullVid;
+		const GameResources* m_parent = nullptr;
+
+		static inline const Vid nullVid;
+	};
+
+	class GameResources {
+	public:
+	    explicit GameResources(std::filesystem::path path);
+		GameResources(const GameResources& ) = delete;
+		GameResources& operator=(GameResources&) = delete;
+
+		std::span<const Vid> vids() const noexcept { return m_vids; }
+		std::span<const VidRef> vidRefs() const noexcept { return m_vidRefs; }
+	    // unfortunately std::span yet do not have .at method
+	    VidRef getVid(int nvid) const {
+	        if (nvid < 0 || nvid >= static_cast<int>(m_vids.size())) {
+	            throw std::out_of_range("GameResources: nvid out of range");
+	        }
+
+	        return m_vidRefs[nvid];
+	    }
+
+	    const std::filesystem::path& gamePath() const noexcept { return m_gamePath; }
+	    std::filesystem::path mapsPath() const noexcept { return m_gamePath / "maps"; }
+
+	    const AdjacencyData& adjacencyData() const { return m_adjacencyData; }
+		std::span<const VidRef> baseTilesVids() const { return m_baseTilesVids; }
+		std::span<const VidRef> substrateTilesVids() const { return m_substrateTilesVids; }
+
+		std::span<const SoundData> sounds() const noexcept { return m_sounds; }
+		std::span<const Weapon> weapons() const noexcept { return m_weapons; }
+
+	private:
+	    std::filesystem::path m_gamePath;
+
+	    AdjacencyData m_adjacencyData;
+	    std::vector<VidRef> m_baseTilesVids;
+	    std::vector<VidRef> m_substrateTilesVids;
+
+	    std::vector<Vid> m_vids;
+		std::vector<VidRef> m_vidRefs;
+
+		std::vector<SoundData> m_sounds;
+		std::vector<Weapon> m_weapons;
+	};
+
+// Implementation
+
+
+GameResources::GameResources(std::filesystem::path path)
+	: m_gamePath(path.parent_path()) {
+
+	GromadaResourceNavigator navigator {GromadaResourceReader{std::move(path)}};
+	navigator.visitSectionsOfType(SectionType::Vid, [this](const Section& _, BinaryStreamReader reader) { m_vids.emplace_back(reader); });
+
+	std::ranges::for_each(m_vids, [this](Vid& vid) {
+		if (const auto referenceNvid = std::get_if<std::int32_t>(&vid.graphicsData)) {
+			vid.graphicsData = m_vids[*referenceNvid].graphicsData;
+			if (!std::holds_alternative<Vid::Graphics>(vid.graphicsData)) {
+				throw std::logic_error("GameResources: some Vids are not linked with graphics");
+			}
+		}
+	});
+
+	m_vidRefs = m_vids | std::views::transform([this](const Vid& vid) { return VidRef{*this, &vid}; }) | std::ranges::to<std::vector>();
+
+	navigator.visitSectionsOfType(SectionType::TilesTable, [&](const Section& section, BinaryStreamReader reader) {
+		m_adjacencyData = getAdjacencyData(section, reader);
+		m_baseTilesVids = std::views::iota(0, std::min<int>(m_adjacencyData().extent(0), m_adjacencyData().extent(1)))
+		| std::views::transform([this](int i) {
+			auto nvid = std::abs(m_adjacencyData()[i, i]);
+			return nvid > 0 ? getVid(nvid) : VidRef{};
+		})
+		| std::ranges::to<std::vector>();
+	});
+
+	navigator.visitSectionsOfType(SectionType::Sound, [this](const Section& section, BinaryStreamReader reader) {
+		m_sounds = getSounds(section, reader);
+	});
+
+	navigator.visitSectionsOfType(SectionType::Weapon, [&](const Section& section, BinaryStreamReader reader) {
+		m_weapons = getWeapons(section, reader);
+	});
+
+	m_substrateTilesVids.push_back( VidRef{} );
+	m_substrateTilesVids.append_range(m_vidRefs | std::views::filter([this](const Vid& vid) { return vid.type == ObjectClass::Terrain && vid.z_layer == 0; }));
+}
+
+VidRef::VidRef(const GameResources& resources, const Vid* vid)
+: m_vid{vid}
+, m_parent{&resources}
+{
+	assert(std::greater_equal<>{}(vid, resources.vids().data()) && std::less<>{}(vid, resources.vids().data() + resources.vids().size()));
+}
+
+const GameResources & VidRef::parent() const {
+	if (!m_parent) [[unlikely]] {
+		throw std::logic_error("this VidRef is not bound to GameResources instance");
+	}
+
+	return *m_parent;
+}
+
+std::uint16_t VidRef::nvid() const {
+	if (m_vid == &nullVid) [[unlikely]] {
+		throw std::logic_error("Null VidRef does not have a valid index");
+	}
+
+	auto distance = std::distance(parent().vids().data(), m_vid);
+	assert(distance < std::numeric_limits<std::uint16_t>::max());
+	return static_cast<std::uint16_t>(distance);
+}

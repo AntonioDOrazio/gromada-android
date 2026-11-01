@@ -1,0 +1,200 @@
+#include <cstdint>
+#include <cassert>
+
+
+#include "core/std.hpp"
+#include "core/utils.hpp"
+#include "libgromada/resource_reader.hpp"
+
+
+// Implementation
+GameObject::Payload readObjectPayload(MapVersion mapVersion, ObjectClass behavior, BinaryStreamReader& reader) {
+    GameObject::Payload result = getPayloadPrototype(behavior);
+	std::visit( overloaded {
+		[](Payloads::VisualObject&) {},
+		[&reader](Payloads::MaterialObject& payload) {
+			payload.hp = reader.read<std::uint8_t>();
+		},
+		[&](Payloads::AssetObject& payload) {
+			payload.hp = reader.read<std::uint8_t>();
+			if (std::to_underlying(mapVersion) > 2) {
+				payload.buildTime = reader.read<std::uint8_t>();
+			}
+
+			if (std::to_underlying(mapVersion) > 1) {
+				payload.army = reader.read<std::uint8_t>();
+			}
+
+			payload.behave = reader.read<std::uint8_t>();
+
+			if (std::to_underlying(mapVersion) == 0)
+				return;
+
+			for (std::int16_t itemId = 0; itemId = reader.read<std::int16_t>(), itemId >= 0;) {
+				payload.items.push_back(itemId);
+			}
+		}
+	}, result);
+
+    return result;
+}
+
+MapHeaderRawData loadMapInfo(GromadaResourceNavigator& resourceNavigator) {
+    MapHeaderRawData result;
+	auto readMapHeader = [&](const Section& _, BinaryStreamReader reader) {
+		reader.read_to(result.width);
+		reader.read_to(result.height);
+		reader.read_to(result.observerX);
+		reader.read_to(result.observerY);
+		reader.read_to(result.scaleX);
+		reader.read_to(result.scaleY);
+		reader.read_to(result.startTimer);
+		if (reader.size() < 28) {
+			result.mapVersion = MapVersion::V0;
+			return result;
+		}
+		reader.read_to(result.mapVersion);
+
+		return result;
+	};
+
+    const auto numSections = resourceNavigator.visitSectionsOfType(SectionType::MapInfo, readMapHeader);
+    if (numSections != 1)
+        throw std::runtime_error("Invalid map: should be exactly one map info section");
+
+	return result;
+}
+
+//TODO: use output iterator
+void readDynamicObjectsSection(std::vector<GameObject>& result, MapVersion mapVersion, std::span<const Vid> vids, BinaryStreamReader reader) {
+	for (std::uint16_t nvid = 0; nvid = reader.read<std::uint16_t>(), nvid != 0xFFFF;) {
+        if (nvid < 0 || nvid >= vids.size()) [[unlikely]]
+	        throw std::runtime_error("Map's object nvid is out of range");
+
+		const auto position = reader.read<std::array<std::int16_t, 3>>();
+		const auto [direction, action] = reader.read<std::array<std::uint8_t, 2>>();
+
+	    assert(action == 0 && "not an error, but seems it should not happen with original game's maps");
+		result.push_back({
+			.nvid = nvid,
+			.x = position[0],
+			.y = position[1],
+			.z = position[2],
+			.direction = direction,
+		    .action = action,
+			.payload = readObjectPayload(mapVersion, vids[nvid].type, reader),
+		});
+	}
+}
+
+void readObjectIdsSection(std::vector<std::uint32_t>& objectIds, BinaryStreamReader reader) {
+    const auto count = reader.read<std::uint32_t>();
+
+    objectIds.resize(objectIds.size() + count);
+    reader.read_to(std::as_writable_bytes(std::span{objectIds}.subspan(objectIds.size() - count)));
+}
+
+void readCommandsSection(std::span<const std::uint32_t> objectIds, std::span<GameObject> objects, BinaryStreamReader reader) {
+    //const std::map<std::uint32_t, std::size_t>& objectsLookup,
+    auto lookupSubject = [&](std::uint32_t subjectId) -> GameObject& {
+        const auto it = std::ranges::find(objectIds, subjectId);
+        if (it == objectIds.end()) [[unlikely]]
+            throw std::out_of_range("Invalid object id");
+
+        return objects[std::distance(objectIds.begin(), it)];
+    };
+
+    for (std::uint32_t subjectId; subjectId = reader.read<std::uint32_t>(); ) {
+        auto* pAssetPayload = std::get_if<Payloads::AssetObject>(&lookupSubject(subjectId).payload);
+    	if (!pAssetPayload)
+    		continue;
+
+        const auto count = reader.read<std::int32_t>();
+        pAssetPayload->commands.reserve(count);
+        for (int i = 0; i < count; i++) {
+            pAssetPayload->commands.push_back(ObjectCommand {
+                .command = Action{reader.read<std::uint8_t>()},
+                .p1 =  reader.read<std::uint32_t>(),
+                .p2 =  reader.read<std::uint32_t>(),
+            });
+        }
+    }
+}
+
+std::array<Army, 2> loadArmies(GromadaResourceNavigator& resourceNavigator) {
+    std::array<Army, 2> armies;
+    std::size_t numOfSections = resourceNavigator.visitSectionsOfType(
+        SectionType::Army , [&](const Section& _, BinaryStreamReader reader) {
+        	// NOTE: original game supports random count, but reads only first 2 armies. We pin it just because all of the original maps have exactly 2 armies
+            if(reader.read<std::uint8_t>() != 2)
+                throw std::runtime_error("Invalid map: should be exactly 2 armies");
+
+            for (auto& army : armies) {
+                reader.read_to(army.a);
+                reader.read_to(army.b);
+                reader.read_to(army.c);
+                reader.read_to(army.flagman_id);
+
+                for (std::uint32_t id = 0; id = reader.read<std::uint32_t>(), id != 0;) {
+                    auto& squad = army.squads.emplace_back();
+                    squad.push_back(id);
+                    for (std::uint32_t memberId = 0; memberId = reader.read<std::uint32_t>(), memberId != 0;) {
+                        squad.push_back(memberId);
+                    }
+                }
+            }
+        });
+
+    if (numOfSections != 1) {
+        throw std::runtime_error("Invalid map: should be exactly one army section");
+    }
+
+    return armies;
+}
+
+std::vector<GameObject> loadDynamicObjects(MapVersion mapVersion, std::span<const Vid> vids, GromadaResourceNavigator& resourceNavigator) {
+	std::vector<GameObject> result;
+	resourceNavigator.visitSectionsOfType(
+		SectionType::Objects, [&](const Section& _, BinaryStreamReader reader) { readDynamicObjectsSection(result, mapVersion, vids, reader); });
+
+	std::vector<std::uint32_t> objectIds;
+	resourceNavigator.visitSectionsOfType(
+		SectionType::ObjectsIds, [&](const Section& _, BinaryStreamReader reader) { readObjectIdsSection(objectIds, reader); });
+
+	if (result.size() != objectIds.size())
+		throw std::runtime_error("Map is probably corrupted: ids not matches to objects");
+
+	// linking the objects with their respecive IDs
+	for (std::size_t i = 0; i < result.size(); ++i) {
+		result[i].id = objectIds[i];
+	}
+
+	resourceNavigator.visitSectionsOfType(
+		SectionType::Command, [&](const Section& _, BinaryStreamReader reader) { readCommandsSection(objectIds, std::span{result}, reader); });
+
+	return result;
+}
+
+Map loadMap(std::span<const Vid> vids, const std::filesystem::path& path) {
+	GromadaResourceNavigator resourceNavigator{GromadaResourceReader{path}};
+
+	auto header = loadMapInfo(resourceNavigator);
+
+	return Map{
+		.header = header,
+		.objects = loadDynamicObjects(header.mapVersion, vids, resourceNavigator),
+	    .armies = loadArmies(resourceNavigator),
+	};
+}
+
+std::vector<GameObject> loadMenu(std::span<const Vid> vids, std::istream&& stream) {
+	std::vector<GameObject> result;
+	stream.seekg(4, std::ios::beg);
+	BinaryStreamReader reader{stream};
+
+	for (int i = 0; i < 16; ++i) {
+		readDynamicObjectsSection(result, MapVersion::V0, vids, reader);
+	}
+
+	return result;
+}

@@ -1,0 +1,5 @@
+build*/
+tools/harness
+tools/smoke
+*.ppm
+*.png

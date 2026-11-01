@@ -1,0 +1,33 @@
+# Software Information
+display_name = "Gromada (Buka)"
+authors = "Gromada core contributors"
+supported_extensions = "exe|res"
+corename = "Gromada"
+categories = "Game"
+license = "MIT"
+permissions = ""
+display_version = "0.1.0-m1"
+
+# Hardware Information
+manufacturer = "Buka Entertainment"
+systemname = "Gromada Game Engine"
+systemid = "gromada"
+
+# Libretro Features
+database = "Gromada"
+supports_no_game = "false"
+savestate = "false"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "true"
+core_options_version = "1.0"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "true"
+disk_control = "false"
+is_experimental = "true"
+
+notes = "Reimplementazione del motore di Gromada (Buka, 1999). Richiede i file del gioco originale: avvia gromada.exe o fw.res dalla cartella del gioco (deve contenere fw.res e la cartella maps)."
+description = "Core libretro che reimplementa il motore di Gromada leggendo i dati originali del gioco."

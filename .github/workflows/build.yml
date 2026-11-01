@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (NDK, arm64-v8a)
+        run: |
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-android
+      - name: Strip
+        run: |
+          "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
+            build-android/gromada_libretro_android.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gromada_libretro_android-arm64-v8a
+          path: |
+            build-android/gromada_libretro_android.so
+            gromada_libretro.info
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + libc++
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev ninja-build
+      - name: Build
+        run: |
+          CXX=clang++-18 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gromada_libretro-linux-x86_64
+          path: build/gromada_libretro.so

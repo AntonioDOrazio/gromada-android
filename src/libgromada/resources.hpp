@@ -1,0 +1,360 @@
+#pragma once
+#include <cassert>
+
+
+#include "libgromada/actions.hpp"
+#include "libgromada/resource_reader.hpp"
+#include "core/std.hpp"
+#include "core/utils.hpp"
+#include "core/cp866.hpp"
+
+enum class ObjectCategory : std::uint8_t {
+	Terrain = 0x1,
+	Object = 0x2,
+	Vehicle = 0x4,
+	Avia = 0x8,
+	Cannon = 0x10,
+	Sprite = 0x20,
+	Item = 0x40,
+};
+
+enum class ObjectClass : std::uint8_t {
+	Terrain = 0,
+	Static = 1,
+	Vehicle = 2,
+	Building = 3,
+	AviaVehicle = 4,
+	Projectile = 5,
+	CannonMissile = 6,
+	DownedAviaVehicle = 7,
+	NA = 8,
+	Superstructure = 9,
+	Image = 10,
+	Effect1 = 11,
+	Effect2 = 12,
+	Mine = 13,
+	Shell = 14,
+	AviaMissile = 15,
+	Debris = 16,
+	Kassandra = 17,
+	Bonus = 18,
+	Font = 19,
+	RepairCannon = 20,
+
+	Unknown = 0xFF,
+};
+
+enum class ObjectFlags : std::uint16_t {
+     RandomDirection = 0x1,
+     Gravity = 0x2,
+     Calltact = 0x4,
+     SkipUpdate = 0x8,
+     SpawnChildren = 0x10,
+     NoCollision = 0x20,
+     PresentOnGrid = 0x40,
+     Shadow = 0x80,
+     Randomized = 0x100,
+     ZeroZ = 0x200,
+     InvisibleSubobjects = 0x400,
+     IgnoreGlobalGamma = 0x800,
+     Wind = 0x1000,
+     SkipMapEditor = 0x2000,
+     CrushOnCollision = 0x4000,
+};
+
+constexpr std::string to_string(ObjectCategory category);
+constexpr std::string to_string(ObjectClass objectClass);
+constexpr std::string to_string(ObjectFlags flag);
+
+struct ColorRgb8 {
+	std::uint8_t r;
+	std::uint8_t g;
+	std::uint8_t b;
+};
+static_assert(sizeof(ColorRgb8) == 3);
+
+struct VidGraphics {
+    VidGraphics() = default;
+    explicit VidGraphics(BinaryStreamReader& reader);
+
+	std::uint8_t dataFormat;
+	std::uint16_t frameDuration;
+	std::uint16_t numOfFrames;
+	std::uint32_t dataSize;
+	std::uint16_t width;
+	std::uint16_t height;
+
+	std::array<ColorRgb8, 256> palette;
+	std::vector<std::byte> data;
+
+	struct Frame {
+		std::span<const std::byte> data;
+	    const VidGraphics* parent;
+
+	    SpanStreamReader read() const noexcept {return data; }
+	    [[nodiscard]] int width() const noexcept { return parent->width; }
+	    [[nodiscard]] int height() const noexcept { return parent->height; }
+	};
+	std::vector<Frame> frames;
+};
+
+struct Vid {
+    Vid() = default;
+    explicit Vid (BinaryStreamReader reader);
+
+	std::array<char, 34> name {0}; // In CP-866
+	ObjectCategory category {};
+	ObjectClass type {ObjectClass::Unknown};
+	ObjectFlags flags {};
+
+	std::uint8_t collisionMask {};
+	std::uint16_t sizeX {};
+	std::uint16_t sizeY {};
+	std::uint16_t sizeZ {};
+	std::uint8_t maxHP {};
+	std::uint16_t visibilityRadius {};
+	std::uint8_t unused1 {};
+
+	std::uint16_t speedX {};
+	std::uint16_t speedY {};
+	std::uint16_t acceleration {};
+	std::uint8_t rotationPeriod {};
+
+	std::uint8_t army {};
+	std::uint8_t someWeaponIndex {};
+	std::uint8_t unused2 {};
+	std::uint16_t deathDamageRadius {};
+	std::uint8_t deathDamage {};
+
+	std::int8_t linkX {};
+	std::int8_t linkY {};
+	std::int8_t linkZ {};
+	std::uint16_t linkedObjectVid {};
+
+	std::uint16_t unused3 {};
+	std::uint8_t directionsCount {};
+	std::uint8_t z_layer {};
+
+	std::array<std::uint8_t, 16> animationLengths {};
+    std::array<std::uint16_t, 16> nsfx {};
+    std::array<std::array<std::int16_t, 16>, 3> childrenOffsets {};
+	std::array<std::int16_t, 16> childNvid {};
+	std::array<std::uint8_t, 16> childrenCount {};
+
+	std::int32_t dataSizeOrNvid {}; // if < 0 then it's nvid
+
+	using Graphics = std::shared_ptr<VidGraphics>;
+	std::variant<std::int32_t, Graphics> graphicsData;
+
+	//
+	[[nodiscard]] std::string getName() const { return cp866_to_utf8(std::string_view{name.data()}); }
+    const VidGraphics& graphics() const {
+        const auto* graphics = std::get_if<Vid::Graphics>(&graphicsData);
+        if (!graphics || !graphics->get())
+            throw std::logic_error("Missing graphics");
+
+        return **graphics;
+    }
+};
+
+struct AdjacencyData {
+    std::vector<std::int16_t> data;
+
+	using MatrixType = std::mdspan<const std::int16_t, std::extents<std::size_t, std::dynamic_extent, 16>>;
+    MatrixType operator()() const  {
+        return std::mdspan{data.data(), std::extents<std::size_t, std::dynamic_extent, 16>{data.size() / 16}};
+    }
+};
+
+AdjacencyData getAdjacencyData(const Section& section, BinaryStreamReader reader);
+
+struct Weapon {
+	ObjectCategory targetCategory;
+	std::uint8_t flags;
+	std::uint16_t alwaysZero;
+	std::uint16_t weaponRange;
+	std::uint8_t scatter;
+	std::uint16_t cooldown;
+};
+
+std::vector<Weapon> getWeapons(const Section& section, BinaryStreamReader reader);
+
+
+// Implementation
+Vid::Vid(BinaryStreamReader reader)
+{
+	reader.read_to(name);
+	reader.read_to(category);
+	reader.read_to(type);
+	reader.read_to(flags);
+
+	reader.read_to(collisionMask);
+	reader.read_to(sizeX);
+	reader.read_to(sizeY);
+	reader.read_to(sizeZ);
+	reader.read_to(maxHP);
+	reader.read_to(visibilityRadius);
+	reader.read_to(unused1);
+
+	reader.read_to(speedX);
+	reader.read_to(speedY);
+	reader.read_to(acceleration);
+	reader.read_to(rotationPeriod);
+
+	reader.read_to(army);
+	reader.read_to(someWeaponIndex);
+	reader.read_to(unused2);
+	reader.read_to(deathDamageRadius);
+	reader.read_to(deathDamage);
+
+	reader.read_to(linkX);
+	reader.read_to(linkY);
+	reader.read_to(linkZ);
+	reader.read_to(linkedObjectVid);
+
+	reader.read_to(unused3);
+	reader.read_to(directionsCount);
+	reader.read_to(z_layer);
+
+	reader.read_to(animationLengths);
+	reader.read_to(nsfx);
+	reader.read_to(childrenOffsets);
+	reader.read_to(childNvid);
+	reader.read_to(childrenCount);
+
+	reader.read_to(dataSizeOrNvid);
+
+	if (dataSizeOrNvid < 0) {
+		graphicsData = std::int32_t{-dataSizeOrNvid};
+	} else {
+		graphicsData = std::make_shared<VidGraphics>(reader);
+	}
+}
+
+VidGraphics::VidGraphics(BinaryStreamReader& reader) {
+	reader.read_to(dataFormat);
+	reader.read_to(frameDuration);
+	reader.read_to(numOfFrames);
+	reader.read_to(dataSize);
+	reader.read_to(width);
+	reader.read_to(height);
+
+	data.resize(dataSize - sizeof(palette));
+	reader.read_to(palette);
+	
+	frames.resize(numOfFrames);
+	reader.read_to(std::span{ data });
+
+	SpanStreamReader frameDataReader{data};
+	for (std::size_t i = 0; i < frames.size(); ++i) {
+		const auto payloadSize = frameDataReader.read<std::uint32_t>() - 2;
+		const auto referenceFrameNumber = frameDataReader.read<std::uint16_t>();
+
+	    if (referenceFrameNumber == 0xFFFF) {
+	        frames[i] = {
+	            .data = frameDataReader.read_bytes(payloadSize),
+                .parent = this,
+            };
+	    } else {
+	        frames[i] = frames.at(referenceFrameNumber);
+	    }
+	}
+}
+
+AdjacencyData getAdjacencyData(const Section& section, BinaryStreamReader reader) {
+    if(section.header().type != SectionType::TilesTable)
+        throw std::logic_error("Trying to get adjacency data with invalid section");
+
+    AdjacencyData adjacencyData;
+    adjacencyData.data.resize(section.header().elementCount * 16);
+    reader.read_to(std::as_writable_bytes(std::span{adjacencyData.data}));
+
+    return adjacencyData;
+}
+
+std::vector<Weapon> getWeapons(const Section& section, BinaryStreamReader reader) {
+	if(section.header().type != SectionType::Weapon)
+		throw std::logic_error("Trying to get weapons with invalid section");
+
+	std::vector<Weapon> weapons(section.header().elementCount);
+	for (auto& weapon : weapons) {
+		reader.read_to(weapon.targetCategory);
+		reader.read_to(weapon.flags);
+		reader.read_to(weapon.alwaysZero);
+		reader.read_to(weapon.weaponRange);
+		reader.read_to(weapon.scatter);
+		reader.read_to(weapon.cooldown);
+	}
+
+	return weapons;
+}
+
+// to_string... until we finally have reflection in C++29
+
+constexpr std::string to_string(ObjectCategory category) {
+	using enum ObjectCategory;
+	switch (category) {
+		case Terrain: return "Terrain";
+		case Object: return "Object";
+		case Vehicle: return "Vehicle";
+		case Avia: return "Avia";
+		case Cannon: return "Cannon";
+		case Sprite: return "Sprite";
+		case Item: return "Item";
+		default:
+			return "Unknown";
+	}
+}
+
+constexpr std::string to_string(ObjectClass objectClass) {
+	using enum ObjectClass;
+	switch (objectClass) {
+		case Terrain: return "Terrain";
+		case Static: return "Static";
+		case Vehicle: return "Vehicle";
+		case Building: return "Building";
+		case AviaVehicle: return "AviaVehicle";
+		case Projectile: return "Projectile";
+		case CannonMissile: return "CannonMissile";
+		case DownedAviaVehicle: return "DownedAviaVehicle";
+		case NA: return "N/A";
+		case Superstructure: return "Superstructure";
+		case Image: return "Image";
+		case Effect1: return "Effect1";
+		case Effect2: return "Effect2";
+		case Mine: return "Mine";
+		case Shell: return "Shell";
+		case AviaMissile: return "AviaMissile";
+		case Debris: return "Debris";
+		case Kassandra: return "Kassandra";
+		case Bonus: return "Bonus";
+		case Font: return "Font";
+		case RepairCannon: return "RepairCannon";
+
+		default:
+			return "Unknown";
+	}
+}
+
+constexpr std::string to_string(ObjectFlags flag) {
+	using enum ObjectFlags;
+	switch (flag) {
+		case RandomDirection: return "RandomDirection";
+		case Gravity: return "Gravity";
+		case Calltact: return "Calltact";
+		case SkipUpdate: return "SkipUpdate";
+		case SpawnChildren: return "SpawnChildren";
+		case NoCollision: return "NoCollision";
+		case PresentOnGrid: return "PresentOnGrid";
+		case Shadow: return "Shadow";
+		case Randomized: return "Randomized";
+		case ZeroZ: return "???1";
+		case InvisibleSubobjects: return "InvisibleSubobjects";
+		case IgnoreGlobalGamma: return "IgnoreGlobalGamma";
+		case Wind: return "Wind";
+		case SkipMapEditor: return "???2";
+		case CrushOnCollision: return "CrushOnCollision";
+		default:
+			return "Unknown";
+	}
+}
