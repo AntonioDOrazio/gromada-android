@@ -74,6 +74,9 @@ in selezione (`PcState::textCandidate`). Con una tastiera fisica si scrive diret
 Su entrambi: in RetroArch lasciare *Tipo da analogico a digitale* = **Nessuno** per la
 porta 1 (altrimenti lo stick sinistro preme anche il d-pad) e nascondere l'overlay a schermo
 (*Nascondi overlay se è collegato un controller*), che altrimenti intercetta i tocchi.
+Con un mouse collegato scegliere *Touchscreen e mouse* = **Solo mouse**: RetroArch può
+riportare il mouse anche come puntatore, e con i gesti touch tenere fermo il tasto sinistro
+per 0,45 s diventerebbe un click destro.
 
 ## Motivazioni
 
