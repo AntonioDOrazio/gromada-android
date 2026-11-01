@@ -60,5 +60,6 @@ e `gromada_libretro.info` nella cartella info.
   non è ancora utilizzabile con l'NDK. Gli header contengono le implementazioni:
   il core è compilato come singola unità di traduzione.
 - `src/engine`: livello runtime, renderer e mixer audio.
+- `src/script`: interprete degli script `.INI` del gioco (vedi `docs/script-language.md`).
 - `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT).
 - `src/gromada_libretro.cpp`: API libretro.
