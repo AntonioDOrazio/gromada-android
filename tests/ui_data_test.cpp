@@ -116,6 +116,8 @@ int main() {
         CHECK_EQ(defines.at("V_SCREEN"), std::to_string(vids::Screen));
         CHECK_EQ(defines.at("V_CHOICEMAP"), std::to_string(vids::ChoiceMap));
         CHECK_EQ(defines.at("V_WINNEDMAP"), std::to_string(vids::WinnedMap));
+        CHECK_EQ(defines.at("V_YOURLOSE"), std::to_string(vids::YourLose));
+        CHECK_EQ(defines.at("V_YOURWIN"), std::to_string(vids::YourWin));
         CHECK_EQ(defines.at("act_settextcount"), std::string{"32"});
     }
     // Script paths resolve case-insensitively (the files are NN.TXT, scripts say nn.txt).
