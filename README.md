@@ -42,7 +42,7 @@ Android arm64 (NDK r27+):
       -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static
     cmake --build build-android
 
-Il workflow `.github/workflows/build.yml` produce automaticamente `gromada_libretro_android.so`.
+Il workflow `.github/workflows/build.yml` compila il core a ogni push e pubblica `gromada_libretro_android.so` nella release **nightly**: https://github.com/AntonioDOrazio/gromada-android/releases/tag/nightly
 
 Su Android copia il `.so` nella cartella dei core di RetroArch (o usa *Installa core* dal menu)
 e `gromada_libretro.info` nella cartella info.
