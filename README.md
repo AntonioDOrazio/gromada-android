@@ -18,15 +18,23 @@ Il core **non contiene asset del gioco**: legge i file della tua copia originale
     letta dal suo script (`PlayMusic(m1,m2,m3,m4)`), ciclata come nel gioco originale.
 
 ## Preparare i file del gioco
-Serve la cartella installata del gioco con `fw.res` e `maps/`. In RetroArch carica come contenuto
-`gromada.exe` (o `fw.res`) da quella cartella.
+**Su Android** usa l'app **Gromada Installer** (`gromada-installer.apk` nella release
+[nightly](https://github.com/AntonioDOrazio/gromada-android/releases/tag/nightly)): dall'immagine
+del CD (`.cue` + `.bin`) estrae il gioco e la colonna sonora in FLAC, scarica il core, lo installa
+in RetroArch, crea la playlist e lo tiene aggiornato. Dettagli e limiti di RetroArch su Android:
+[docs/installer.md](docs/installer.md). Sul desktop la stessa logica è in `gromada-extract.jar`:
 
-La colonna sonora è su CD Audio, quindi non viene installata: estrai le tracce 2–12 del CD
-in `music/track02.ogg` … `music/track12.ogg` dentro la cartella del gioco. Con un'immagine
-`.bin/.cue`, per esempio:
+    java -jar gromada-extract.jar GROMADA.cue cartella-del-gioco [--bin GROMADA.bin]
+
+A mano: serve la cartella installata del gioco con `fw.res` e `maps/`. In RetroArch carica come
+contenuto `gromada.exe` (o `fw.res`) da quella cartella.
+
+La colonna sonora è su CD Audio, quindi l'installer originale non la copia: le tracce 2–12 del CD
+vanno in `music/track02.flac` … `music/track12.flac` dentro la cartella del gioco (formati letti,
+in quest'ordine: `.flac`, `.ogg`, `.wav`). Con un'immagine `.bin/.cue`, per esempio:
 
     # traccia N dal cue: tempi di inizio/fine in settori, 2352 byte per settore
-    ffmpeg -f s16le -ar 44100 -ac 2 -ss <inizio_s> -t <durata_s> -i GROMADA.bin -c:a libvorbis -q:a 6 track02.ogg
+    ffmpeg -f s16le -ar 44100 -ac 2 -ss <inizio_s> -t <durata_s> -i GROMADA.bin track02.flac
 
 Senza questi file il gioco funziona lo stesso, solo senza musica.
 
@@ -44,8 +52,11 @@ Android arm64 (NDK r27+):
 
 Il workflow `.github/workflows/build.yml` compila il core a ogni push e pubblica `gromada_libretro_android.so` nella release **nightly**: https://github.com/AntonioDOrazio/gromada-android/releases/tag/nightly
 
-Su Android copia il `.so` nella cartella dei core di RetroArch (o usa *Installa core* dal menu)
-e `gromada_libretro.info` nella cartella info.
+Su Android l'installer installa il core in RetroArch; a mano: *Carica core → Installa o
+ripristina un core* e scegli il `.so`.
+
+L'APK dell'installer (`android/installer`, Gradle) si compila con l'Android SDK:
+`cd android/installer && ./gradlew :common:test :app:assembleRelease`.
 
 ## Test senza RetroArch
 
@@ -60,5 +71,7 @@ e `gromada_libretro.info` nella cartella info.
   non è ancora utilizzabile con l'NDK. Gli header contengono le implementazioni:
   il core è compilato come singola unità di traduzione.
 - `src/engine`: livello runtime, renderer e mixer audio.
-- `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT).
+- `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT);
+  `dr_flac.h`, `dr_wav.h`: decoder FLAC e WAV (pubblico dominio / MIT-0).
+- `android/installer`: app Android di installazione e CLI desktop (Kotlin), vedi `docs/installer.md`.
 - `src/gromada_libretro.cpp`: API libretro.

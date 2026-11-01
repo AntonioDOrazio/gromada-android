@@ -1,0 +1,59 @@
+name: installer-e2e
+
+# Emulator test of the installer against the real RetroArch website build: core sideload
+# through CoreSideloadActivity, launch extras, playlist (android/installer/e2e/run.sh).
+on:
+  push:
+    paths:
+      - 'android/installer/**'
+      - '.github/workflows/installer-e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RETROARCH_VERSION: 1.22.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Core for the emulator ABI (x86_64)
+        run: |
+          cmake -S . -B build-x86_64 -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-x86_64
+      - name: Download RetroArch (website build, AArch64 APK with x86_64 libraries)
+        run: |
+          url="https://buildbot.libretro.com/stable/$RETROARCH_VERSION/android/RetroArch_aarch64.apk"
+          curl -fL --retry 3 -o RetroArch_aarch64.apk "$url" || {
+            curl -sL "https://buildbot.libretro.com/stable/$RETROARCH_VERSION/android/" | grep -o 'href="[^"]*apk"' ; exit 1; }
+          ls -l RetroArch_aarch64.apk
+      - name: Build app and test APKs
+        working-directory: android/installer
+        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          working-directory: android/installer
+          script: RA_APK=$GITHUB_WORKSPACE/RetroArch_aarch64.apk CORE_SO=$GITHUB_WORKSPACE/build-x86_64/gromada_libretro_android.so OUT=$GITHUB_WORKSPACE/e2e-out bash e2e/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-e2e
+          path: e2e-out

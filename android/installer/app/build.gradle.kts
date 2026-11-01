@@ -21,6 +21,8 @@ android {
         versionName = "0.1.$buildNumber-${gitCommit.take(7)}"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         buildConfigField("String", "DEFAULT_REPO", "\"AntonioDOrazio/gromada-android\"")
+        // Emulator end-to-end test with the real RetroArch (e2e/run.sh, installer-e2e.yml).
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures { buildConfig = true }
@@ -53,6 +55,8 @@ android {
         // Sideloaded tool: all-files access is intended (see docs/installer.md).
         disable += setOf("ScopedStorage", "QueryAllPackagesPermission")
         abortOnError = true
+        textReport = true
+        textOutput = file("stdout")
     }
 }
 
@@ -62,4 +66,7 @@ kotlin {
 
 dependencies {
     implementation(project(":common"))
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
