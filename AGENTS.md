@@ -3,7 +3,7 @@
 ## Il progetto
 Core libretro che **reimplementa** il motore di Gromada (Buka, 1999) leggendo i dati originali.
 Target: Android (Retroid Pocket Nova 4:3 120 Hz, Flip 2 16:9 60 Hz) con RetroArch in Vulkan e shader slang.
-Roadmap e scoperte: `README.md`, `docs/`.
+Roadmap e scoperte: `README.md`, `docs/`. Architettura del gioco e contratto tra i moduli: `docs/architecture.md`.
 
 ## Regole sui dati del gioco
 - **Mai** committare file del gioco (fw.res, mappe, script `.INI`, `.men`, testi, video, musica, exe),
