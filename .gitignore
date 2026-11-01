@@ -3,3 +3,4 @@ tools/harness
 tools/smoke
 *.ppm
 *.png
+__pycache__/
