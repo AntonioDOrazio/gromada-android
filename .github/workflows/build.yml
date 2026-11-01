@@ -52,7 +52,14 @@ jobs:
       - name: Test extraction logic (JVM)
         run: ./gradlew --no-daemon :common:test :common:cliJar
       - name: Build APK
-        run: ./gradlew --no-daemon :app:assembleRelease :app:lintRelease
+        run: |
+          ./gradlew --no-daemon :app:assembleRelease :app:lintRelease
+          cat app/build/reports/lint-results.txt
+      - name: Inspect APK
+        run: |
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/aapt2" dump badging app/build/outputs/apk/release/app-release.apk | grep -E "^package|sdkVersion|uses-permission|launchable"
+          "$bt/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | head -3
       - name: Collect
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"

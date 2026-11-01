@@ -67,8 +67,16 @@ object RetroArch {
     /** Default playlist folder of the website builds when internal storage is writable. */
     fun defaultPlaylistDir(storageRoot: String) = "$storageRoot/RetroArch/playlists"
 
-    /** Extras for CoreSideloadActivity: copy [coreFile] into RetroArch's cores folder. */
-    fun sideloadExtras(coreFile: String) = mapOf("LIBRETRO" to coreFile)
+    /**
+     * Extras for CoreSideloadActivity: copy [coreFile] into RetroArch's cores folder, then
+     * start it (with [content], if given). Released versions (1.17-1.22.x) start RetroArch
+     * like its launcher does (user's retroarch.cfg); current master starts it with only
+     * ROM and LIBRETRO.
+     */
+    fun sideloadExtras(coreFile: String, content: String? = null) = buildMap {
+        put("LIBRETRO", coreFile)
+        if (content != null) put("ROM", content)
+    }
 
     /**
      * Extras to start [content] with the Gromada core, identical to what RetroArch's own

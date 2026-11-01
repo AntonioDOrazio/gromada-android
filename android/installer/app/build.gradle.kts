@@ -56,7 +56,7 @@ android {
         disable += setOf("ScopedStorage", "QueryAllPackagesPermission")
         abortOnError = true
         textReport = true
-        textOutput = file("stdout")
+        textOutput = file("build/reports/lint-results.txt")
     }
 }
 

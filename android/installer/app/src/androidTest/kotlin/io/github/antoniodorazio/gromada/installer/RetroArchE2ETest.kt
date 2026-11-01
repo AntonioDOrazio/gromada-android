@@ -52,19 +52,26 @@ class RetroArchE2ETest {
         assertTrue(file.length() > 0)
     }
 
+    // e2e/run.sh runs c, d and e one by one, stopping RetroArch before c and d.
+
     @Test
-    fun c_sideloadsCoreThroughRetroArch() {
+    fun c_sideloadsCoreAndStartsGame() {
         val ra = retroArch()
         val core = File(dir, "core/${RetroArch.CORE_FILE}")
         assertTrue("missing $core", core.isFile)
         ActivityScenario.launch(MainActivity::class.java).use { s ->
-            s.onActivity { Platform.sideloadCore(it, ra, core) }
+            s.onActivity { Platform.sideloadCore(it, ra, core, File(dir, "gromada.exe")) }
             Thread.sleep(15_000) // RetroArch copies the core, then starts with it
         }
     }
 
     @Test
-    fun d_launchesGame() {
+    fun d_launchesGame() = launch()
+
+    @Test
+    fun e_launchesGameWhileRetroArchRuns() = launch()
+
+    private fun launch() {
         val ra = retroArch()
         ActivityScenario.launch(MainActivity::class.java).use { s ->
             s.onActivity { Platform.launchGame(it, ra, File(dir, "gromada.exe")) }

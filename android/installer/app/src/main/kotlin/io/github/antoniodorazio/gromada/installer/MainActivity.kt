@@ -231,7 +231,9 @@ class MainActivity : Activity() {
                 }
                 if (uris.isEmpty()) return
                 val target = gameDir
-                if (target.exists() && target.listFiles()?.isNotEmpty() == true && !GameExtractor.isGameFolder(target)) {
+                // Refuse to mix the game into an unrelated folder (our own core/ subfolder is fine).
+                val foreign = target.listFiles()?.filter { it.name != "core" && it.name != GameExtractor.MANIFEST }.orEmpty()
+                if (foreign.isNotEmpty() && !GameExtractor.isGameFolder(target)) {
                     return toast("La cartella $target esiste e non è vuota: scegli una cartella vuota o la cartella del gioco.")
                 }
                 appendLog("Estrazione in $target")

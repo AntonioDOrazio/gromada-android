@@ -30,13 +30,25 @@ adb shell "echo fake > /sdcard/GromadaE2E/gromada.exe"
 # Install the app under test first so that all-files access can be granted.
 ./gradlew --no-daemon :app:installDebug :app:installDebugAndroidTest
 adb shell appops set "$APP" MANAGE_EXTERNAL_STORAGE allow
-adb logcat -c
-adb shell am instrument -w -r -e class "$APP.RetroArchE2ETest" "$APP.test/androidx.test.runner.AndroidJUnitRunner" | tee "$OUT/instrument.txt"
-adb logcat -d > "$OUT/logcat.txt"
-grep -q "OK (4 tests)" "$OUT/instrument.txt" || fail "instrumentation tests"
-
-echo "--- RetroArch log lines"
-grep -E "\[ENV\]|Gromada|libretro|CoreSideload|sideload|Core\]|Content\]" "$OUT/logcat.txt" | grep -v "^--------" | tail -80 || true
+T="$APP.RetroArchE2ETest"
+RUNNER="$APP.test/androidx.test.runner.AndroidJUnitRunner"
+# run one test method; its logcat goes to $OUT/<method>.log
+step() {
+  adb logcat -c
+  adb shell am instrument -w -r -e class "$T#$1" "$RUNNER" > "$OUT/$1.txt"
+  sleep 2
+  adb logcat -d > "$OUT/$1.log"
+  grep -q "OK (1 test)" "$OUT/$1.txt" || { cat "$OUT/$1.txt"; fail "$1"; }
+  echo "--- $1: RetroArch/ActivityManager log"
+  grep -E "ActivityTaskManager: START|Start proc .*retroarch|Process .*retroarch.*(died|has died)|sideload|RetroArch: \[ENV\] (Config|Libretro|Auto-start)|RetroArch.*(\[Core\]|\[Content\]|Gromada|fw.res|rror)|AndroidRuntime|FATAL" "$OUT/$1.log" | cut -c1-260 | head -60 || true
+}
+step a_detectsWebsiteBuild
+step b_writesPlaylistWithAllFilesAccess
+adb shell am force-stop "$RA"
+step c_sideloadsCoreAndStartsGame
+adb shell am force-stop "$RA"
+step d_launchesGame
+step e_launchesGameWhileRetroArchRuns
 
 echo "--- core copied into RetroArch's private folder?"
 adb root >/dev/null; sleep 3
@@ -49,12 +61,15 @@ echo "core sideloaded: sha256 $got"
 echo "--- playlist written by the installer"
 adb shell cat /sdcard/RetroArch/playlists/Gromada.lpl | tee "$OUT/Gromada.lpl"
 
-echo "--- launch extras received by RetroArch"
-grep -F "[ENV] Libretro path: \"/data/user/0/$RA/cores/gromada_libretro_android.so\"" "$OUT/logcat.txt" \
-  || fail "RetroArch did not get LIBRETRO"
-grep -F "[ENV] Auto-start game \"/sdcard/GromadaE2E/gromada.exe\"" "$OUT/logcat.txt" \
-  || grep -F "[ENV] Auto-start game \"/storage/emulated/0/GromadaE2E/gromada.exe\"" "$OUT/logcat.txt" \
-  || fail "RetroArch did not get ROM"
-grep -F "[ENV] Config file: \"/storage/emulated/0/Android/data/$RA/files/retroarch.cfg\"" "$OUT/logcat.txt" \
-  || fail "RetroArch did not get CONFIGFILE"
+echo "--- launch extras received by RetroArch (sideload+start, then direct launch)"
+for t in c_sideloadsCoreAndStartsGame d_launchesGame; do
+  grep -F "[ENV] Libretro path: \"/data/user/0/$RA/cores/gromada_libretro_android.so\"" "$OUT/$t.log" \
+    || fail "$t: RetroArch did not get LIBRETRO"
+  grep -F "[ENV] Auto-start game \"/sdcard/GromadaE2E/gromada.exe\"" "$OUT/$t.log" \
+    || fail "$t: RetroArch did not get ROM"
+  grep -F "[ENV] Config file: \"/storage/emulated/0/Android/data/$RA/files/retroarch.cfg\"" "$OUT/$t.log" \
+    || fail "$t: RetroArch did not get CONFIGFILE"
+done
+echo "--- launch while RetroArch is running (informational)"
+grep -cF "[ENV] Auto-start game" "$OUT/e_launchesGameWhileRetroArchRuns.log" || true
 echo "E2E OK"

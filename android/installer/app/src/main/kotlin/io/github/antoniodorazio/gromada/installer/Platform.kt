@@ -86,10 +86,10 @@ object Platform {
     }
 
     /** Asks RetroArch to copy [coreFile] into its private cores folder (CoreSideloadActivity). */
-    fun sideloadCore(ctx: Context, ra: RetroArch.Install, coreFile: File) {
+    fun sideloadCore(ctx: Context, ra: RetroArch.Install, coreFile: File, content: File? = null) {
         val intent = Intent().setComponent(ComponentName(ra.packageName, RetroArch.SIDELOAD_ACTIVITY))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        RetroArch.sideloadExtras(coreFile.absolutePath).forEach { (k, v) -> intent.putExtra(k, v) }
+        RetroArch.sideloadExtras(coreFile.absolutePath, content?.absolutePath).forEach { (k, v) -> intent.putExtra(k, v) }
         ctx.startActivity(intent)
     }
 
