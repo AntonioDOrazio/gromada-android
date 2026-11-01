@@ -54,8 +54,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev ninja-build
       - name: Build
         run: |
-          CXX=clang++-18 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          CXX=clang++-18 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGROMADA_BUILD_TESTS=ON
           cmake --build build
+      - name: Test (game-data tests are skipped in CI)
+        run: cd build && ctest --output-on-failure
       - uses: actions/upload-artifact@v4
         with:
           name: gromada_libretro-linux-x86_64
