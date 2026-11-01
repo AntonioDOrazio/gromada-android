@@ -81,6 +81,18 @@ public:
 
     // Shared MSVC CRT rand(): scripts' Random() and the engine draw from the same state.
     virtual int rand() = 0;
+
+    // --- optional hooks (added by issue #10, default no-ops: engines may ignore them) --
+    // ScrollLock(flag) is a session builtin (73) but the state it sets (obj+0x32d5) stops
+    // the engine's edge scrolling, the leash around the flagman and the +/- view keys
+    // (docs/re/runtime.md §6). The session calls this whenever a script changes it and
+    // with `false` after every loadMap (the original clears it on map load).
+    virtual void setScrollLock(bool locked) { (void)locked; }
+    // Full-screen effects of Effect() (eff_fade, eff_nuke...: palette/flash effects applied
+    // in the original's EndFrame 0x406ea0 to the whole picture). Called by the session
+    // after it has drawn menus, texts and the status bar over draw()'s output, just
+    // before the cursor.
+    virtual void drawScreenEffects(FramebufferRef framebuffer) { (void)framebuffer; }
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.

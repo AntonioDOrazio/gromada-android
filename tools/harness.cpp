@@ -9,6 +9,8 @@
 //             lstick=<x>,<y>@...  rstick=<x>,<y>@...   (-1..1, y down)
 //             touch=<px>,<py>[;<px>,<py>]@...         (fingers, in game-image pixels)
 //             mouse=<dx>,<dy>@...  mouse_btn=<left|right>@...
+//   savedir=<dir>   libretro save directory (default <out_prefix>_save; "none" = no save dir)
+//   Exit() from the game (RETRO_ENVIRONMENT_SHUTDOWN) stops the run.
 #include <dlfcn.h>
 #include <chrono>
 #include <cstdarg>
@@ -23,7 +25,8 @@
 
 static std::map<std::string, std::string> opts;
 static std::set<int> shots;
-static std::string outPrefix, hold;
+static std::string outPrefix, hold, saveDir;
+static bool shutdownRequested = false;
 static int frame = 0, pressRAt = -1, lastW = 0, lastH = 0;
 static double fps = 0;
 static size_t audioFrames = 0;
@@ -78,6 +81,7 @@ static bool parseTimed(const std::string& k, const std::string& v) {
 }
 
 static void logcb(enum retro_log_level, const char* fmt, ...) {
+    std::fprintf(stderr, "[f%d] ", frame);
     va_list a; va_start(a, fmt); std::vfprintf(stderr, fmt, a); va_end(a);
 }
 
@@ -96,6 +100,11 @@ static bool env(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_GEOMETRY: return true;
     case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: fps = static_cast<retro_system_av_info*>(data)->timing.fps; return true;
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: *static_cast<bool*>(data) = false; return true;
+    case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+        if (saveDir == "none") return false;
+        *static_cast<const char**>(data) = saveDir.c_str();
+        return true;
+    case RETRO_ENVIRONMENT_SHUTDOWN: shutdownRequested = true; std::fprintf(stderr, "[f%d] shutdown requested\n", frame); return true;
     case RETRO_ENVIRONMENT_SET_MESSAGE: std::fprintf(stderr, "[msg] %s\n", static_cast<retro_message*>(data)->msg); return true;
     default: return false;
     }
@@ -182,10 +191,12 @@ int main(int argc, char** argv) {
         if (k == "hold") hold = v;
         else if (k == "press_r_at") pressRAt = std::atoi(v.c_str());
         else if (k == "press_a_at") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) pressA.insert(std::atoi(t)); }
+        else if (k == "savedir") saveDir = v;
         else if (k == "shots") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) shots.insert(std::atoi(t)); }
         else opts[k] = v;
     }
 
+    if (saveDir.empty()) saveDir = outPrefix + "_save";
     SYM(retro_set_environment) SYM(retro_set_video_refresh) SYM(retro_set_audio_sample_batch)
     SYM(retro_set_input_poll) SYM(retro_set_input_state) SYM(retro_init) SYM(retro_load_game)
     SYM(retro_get_system_av_info) SYM(retro_run) SYM(retro_unload_game) SYM(retro_deinit)
@@ -201,7 +212,7 @@ int main(int argc, char** argv) {
                  av.geometry.aspect_ratio, av.timing.fps, av.timing.sample_rate);
 
     auto t0 = std::chrono::steady_clock::now();
-    for (frame = 0; frame < frames; ++frame) retro_run();
+    for (frame = 0; frame < frames && !shutdownRequested; ++frame) retro_run();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "ran %d frames (%ux%u) in %.1f ms -> %.2f ms/frame; audio frames %zu (expected %.0f)\n",
                  frames, lastW, lastH, ms, ms / frames, audioFrames, frames * av.timing.sample_rate / fps);

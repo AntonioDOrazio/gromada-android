@@ -43,6 +43,12 @@ public:
         });
     }
 
+    // Stops every sound effect (script StopSFX()), or the voices playing one sound.
+    void stopSfx() { m_voices.clear(); }
+    void stopSfx(const SoundData* sound) {
+        std::erase_if(m_voices, [sound](const Voice& v) { return v.sound == sound; });
+    }
+
     // Track numbers are CD track numbers (2..12), as used by the game scripts.
     void playMusic(std::array<int, 4> playlist) {
         if (m_playlist == playlist && m_music)
