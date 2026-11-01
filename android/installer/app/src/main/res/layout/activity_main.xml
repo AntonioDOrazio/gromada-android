@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingTop="16dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="32dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/title"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/subtitle" />
+
+        <Button
+            android:id="@+id/updateApp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/update_app"
+            android:visibility="gone" />
+
+        <!-- 1. Permission -->
+        <TextView style="@style/Section" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/section_permission" />
+        <TextView
+            android:id="@+id/permissionStatus"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <Button
+            android:id="@+id/grant"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/grant" />
+
+        <!-- 2. Game -->
+        <TextView style="@style/Section" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/section_game" />
+        <TextView
+            android:id="@+id/gameDir"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <TextView
+            android:id="@+id/gameStatus"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <Button
+            android:id="@+id/changeDir"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/change_dir" />
+        <CheckBox
+            android:id="@+id/music"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="@string/music" />
+        <TextView
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/pick_hint" />
+        <Button
+            android:id="@+id/pickImage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/pick_image" />
+        <ProgressBar
+            android:id="@+id/progress"
+            style="@android:style/Widget.DeviceDefault.ProgressBar.Horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="1000"
+            android:visibility="gone" />
+        <TextView
+            android:id="@+id/progressText"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone" />
+        <Button
+            android:id="@+id/cancel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/cancel"
+            android:visibility="gone" />
+
+        <!-- 3. Core -->
+        <TextView style="@style/Section" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/section_core" />
+        <TextView
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/repo_label" />
+        <EditText
+            android:id="@+id/repo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:importantForAutofill="no"
+            android:inputType="textUri"
+            android:singleLine="true" />
+        <TextView
+            android:id="@+id/coreStatus"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <Button
+            android:id="@+id/checkUpdates"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/check_updates" />
+        <Button
+            android:id="@+id/downloadCore"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/download_core" />
+
+        <!-- 4. RetroArch -->
+        <TextView style="@style/Section" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/section_retroarch" />
+        <RadioGroup
+            android:id="@+id/raPackages"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <TextView
+            android:id="@+id/raStatus"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <Button
+            android:id="@+id/openRetroArch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/open_retroarch" />
+        <Button
+            android:id="@+id/installCore"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/install_core" />
+        <Button
+            android:id="@+id/writePlaylist"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/write_playlist" />
+        <Button
+            android:id="@+id/changePlaylistDir"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/change_playlist_dir" />
+        <Button
+            android:id="@+id/play"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/play" />
+        <TextView
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/manual_title"
+            android:textStyle="bold" />
+        <TextView
+            android:id="@+id/manualSteps"
+            style="@style/Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/manual_steps" />
+
+        <TextView
+            android:id="@+id/log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:fontFamily="monospace"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>

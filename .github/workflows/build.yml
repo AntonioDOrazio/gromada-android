@@ -34,17 +34,74 @@ jobs:
           path: |
             build-android/gromada_libretro_android.so
             gromada_libretro.info
-      # Rolling "nightly" pre-release: a fixed public link the handheld can download from.
+
+  # Android installer (android/installer): JVM tests of the extraction logic, desktop CLI
+  # jar and the APK (signed with the repo's public debug key, see docs/installer.md).
+  installer:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android/installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test extraction logic (JVM)
+        run: ./gradlew --no-daemon :common:test :common:cliJar
+      - name: Build APK
+        run: |
+          ./gradlew --no-daemon :app:assembleRelease :app:lintRelease
+          cat app/build/reports/lint-results.txt
+      - name: Inspect APK
+        run: |
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/aapt2" dump badging app/build/outputs/apk/release/app-release.apk | grep -E "^package|sdkVersion|uses-permission|launchable"
+          "$bt/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | head -3
+      - name: Collect
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/gromada-installer.apk"
+          cp common/build/libs/gromada-extract.jar "$GITHUB_WORKSPACE/dist/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gromada-installer
+          path: |
+            dist/gromada-installer.apk
+            dist/gromada-extract.jar
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: installer-reports
+          path: |
+            android/installer/common/build/reports
+            android/installer/app/build/reports
+
+  # Rolling "nightly" pre-release: a fixed public link the handheld (and the installer
+  # app, via the GitHub API) can download from. Published only from main.
+  release:
+    needs: [android, installer]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
       - name: Publish nightly release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          core=artifacts/gromada_libretro_android-arm64-v8a
+          inst=artifacts/gromada-installer
           gh release delete nightly --yes --cleanup-tag || true
           gh release create nightly --prerelease --target "$GITHUB_SHA" \
-            --title "Nightly ($(git rev-parse --short HEAD))" \
-            --notes "Build automatica dell'ultimo commit su main. Copia gromada_libretro_android.so nella cartella dei core di RetroArch e gromada_libretro.info nella cartella info." \
-            build-android/gromada_libretro_android.so gromada_libretro.info
+            --title "Nightly (${GITHUB_SHA::7})" \
+            --notes "Build automatica dell'ultimo commit su main. Su Android installa gromada-installer.apk: estrae il gioco dal CD, scarica questo core e lo installa in RetroArch (vedi docs/installer.md). A mano: installa gromada_libretro_android.so con Carica core → Installa o ripristina un core. gromada-extract.jar: estrazione da riga di comando (java -jar gromada-extract.jar GROMADA.cue cartella)." \
+            "$core/build-android/gromada_libretro_android.so" "$core/gromada_libretro.info" \
+            "$inst/gromada-installer.apk" "$inst/gromada-extract.jar"
 
   linux:
     runs-on: ubuntu-24.04

@@ -17,15 +17,17 @@ if(NOT ANDROID AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_link_options(-stdlib=libc++)
 endif()
 
-add_library(gromada_libretro SHARED src/gromada_libretro.cpp src/third_party/stb_vorbis_impl.c)
+add_library(gromada_libretro SHARED src/gromada_libretro.cpp
+    src/third_party/stb_vorbis_impl.c src/third_party/dr_libs_impl.c)
 target_include_directories(gromada_libretro PRIVATE src)
 set(GROMADA_CXX_WARNINGS -Wall -Wno-unknown-attributes -Wno-deprecated-this-capture
     -Wno-defaulted-function-deleted -Wno-parentheses)
 target_compile_options(gromada_libretro PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:${GROMADA_CXX_WARNINGS}>"
     -fvisibility=hidden)
-# stb_vorbis is third-party C: keep it quiet.
-set_source_files_properties(src/third_party/stb_vorbis_impl.c PROPERTIES COMPILE_OPTIONS "-w")
+# stb_vorbis and dr_libs are third-party C: keep them quiet.
+set_source_files_properties(src/third_party/stb_vorbis_impl.c src/third_party/dr_libs_impl.c
+    PROPERTIES COMPILE_OPTIONS "-w")
 set_target_properties(gromada_libretro PROPERTIES PREFIX "")
 
 # The Indeo 3 decoder (src/video/indeo3.hpp) is LGPL-2.1-or-later: this option leaves it out.

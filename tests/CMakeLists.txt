@@ -25,5 +25,13 @@ gromada_add_test(ui_data_test ui_data_test.cpp)
 gromada_add_test(input_mapper_test input_mapper_test.cpp)
 gromada_add_test(cursor_file_test cursor_file_test.cpp)
 # Movies: synthetic tests (CI) and the full decode of the game's movies compared with ffmpeg.
-gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c)
-gromada_add_test(video_data_test video_data_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c)
+gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+gromada_add_test(video_data_test video_data_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+
+# Music decoders (FLAC/WAV/OGG) through the Mixer, with synthetic files.
+gromada_add_test(music_test music_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")

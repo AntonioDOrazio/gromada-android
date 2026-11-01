@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark device-default theme: readable on handhelds, no AndroidX dependency. -->
+    <style name="Theme.Installer" parent="@android:style/Theme.DeviceDefault">
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+    <style name="Section">
+        <item name="android:textSize">20sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:layout_marginTop">20dp</item>
+        <item name="android:layout_marginBottom">6dp</item>
+        <item name="android:textColor">@color/accent</item>
+    </style>
+    <style name="Body">
+        <item name="android:textSize">15sp</item>
+        <item name="android:layout_marginBottom">6dp</item>
+    </style>
+</resources>
