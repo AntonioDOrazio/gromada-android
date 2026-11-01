@@ -9,6 +9,7 @@
 #include "engine/audio.hpp"
 #include "engine/level.hpp"
 #include "engine/renderer.hpp"
+#include "input/input.hpp"
 #include "libretro/libretro.h"
 
 #include <cstdarg>
@@ -57,6 +58,10 @@ struct Core {
     double audioDebt = 0;
     std::vector<std::int16_t> audioBuf;
     gromada::Mixer mixer{AudioRate};
+    // --- input (issue #4) ---
+    gromada::input::Mapper input;
+    gromada::input::CursorSet cursors;
+    float cursorBusy = 0; // viewer: CYCLE cursor for a moment after a level load
 };
 
 std::unique_ptr<Core> core;
@@ -80,8 +85,12 @@ void declareOptions() {
         {"gromada_level", levels.c_str()},
         {"gromada_music_volume", "Volume musica; 80|90|100|0|10|20|30|40|50|60|70"},
         {"gromada_sfx_volume", "Volume effetti; 100|0|10|20|30|40|50|60|70|80|90"},
+        // input (issue #4): scheme, cursor speed/acceleration/precision, touch/mouse, keyboard
+        gromada::input::coreOptions[0], gromada::input::coreOptions[1], gromada::input::coreOptions[2],
+        gromada::input::coreOptions[3], gromada::input::coreOptions[4], gromada::input::coreOptions[5],
         {nullptr, nullptr},
     };
+    static_assert(std::size(gromada::input::coreOptions) == 6, "list every input option above");
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
 }
 
@@ -131,6 +140,7 @@ bool loadLevel(int index) {
         const auto& h = core->level->header();
         core->camX = static_cast<float>(h.observerX);
         core->camY = static_cast<float>(h.observerY);
+        core->cursorBusy = 1.0f;
         log(RETRO_LOG_INFO, "level %02d: %ux%u, %zu entities", index, h.width, h.height, core->level->entities().size());
         const auto script = core->resources->mapsPath() / "levels" / std::format("{:02}.INI", index);
         if (const auto playlist = gromada::findLevelPlaylist(script)) {
@@ -147,6 +157,57 @@ bool loadLevel(int index) {
     }
 }
 
+// --- input (issue #4) ------------------------------------------------------
+// Gameplay mapping comes from src/input (see docs/controls.md). Viewer-only extras sit on
+// buttons the game does not use: L2/R2 = level, L3/R3 = sound test, Y = fast scroll.
+
+void applyInputOptions() {
+    core->input.configure(gromada::input::readSettings(getVar));
+    static std::vector<retro_input_descriptor> desc;
+    const auto game = gromada::input::inputDescriptors(core->input.settings().scheme);
+    desc.assign(game.begin(), game.end());
+    desc.insert(desc.end(), {
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y, "Anteprima: scorrimento veloce"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2, "Anteprima: livello precedente"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Anteprima: livello successivo"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Anteprima: effetto sonoro precedente"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Anteprima: effetto sonoro successivo"},
+        {0, 0, 0, 0, nullptr},
+    });
+    env_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc.data());
+}
+
+const gromada::input::PcState& updateInput(float dt) {
+    using namespace gromada::input;
+    FrameInfo f;
+    f.dt = dt;
+    f.width = core->renderer.width();
+    f.height = core->renderer.height();
+    f.player = nullptr; // the viewer has no player yet: aim from the screen center
+    const PcState& pc = core->input.update(pollRaw(input_state_cb, core->input.settings()), f);
+    for (int k = 0; k < 4; ++k)
+        if (pc.key(static_cast<Key>(static_cast<int>(Key::Num1) + k)).pressed)
+            notify(std::format("Arma {}", k + 1));
+    return pc;
+}
+
+// Viewer stand-in for the engine's choice (which will depend on what is under the cursor).
+gromada::input::CursorShape viewerCursorShape(const gromada::input::PcState& pc, bool blockedScroll) {
+    using enum gromada::input::CursorShape;
+    if (core->cursorBusy > 0) return Cycle;
+    if (pc.right.down || pc.aiming) return Fight;
+    if (pc.left.down) return Move;
+    if (blockedScroll) return NoMove;
+    return Arrow;
+}
+
+void drawCursor(const gromada::input::PcState& pc, bool blockedScroll) {
+    auto& r = core->renderer;
+    // The renderer owns a mutable buffer; it is redrawn from scratch every frame.
+    gromada::input::drawCursor(core->cursors.get(viewerCursorShape(pc, blockedScroll)), pc.cursorX(), pc.cursorY(),
+                               const_cast<std::uint32_t*>(r.xrgb()), r.width(), r.height(), r.pitch());
+}
+
 void applyOptions(bool initial) {
     const Options next = readOptions();
     const Options prev = core->options;
@@ -154,6 +215,7 @@ void applyOptions(bool initial) {
     core->renderer.setWidth(next.widescreen ? gromada::Renderer::MaxWidth : 640);
     core->mixer.setMusicVolume(next.musicVolume / 100.0f);
     core->mixer.setSfxVolume(next.sfxVolume / 100.0f);
+    applyInputOptions();
     if (initial)
         return;
 
@@ -169,48 +231,48 @@ void applyOptions(bool initial) {
 
 // --- per-frame ---------------------------------------------------------------
 
-float axis(unsigned id) {
-    const int v = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, id);
-    const float f = v / 32767.0f;
-    return std::abs(f) < 0.15f ? 0.0f : f; // deadzone
-}
-
 bool button(unsigned id) {
     return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, id) != 0;
 }
 
-void updateCamera(float dt) {
-    float dx = axis(RETRO_DEVICE_ID_ANALOG_X);
-    float dy = axis(RETRO_DEVICE_ID_ANALOG_Y);
-    if (button(RETRO_DEVICE_ID_JOYPAD_LEFT))  dx = -1;
-    if (button(RETRO_DEVICE_ID_JOYPAD_RIGHT)) dx = 1;
-    if (button(RETRO_DEVICE_ID_JOYPAD_UP))    dy = -1;
-    if (button(RETRO_DEVICE_ID_JOYPAD_DOWN))  dy = 1;
+// Viewer camera: arrow keys (d-pad; left stick in the direct scheme) stand in for the
+// player's movement, and the cursor scrolls RTS-style at the screen edges (not with touch:
+// taps near the border would scroll). Returns true when an edge push is blocked by the map
+// border (NOMOVE cursor).
+bool updateCamera(float dt, const gromada::input::PcState& pc) {
+    gromada::input::Vec2 dir = pc.move;
+    gromada::input::Vec2 edge;
+    if (pc.source != gromada::input::PointerSource::Touch)
+        edge = gromada::input::edgeScroll(pc.cursor, core->renderer.width(), core->renderer.height());
+    if (edge.x) dir.x = edge.x;
+    if (edge.y) dir.y = edge.y;
 
     const float speed = button(RETRO_DEVICE_ID_JOYPAD_Y) ? 1200.0f : 400.0f; // px/s
-    core->camX += dx * speed * dt;
-    core->camY += dy * speed * dt;
+    const float prevX = core->camX, prevY = core->camY;
+    core->camX += dir.x * speed * dt;
+    core->camY += dir.y * speed * dt;
 
     const auto& h = core->level->header();
     const float maxX = std::max(0.0f, static_cast<float>(h.width) - core->renderer.width());
     const float maxY = std::max(0.0f, static_cast<float>(h.height) - core->renderer.height());
     core->camX = std::clamp(core->camX, 0.0f, maxX);
     core->camY = std::clamp(core->camY, 0.0f, maxY);
+    return (edge.x && core->camX == prevX) || (edge.y && core->camY == prevY);
 }
 
 void handleLevelSwitch() {
-    const bool l = button(RETRO_DEVICE_ID_JOYPAD_L);
-    const bool r = button(RETRO_DEVICE_ID_JOYPAD_R);
+    const bool l = button(RETRO_DEVICE_ID_JOYPAD_L2);
+    const bool r = button(RETRO_DEVICE_ID_JOYPAD_R2);
     if (l && !core->prevL) loadLevel(core->levelIndex == 1 ? LevelCount : core->levelIndex - 1);
     if (r && !core->prevR) loadLevel(core->levelIndex == LevelCount ? 1 : core->levelIndex + 1);
     core->prevL = l;
     core->prevR = r;
 }
 
-// Sound test (viewer only, until gameplay triggers effects): A = next effect, B = previous.
+// Sound test (viewer only, until gameplay triggers effects): R3 = next effect, L3 = previous.
 void handleSoundTest() {
-    const bool a = button(RETRO_DEVICE_ID_JOYPAD_A);
-    const bool b = button(RETRO_DEVICE_ID_JOYPAD_B);
+    const bool a = button(RETRO_DEVICE_ID_JOYPAD_R3);
+    const bool b = button(RETRO_DEVICE_ID_JOYPAD_L3);
     const int count = static_cast<int>(core->resources->sounds().size());
     if (count > 0 && ((a && !core->prevA) || (b && !core->prevB))) {
         core->soundTest = a && !core->prevA ? (core->soundTest + 1) % count
@@ -282,21 +344,7 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
         return false;
     }
 
-    static const retro_input_descriptor desc[] = {
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT, "Scorri a sinistra"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "Scorri a destra"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP, "Scorri in alto"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN, "Scorri in basso"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y, "Scorrimento veloce"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "Prova effetto successivo"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B, "Prova effetto precedente"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Livello precedente"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Livello successivo"},
-        {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Scorri (orizzontale)"},
-        {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "Scorri (verticale)"},
-        {0, 0, 0, 0, nullptr},
-    };
-    env_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, const_cast<retro_input_descriptor*>(desc));
+    // Input descriptors: applyInputOptions() (they depend on the control scheme).
 
     // Content can be gromada.exe or fw.res: both live in the game root folder.
     const auto gameDir = std::filesystem::path{game->path}.parent_path();
@@ -311,6 +359,7 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
         core->resources->vids().size(), core->resources->sounds().size(), core->resources->weapons().size());
 
     core->mixer.setMusicDirectories({gameDir / "music", gameDir / "MUSIC", gameDir});
+    log(RETRO_LOG_INFO, "cursors: %d/5 original cursors loaded", core->cursors.load(gameDir));
     applyOptions(true);
     return loadLevel(core->options.startLevel);
 }
@@ -330,11 +379,14 @@ RETRO_API void retro_run() {
     handleSoundTest();
 
     const float dt = 1.0f / core->options.fps;
-    updateCamera(dt);
+    const auto& pc = updateInput(dt);
+    const bool blockedScroll = updateCamera(dt, pc);
+    core->cursorBusy = std::max(0.0f, core->cursorBusy - dt);
     core->level->animate(dt);
 
     auto& r = core->renderer;
     r.draw(*core->level, static_cast<int>(core->camX), static_cast<int>(core->camY));
+    drawCursor(pc, blockedScroll);
     video_cb(r.xrgb(), r.width(), r.height(), r.pitch());
     pushAudio();
 }
