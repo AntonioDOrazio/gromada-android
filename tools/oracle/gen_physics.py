@@ -68,6 +68,15 @@ def make_case(r, i):
         c[k] = ((c[k] + 0x8000) & 0xFFFF) - 0x8000
     c["windStrength"] = pick(r, [0, r.randrange(-100, 100), r.randrange(-32768, 32768)], [5, 3, 0.3])
     c["windDir"] = pick(r, [r.randrange(256), r.randrange(1 << 32)], [5, 1])
+    if r.random() < 0.08:
+        # land exactly on goZ (the snapping is asymmetric: see docs/oracle.md)
+        c["flags"] &= ~2
+        c["vz"] = r.choice([-1, 1]) * r.randrange(20, 400)
+        c["z"] = r.randrange(0, 150)
+        dt = (c["curclock"] - c["lastTact"]) & 0xFFFFFFFF
+        a = (((dt * c["vz"]) & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000
+        dz = ((a >> 3) + c["fracZ"]) >> 7
+        c["goZ"] = ((c["z"] + dz + r.choice([0, 0, 1, -1]) + 0x8000) & 0xFFFF) - 0x8000
     c["blocked"] = 1 if r.random() < 0.25 else 0
     c["obstacle"] = 0 if r.random() < 0.5 else (r.randrange(0, 4000) | (r.randrange(0, 4000) << 16))
     return c
