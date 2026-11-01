@@ -28,6 +28,12 @@ target_compile_options(gromada_libretro PRIVATE
 set_source_files_properties(src/third_party/stb_vorbis_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 set_target_properties(gromada_libretro PROPERTIES PREFIX "")
 
+# The Indeo 3 decoder (src/video/indeo3.hpp) is LGPL-2.1-or-later: this option leaves it out.
+option(GROMADA_NO_INDEO3 "Build without the LGPL Indeo 3 movie decoder" OFF)
+if(GROMADA_NO_INDEO3)
+    target_compile_definitions(gromada_libretro PRIVATE GROMADA_NO_INDEO3)
+endif()
+
 if(ANDROID)
     # RetroArch for Android loads cores named <name>_libretro_android.so
     # Configure with -DANDROID_STL=c++_static so the core carries its own libc++.
