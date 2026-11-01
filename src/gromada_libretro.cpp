@@ -255,7 +255,7 @@ void stopMovie() {
     auto& m = movieState;
     if (!m.movie)
         return;
-    log(RETRO_LOG_INFO, "movie finished after %ld output frames (%.2f s at %d fps), %zu decode errors",
+    log(RETRO_LOG_INFO, "movie stopped after %ld output frames (%.2f s at %d fps), %zu decode errors",
         m.outputFrames, m.outputFrames / double(core->options.fps), core->options.fps, m.movie->decodeErrors());
     core->mixer.setStream(nullptr);
     core->mixer.setMusicVolume(core->options.musicVolume / 100.0f);
