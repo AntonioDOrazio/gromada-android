@@ -5,9 +5,11 @@
 //    with linear interpolation to the output rate;
 //  - music: the original CD audio tracks, provided by the user as OGG files
 //    (music/trackNN.ogg), streamed with stb_vorbis and cycled as a 4-entry playlist,
-//    mirroring the game's PlayMusic(m1, m2, m3, m4) script call.
+//    mirroring the game's PlayMusic(m1, m2, m3, m4) script call;
+//  - one streaming source (AudioStream, e.g. a movie soundtrack), any rate, resampled.
 
 #include "core/std.hpp"
+#include "engine/audio_stream.hpp"
 #include "libgromada/resources_sound.hpp"
 
 extern "C" {
@@ -71,6 +73,7 @@ public:
         m_mix.assign(frames * 2, 0.0f);
         mixMusic(frames);
         mixVoices(frames);
+        mixStream(frames);
         for (std::size_t i = 0; i < frames * 2; ++i)
             out[i] = static_cast<std::int16_t>(std::clamp(m_mix[i], -1.0f, 1.0f) * 32767.0f);
     }
@@ -210,6 +213,68 @@ private:
     double m_musicStep = 1.0, m_musicPos = 0.0;
     std::vector<short> m_musicBuf;   // decoded window, interleaved stereo
     std::size_t m_musicBufStart = 0; // source frame index of m_musicBuf[0]
+
+    // --- streaming source (movie soundtrack) ---
+public:
+    // Attaches a stream (not owned; nullptr detaches), mixed at `volume` from its start.
+    void setStream(AudioStream* stream, float volume = 1.0f) {
+        m_stream = stream;
+        m_streamVolume = std::clamp(volume, 0.0f, 1.0f);
+        m_streamStep = stream ? static_cast<double>(stream->sampleRate()) / m_outRate : 1.0;
+        m_streamPos = 0.0;
+        m_streamBuf.clear();
+        m_streamBufStart = 0;
+        m_streamEof = m_streamDone = false;
+    }
+    // True while a stream is attached and not fully played.
+    [[nodiscard]] bool streamPlaying() const noexcept { return m_stream && !m_streamDone; }
+    // Source frame (at the stream's rate) of the next output sample: the playback clock.
+    [[nodiscard]] double streamPosition() const noexcept { return m_streamPos; }
+
+private:
+    // Same windowed reading as the music: keeps the source frames around m_streamPos.
+    bool fillStream(std::size_t needed) {
+        while (needed >= m_streamBufStart + m_streamBuf.size() / 2) {
+            if (m_streamEof)
+                return false;
+            if (m_streamBuf.size() >= 2) {
+                m_streamBufStart += m_streamBuf.size() / 2 - 1;
+                m_streamBuf.erase(m_streamBuf.begin(), m_streamBuf.end() - 2);
+            }
+            std::int16_t chunk[2 * 1024];
+            const std::size_t got = m_stream->read(chunk, 1024);
+            m_streamEof = got < 1024;
+            m_streamBuf.insert(m_streamBuf.end(), chunk, chunk + got * 2);
+        }
+        return true;
+    }
+
+    void mixStream(std::size_t frames) {
+        if (!m_stream || m_streamDone)
+            return;
+        const float gain = m_streamVolume / 32768.0f;
+        for (std::size_t i = 0; i < frames; ++i) {
+            const auto i0 = static_cast<std::size_t>(m_streamPos);
+            if (!fillStream(i0)) {
+                m_streamDone = true;
+                return;
+            }
+            const bool hasNext = fillStream(i0 + 1);
+            const float t = static_cast<float>(m_streamPos - i0);
+            const std::size_t a = (i0 - m_streamBufStart) * 2;
+            const std::size_t b = hasNext ? a + 2 : a;
+            m_mix[2 * i] += (m_streamBuf[a] + (m_streamBuf[b] - m_streamBuf[a]) * t) * gain;
+            m_mix[2 * i + 1] += (m_streamBuf[a + 1] + (m_streamBuf[b + 1] - m_streamBuf[a + 1]) * t) * gain;
+            m_streamPos += m_streamStep;
+        }
+    }
+
+    AudioStream* m_stream = nullptr;
+    float m_streamVolume = 1.0f;
+    double m_streamStep = 1.0, m_streamPos = 0.0;
+    std::vector<std::int16_t> m_streamBuf; // source window, interleaved stereo
+    std::size_t m_streamBufStart = 0;      // source frame index of m_streamBuf[0]
+    bool m_streamEof = false, m_streamDone = false;
 };
 
 // The viewer milestone has no script interpreter yet: pull the level's playlist
