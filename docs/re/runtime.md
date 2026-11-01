@@ -397,7 +397,7 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | 125 | `SaveDemo(string filename)` | — | Prepara la registrazione: la demo parte dal prossimo caricamento di mappa (§8) | 0x413a98 | alta |
 | 126 | `SetPosition(int x,int y)` | — | Centra la visuale su (x,y): angolo = (x−larghezza/2, y−altezza/2) | 0x413ac3 | alta |
 | 127 | `SetVid(int nvid,int type,int var)` | — | 1 `VID_MAXHP`: byte `vid+0x2d`; 2..17 `VID_CHILD+k`: word `vid+0xd7+2k`; 18..21 `VID_GAMMA+k`: palette alternativa k (0x406d60); 22 `VID_PROPERTY`: word `vid+0x24`; 23 `VID_WEAPONRANGE`: portata dell'arma n. `nvid` (`armi+9*n+4`); **24 `VID_NARMY` non è gestito** (nessun effetto) | 0x413afd | alta |
-| 128 | `SetAutoScroll(int flag)` | — | `obj+0x32d1`: visuale che segue la Kassandra | 0x413be4 | media |
+| 128 | `SetAutoScroll(int flag)` | — | `obj+0x32d1`: se ≠0 e il mouse non sta scorrendo dai bordi, la visuale insegue il flagman del giocatore locale (velocità = distanza dal centro, spostamento `v·dt/1024` per frame) | 0x413be4 | alta |
 | 129 | `GetNetInfo(int type)` | int/str | 1 numero del giocatore locale; 2..5 nome del giocatore 0..3; 6 numero di giocatori; 9 azzera i contatori di uccisioni (**non spinge nulla**); 10..25 uccisioni `[(t−10)/4][(t−2)&3]`; altri tipi: nulla | 0x413bfc | alta |
 | 130 | `Send(int data)` | — | Invia 4 byte a tutti (DirectPlay) | 0x413d2e | media |
 | 131 | `Receive()` | int | 4 byte ricevuti, 0 se nulla | 0x413d58 | media |
@@ -473,17 +473,32 @@ in `Tact`), `NextNMap(int)` (`maps\levels\NN.map`), `Win()`, `Lose()`, `SavePlay
   Azzerato alla fine di ogni tick. Un tasto o un click interrompe un video.
 - Tasti gestiti dagli script (`Tact`): Esc (27) menu di gioco/uscita, Tab (9) barra di stato,
   '1'..'4' armi, Invio/spazio conferma, cheat `c h e a t` + lettera. Gestiti dal motore (0x415e20):
-  `+`/`-` ingrandiscono/riducono la finestra di gioco (passi 27×20 px), mouse sui bordi (≤5 px)
-  scorre la visuale (accelerazione 40/frame fino a ±500 in x, 30 fino a ±400 in y, scalate col tempo
-  /1024), vincolo della visuale entro ±586×±440 dalla Kassandra.
-- Comandi alla Kassandra (0x415e20, confidenza **media**, da verificare con la issue dell'input):
-  click sinistro → `act_attack` (39) sull'unità sotto il cursore se è nemica, altrimenti
-  `act_move` (40) verso il punto; tasto destro tenuto → traccia un percorso (0x40cc00) di punti.
+  `+`/`-` ingrandiscono/riducono la finestra di gioco (passi 27×20 px); mouse sui bordi (≤5 px dal
+  bordo) scorre la visuale: la velocità (pixel ogni 1024 ms) cresce di 40 per frame fino a ±500 in x
+  e di 30 fino a ±400 in y e si azzera appena il mouse lascia il bordo; spostamento per frame
+  `v·dt/1024`; la visuale resta entro ±586×±440 dalla Kassandra. Con `ScrollLock(1)` niente di
+  tutto questo (0x415e20, alta).
+- **Guida della Kassandra**: la classe del flagman (funzione 0x411a2c, chiamata dalla simulazione)
+  legge direttamente l'intero record di input del suo giocatore (`obj+0x32dd` in locale,
+  `0x439fa8 + 597*n` in rete): posizione del mouse nel mondo e bit dei pulsanti/frecce. Il movimento
+  col sinistro e il fuoco col destro descritti nella issue stanno lì (dominio della issue #2; le demo
+  mostrano il tasto destro tenuto per lunghi tratti).
+- Comandi "da strategico" (0x415e20, dopo l'aggiornamento menu; confidenza **media**: flusso letto
+  nel disassemblato, semantica delle funzioni chiamate non verificata). C'è una lista di unità
+  selezionate (`obj+0x964`, di norma la sola Kassandra) e un'unità sotto il cursore (0x416900):
+  - click sinistro con selezione: per ogni unità selezionata, se sotto il cursore c'è un'altra
+    unità → `AddCommand(act_attack, bersaglio)`; altrimenti `act_move` verso il punto (0x40c690:
+    se il punto è entro 24×16 px dalla posizione dell'unità o da un `act_move` già in coda, il
+    comando viene accodato insieme ad `act_cyclecommand`, cioè un pattugliamento ciclico);
+  - click sinistro senza selezione: seleziona l'unità sotto il cursore (`act_select`) e inizia un
+    rettangolo di selezione trascinato col tasto tenuto;
+  - tasto destro: deseleziona tutto e traccia col tasto tenuto un poligono (0x40cc00); al rilascio
+    seleziona le unità al suo interno (selezione "a lazo").
 - Cursori: tabella di 16 a 0x440948 caricata da 0x4179d0: **0 `ARROW.CUR`, 2 `MOVE.CUR`, 5
   `FIGHT.CUR`, 8 `NOMOVE.CUR`, 9 `CYCLE.CUR`**, gli altri la freccia di sistema (alta). Scelta per
-  frame (media):
-  senza unità selezionata (la Kassandra) 0; sopra un nemico 5; punto non raggiungibile 8, altrimenti 2; 9 se il punto
-  sotto il cursore richiede di girare/attendere (0x40c4b0 con `act_move`, confidenza bassa).
+  frame (media): nessuna selezione → 0; unità sotto il cursore di un'armata (del vid) diversa da
+  quella della prima selezionata → 5; altrimenti 8 se il punto non è libero (0x40a430), 2 se lo è;
+  2 o 5 diventano 9 se un `act_move` lì creerebbe un pattugliamento ciclico (0x40c4b0).
   Con l'opzione "cursori di Windows" spenta il cursore è uno sprite e il tipo è la sua azione.
   `SetCursor(-1)` lo nasconde.
 
@@ -596,6 +611,8 @@ al marcatore di fine, con il numero di globali calcolato dal compilatore replica
   i nuovi comandi entrano in testa; se il comando in testa è `act_cyclecommand` (61) i nuovi
   vengono ignorati.
 - `SizeTo`/`GetObject`/`FirstUnit`: §3. `SetWind`: forza `0x439d54`, direzione `0x429e14`.
+- Il controllo della Kassandra è in 0x411a2c, che legge il record di input a 12 byte del giocatore
+  (§6): mouse nel mondo `+0`, bit `+8`.
 - Le demo (§8) sono il test di regressione naturale per la simulazione.
 
 ## 12. Domande aperte
