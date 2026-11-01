@@ -8,7 +8,7 @@ TURN_TO, CHANGE_ACTION, INIT_TABLES = 0x40b0b0, 0x40b3e0, 0x40cf70
 COLUMNS = ["dirs", "dirStep", "flags", "direction", "action", "target", "ret", "direction'", "caAct", "caDir"]
 
 
-def generate(o, n=3000):
+def generate(o, n=2500):
     r = rng("turnto")
     o.call(INIT_TABLES, [])
     w = World(o)

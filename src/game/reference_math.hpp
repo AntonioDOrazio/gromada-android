@@ -581,4 +581,43 @@ constexpr bool areaDamage(const Exploder& e, std::span<const DamageTarget> candi
     return true;
 }
 
+// ---- command stack step of SPRITE::Tact (0x40a116..0x40a201) ---------------------------------
+struct Command {
+    std::uint8_t act = 0;
+    std::int32_t var1 = 0, var2 = 0;
+};
+struct CommandStepResult {
+    int kind = 0;               // 0 nothing, 1 virtual Action(act, v1, v2), 2 ChangeAction(act, -1)
+    int act = -1;
+    std::int32_t v1 = 0, v2 = 0;
+    bool freed = false;         // the stack became empty and was freed (commands = 0)
+};
+// Runs only when `frame > lastFrame || action < 6` (the sprite *action*, not the vid class).
+// `entries`/`count`: the stack records (capacity) and the s16 count, top = entries[count-1];
+// `hasStack` = commands pointer != 0. `step` = the physics step local (see physicsStep).
+// A command is popped when the sprite is free (state & 0xf0 == 0) or busy but not moving with
+// act_submove (74) on top; act_cyclecommand (61) sets count = var1 and runs entries[var1].
+// Otherwise act_nextcommand (45) is sent when both arrival bits are set, or when the action
+// is not go/l_rotate/r_rotate (2/4/5), or when step >= rotationPeriod.
+// The caller performs the returned action (the original calls it before checking count == 0).
+constexpr CommandStepResult commandStep(std::int16_t frame, std::int16_t lastFrame, std::uint8_t action,
+                                        std::uint16_t state, std::int32_t step, std::int8_t rotationPeriod,
+                                        std::span<const Command> entries, std::int16_t& count, bool& hasStack) {
+    CommandStepResult r;
+    if (!(frame > lastFrame) && action >= 6) return r;
+    if (hasStack && (!(state & 0xf0) || (!(state & 0x10) && entries[count - 1].act == 74))) {
+        count = static_cast<std::int16_t>(count - 1);
+        if (entries[count].act == 61) count = lo16(entries[count].var1);
+        const Command& c = entries[count];
+        if (c.act > 15) { r.kind = 1; r.act = c.act; r.v1 = c.var1; r.v2 = c.var2; }
+        else { r.kind = 2; r.act = c.act; }
+        if (count == 0) { hasStack = false; r.freed = true; }
+        return r;
+    }
+    if ((state & 3) == 3 || !(action == 2 || action == 4 || action == 5) || step >= rotationPeriod) {
+        r.kind = 1; r.act = 45;
+    }
+    return r;
+}
+
 } // namespace gromada::game::ref

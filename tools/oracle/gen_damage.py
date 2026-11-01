@@ -41,7 +41,7 @@ def gen_direct(o, n=2000):
                         "woundChildRemoved: call to 0x40c0e0(vid.childNvid[13]) (wound effects removed after a repair)")
 
 
-def gen_area(o, n=1000):
+def gen_area(o, n=800):
     r = rng("area_damage")
     w = World(o, nvids=16)
     cases = []

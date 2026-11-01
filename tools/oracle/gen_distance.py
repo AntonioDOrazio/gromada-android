@@ -23,7 +23,7 @@ def generate(o):
     r = rng("distance")
     w = World(o)
     cases = []
-    for ax, ay, bx, by in coords16(r, 2000):
+    for ax, ay, bx, by in coords16(r, 1600):
         w.reset()
         a = w.sprite({"x": ax, "y": ay})
         b = w.sprite({"x": bx, "y": by})

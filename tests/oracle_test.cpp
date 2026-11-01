@@ -485,6 +485,27 @@ void testDamage() {
     });
 }
 
+void testCommands() {
+    forCases("commands", [](Tally& t, int i, Row r, const Family& f) {
+        const int n = int(r("nCommands"));
+        const std::size_t base = f.columns.size(), stride = f.objectColumns.size();
+        std::vector<ref::Command> cmds(n);
+        for (int k = 0; k < n; ++k)
+            cmds[k] = {std::uint8_t(r.at(base + k * stride)), std::int32_t(r.at(base + k * stride + 1)),
+                       std::int32_t(r.at(base + k * stride + 2))};
+        std::int16_t count = std::int16_t(r("count"));
+        bool has = n > 0;
+        auto res = ref::commandStep(std::int16_t(r("frame")), std::int16_t(r("lastFrame")), std::uint8_t(r("action")),
+                                    std::uint16_t(r("state")), std::int32_t(r("step")), std::int8_t(r("rotationPeriod")),
+                                    cmds, count, has);
+        EXPECT(t, i, "kind", r("kind"), res.kind);
+        EXPECT(t, i, "act", r("act"), res.act);
+        EXPECT(t, i, "v1", r("v1"), res.v1);
+        EXPECT(t, i, "v2", r("v2"), res.v2);
+        EXPECT(t, i, "count", r("count'"), has ? count : -1);
+    });
+}
+
 } // namespace
 
 int main() {
@@ -498,5 +519,6 @@ int main() {
     testPhysics();
     testCheckMove();
     testDamage();
+    testCommands();
     return gromada_test::finish();
 }

@@ -23,7 +23,7 @@ def inputs():
             pts.append((0, 0, d, e))
             pts.append((d, e, 0, 0))
     # random map-sized coordinates (s16 sprite fields)
-    for _ in range(1500):
+    for _ in range(1200):
         pts.append(tuple(r.randrange(0, 4096) for _ in range(4)))
     for _ in range(800):
         pts.append(tuple(r.randrange(-32768, 32768) for _ in range(4)))

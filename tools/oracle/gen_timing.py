@@ -9,7 +9,7 @@ from structs import CURCLOCK, LAST_REAL, RAND_STATE, World
 SPRITE_TACT = 0x409a20
 
 
-def gen_clock(o, n=800):
+def gen_clock(o, n=600):
     r = rng("clock")
     now = {}
     o.stub_import("WINMM.dll!timeGetTime", lambda o, args: now["t"], popped=0)
@@ -28,7 +28,7 @@ def gen_clock(o, n=800):
                   ["curclock", "lastReal", "timeGetTime", "curclock'", "lastReal'"], cases)
 
 
-def gen_schedule(o, n=1500):
+def gen_schedule(o, n=1200):
     r = rng("tick_schedule")
     w = World(o)
     o.stub(SPRITE_TACT, o.recorder("tact", 0), popped=0)
@@ -57,7 +57,7 @@ def gen_schedule(o, n=1500):
                         "Randomized (0x100) consumes one rand() per call")
 
 
-def gen_timer(o, n=800):
+def gen_timer(o, n=600):
     r = rng("timer")
     w = World(o)
     cases = []

@@ -294,7 +294,7 @@ class Oracle:
             raise RuntimeError(f"{addr:#x}: callee popped {popped} bytes, {conv} expects {expected}")
         return s32(self.reg("eax"))
 
-    def run(self, begin, ends, regs=None, stack_words=64):
+    def run(self, begin, ends, regs=None, stack_words=64, frame_init=None):
         """Run code from `begin` until one of `ends` is reached; returns the end address hit.
 
         A scratch stack frame of `stack_words` dwords is provided at esp (locals of the
@@ -303,6 +303,8 @@ class Oracle:
         sp = STACK_BASE + STACK_SIZE - 0x2000
         self.frame = sp
         self.write(sp, b"\xcc" * (4 * stack_words))  # sentinel pattern for uninitialised locals
+        for off, v in (frame_init or {}).items():     # locals of the enclosing function: {esp offset: dword}
+            self.w32(sp + off, v)
         for r in ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"):
             self.set_reg(r, self.garbage)
         for k, v in (regs or {}).items():

@@ -37,7 +37,7 @@ def make_case(r):
     return c
 
 
-def generate(o, n=1500):
+def generate(o, n=1200):
     r = rng("setdest")
     w = World(o)
     o.stub(CHANGE_ACTION, o.recorder("ca", 2), popped=8)

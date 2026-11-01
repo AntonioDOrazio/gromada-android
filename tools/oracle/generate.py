@@ -22,7 +22,7 @@ from oracle import Oracle  # noqa: E402
 
 MODULES = ["gen_rand", "gen_direction", "gen_tables", "gen_distance", "gen_physics",
            "gen_setdest", "gen_turnto", "gen_anim", "gen_checkmove", "gen_damage",
-           "gen_vm", "gen_timing"]
+           "gen_vm", "gen_timing", "gen_commands"]
 
 
 def main():

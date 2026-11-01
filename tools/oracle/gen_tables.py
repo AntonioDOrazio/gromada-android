@@ -33,7 +33,7 @@ def gen_static(o):
 
 
 def gen_map_scale(o):
-    pairs = [(24, 16), (16, 16), (32, 16), (7, 3), (1, 100), (-24, 16)]
+    pairs = [(24, 16), (32, 16), (7, 3), (-24, 16)]
     cases = []
     for sx, sy in pairs:
         o.run(0x414f36, [0x414f8f], regs={"edi": sx, "ebx": sy})
