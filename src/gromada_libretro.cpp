@@ -10,6 +10,7 @@
 #include "engine/level.hpp"
 #include "engine/renderer.hpp"
 #include "libretro/libretro.h"
+#include "video/movie.hpp"
 
 #include <cstdarg>
 
@@ -80,6 +81,7 @@ void declareOptions() {
         {"gromada_level", levels.c_str()},
         {"gromada_music_volume", "Volume musica; 80|90|100|0|10|20|30|40|50|60|70"},
         {"gromada_sfx_volume", "Volume effetti; 100|0|10|20|30|40|50|60|70|80|90"},
+        {"gromada_movie", "Riproduci filmato (Start/A/B per saltare); nessuno|0|1|2|3"},
         {nullptr, nullptr},
     };
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
@@ -147,6 +149,8 @@ bool loadLevel(int index) {
     }
 }
 
+void checkMovieOption(); // movies, see below
+
 void applyOptions(bool initial) {
     const Options next = readOptions();
     const Options prev = core->options;
@@ -154,6 +158,7 @@ void applyOptions(bool initial) {
     core->renderer.setWidth(next.widescreen ? gromada::Renderer::MaxWidth : 640);
     core->mixer.setMusicVolume(next.musicVolume / 100.0f);
     core->mixer.setSfxVolume(next.sfxVolume / 100.0f);
+    checkMovieOption();
     if (initial)
         return;
 
@@ -234,6 +239,91 @@ void pushAudio() {
     audio_batch_cb(core->audioBuf.data(), frames);
 }
 
+// --- movies (avi/N.avi) ------------------------------------------------------
+// Played on top of the viewer: picture scaled into the framebuffer (pillarboxed in 16:9),
+// soundtrack through the mixer's streaming source, music muted meanwhile.
+
+struct MovieState {
+    std::unique_ptr<gromada::video::Movie> movie;
+    std::vector<std::uint32_t> fb;
+    std::string option = "nessuno"; // last value of gromada_movie
+    long outputFrames = 0;
+    bool prevSkip = true;
+} movieState;
+
+void stopMovie() {
+    auto& m = movieState;
+    if (!m.movie)
+        return;
+    log(RETRO_LOG_INFO, "movie finished after %ld output frames (%.2f s at %d fps), %zu decode errors",
+        m.outputFrames, m.outputFrames / double(core->options.fps), core->options.fps, m.movie->decodeErrors());
+    core->mixer.setStream(nullptr);
+    core->mixer.setMusicVolume(core->options.musicVolume / 100.0f);
+    core->prevA = button(RETRO_DEVICE_ID_JOYPAD_A); // the skip press must not reach the viewer
+    core->prevB = button(RETRO_DEVICE_ID_JOYPAD_B);
+    m.movie.reset();
+}
+
+void startMovie(int index) {
+    stopMovie();
+    if (!core->resources)
+        return;
+    const auto dir = core->resources->mapsPath().parent_path();
+    for (const char* fmt : {"avi/{}.avi", "AVI/{}.AVI", "avi/{}.AVI", "AVI/{}.avi"}) {
+        const auto path = dir / std::vformat(fmt, std::make_format_args(index));
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec))
+            continue;
+        try {
+            auto& m = movieState;
+            m.movie = std::make_unique<gromada::video::Movie>(path);
+            m.fb.assign(gromada::Renderer::MaxWidth * gromada::Renderer::Height, 0);
+            m.outputFrames = 0;
+            m.prevSkip = true; // a button held when the movie starts does not skip it
+            core->mixer.setStream(m.movie->audio());
+            log(RETRO_LOG_INFO, "movie %s: %dx%d, %zu frames at %.3f fps (%.2f s)", path.string().c_str(),
+                m.movie->width(), m.movie->height(), m.movie->frameCount(), m.movie->frameRate(), m.movie->duration());
+        } catch (const std::exception& e) {
+            log(RETRO_LOG_ERROR, "cannot play %s: %s", path.string().c_str(), e.what());
+        }
+        return;
+    }
+    log(RETRO_LOG_WARN, "movie %d not found in %s/avi", index, dir.string().c_str());
+}
+
+// Starts the movie chosen in the core option, when the option changes (or at load).
+void checkMovieOption() {
+    const char* v = getVar("gromada_movie");
+    const std::string value = v ? v : "nessuno";
+    if (value == movieState.option)
+        return;
+    movieState.option = value;
+    if (value.size() == 1 && value[0] >= '0' && value[0] <= '9')
+        startMovie(value[0] - '0');
+}
+
+// Runs one output frame of the movie; false when no movie is playing.
+bool runMovie() {
+    auto& m = movieState;
+    if (!m.movie)
+        return false;
+    const bool skip = button(RETRO_DEVICE_ID_JOYPAD_START) || button(RETRO_DEVICE_ID_JOYPAD_A) || button(RETRO_DEVICE_ID_JOYPAD_B);
+    const bool skipPressed = skip && !m.prevSkip;
+    m.prevSkip = skip;
+    if (skipPressed || m.movie->finished()) {
+        stopMovie();
+        return false;
+    }
+    core->mixer.setMusicVolume(0.0f);
+    m.movie->step(1.0 / core->options.fps);
+    const int w = core->renderer.width(), h = core->renderer.height();
+    m.movie->blit(m.fb.data(), w, h, static_cast<std::size_t>(w));
+    video_cb(m.fb.data(), w, h, static_cast<std::size_t>(w) * 4);
+    pushAudio();
+    ++m.outputFrames;
+    return true;
+}
+
 } // namespace
 
 // --- libretro API ------------------------------------------------------------
@@ -269,7 +359,7 @@ RETRO_API void retro_get_system_av_info(retro_system_av_info* info) {
 }
 
 RETRO_API void retro_init() { core = std::make_unique<Core>(); }
-RETRO_API void retro_deinit() { core.reset(); }
+RETRO_API void retro_deinit() { stopMovie(); core.reset(); }
 RETRO_API void retro_reset() { if (core && core->resources) loadLevel(core->levelIndex); }
 
 RETRO_API bool retro_load_game(const retro_game_info* game) {
@@ -316,6 +406,8 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
 }
 
 RETRO_API void retro_unload_game() {
+    stopMovie();
+    movieState.option.clear(); // replay the chosen movie at the next load
     core->level.reset();
     core->resources.reset();
 }
@@ -326,6 +418,8 @@ RETRO_API void retro_run() {
         applyOptions(false);
 
     input_poll_cb();
+    if (runMovie())
+        return;
     handleLevelSwitch();
     handleSoundTest();
 
