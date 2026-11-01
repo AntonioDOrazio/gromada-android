@@ -17,8 +17,13 @@
 //    escapes (0xF9..0xFF) that copy rows / blocks. Modes 3/4 (intra) and 10/11 code every
 //    other row (and mode 10 every other column) and interpolate the rest.
 //
+// Provenance: written for this project without copying code, but the algorithm follows
+// FFmpeg's decoder (libavcodec/indeo3.c, LGPL-2.1+), the most complete description of the
+// format, including the quirks needed for identical output: see "Provenienza e licenze" in
+// docs/video.md. Build with -DGROMADA_NO_INDEO3 to leave this decoder out.
+//
 // Implementation notes:
-//  - written for this project in plain C++; the tables are Intel's (indeo3_tables.hpp);
+//  - the tables are Intel's (indeo3_tables.hpp);
 //  - behaviour matches FFmpeg's decoder bit for bit on the game's movies (tests/video_data_test),
 //    including its quirks: the requantisation of the prediction row is done in place
 //    (also on the reference picture for INTER cells), RLE "skip" codes in INTRA cells keep

@@ -13,8 +13,10 @@
 
 #include "engine/audio_stream.hpp"
 #include "video/avi.hpp"
-#include "video/indeo3.hpp"
 #include "video/msvideo1.hpp"
+#ifndef GROMADA_NO_INDEO3
+#include "video/indeo3.hpp"
+#endif
 
 #include <array>
 #include <cmath>
@@ -38,6 +40,7 @@ inline void paletteToXrgb(std::span<const std::uint8_t> src, const std::vector<s
         dst[i] = src[i] < palette.size() ? palette[src[i]] : 0;
 }
 
+#ifndef GROMADA_NO_INDEO3
 // YUV 4:1:0 with 7-bit samples (Indeo 3) -> XRGB8888. Samples are scaled to 8 bits (x2),
 // then converted with BT.601 limited-range coefficients (what FFmpeg uses for these
 // files); chroma is upsampled bilinearly (chroma samples sit at the centre of their 4x4
@@ -96,6 +99,7 @@ private:
     std::array<int, 256> m_y{}, m_rv{}, m_gu{}, m_gv{}, m_bu{};
     std::vector<int> m_u, m_v;
 };
+#endif
 
 // --- player -------------------------------------------------------------------------------
 
@@ -123,10 +127,12 @@ public:
                 throw std::runtime_error("MS Video 1: unsupported bit depth");
             m_msvideo1 = std::make_unique<MsVideo1Decoder>(m_width, m_height, s.video.bitCount);
             break;
+#ifndef GROMADA_NO_INDEO3
         case fourcc("IV31"): case fourcc("iv31"): case fourcc("IV32"): case fourcc("iv32"):
             m_indeo3 = std::make_unique<Indeo3Decoder>(m_width, m_height);
             m_yuv = std::make_unique<YuvToRgb>();
             break;
+#endif
         default:
             throw std::runtime_error("unsupported video codec " + fourccString(s.video.compression));
         }
@@ -186,7 +192,9 @@ public:
 
     // Native decoder output, for comparisons with reference decoders.
     [[nodiscard]] const MsVideo1Decoder* msvideo1() const noexcept { return m_msvideo1.get(); }
+#ifndef GROMADA_NO_INDEO3
     [[nodiscard]] const Indeo3Decoder* indeo3() const noexcept { return m_indeo3.get(); }
+#endif
 
     // Draws the picture into an XRGB8888 framebuffer, scaled to fit (aspect ratio kept,
     // black bars): 640x480 fills a 4:3 framebuffer and is pillarboxed in a 16:9 one.
@@ -298,6 +306,7 @@ private:
                 else rgb555ToXrgb(m_msvideo1->rgb555(), m_picture.data());
             }
         } else {
+#ifndef GROMADA_NO_INDEO3
             const auto status = m_indeo3->decode(m_buf);
             ok = status != Indeo3Decoder::Status::Error;
             if (status != Indeo3Decoder::Status::Decoded)
@@ -305,6 +314,7 @@ private:
             if (convert && (m_indeo3->width() != m_width || m_indeo3->height() != m_height))
                 convert = false; // size change mid-stream: not supported by the player
             if (convert) m_yuv->convert(*m_indeo3, m_picture.data());
+#endif
         }
         ++m_decoded;
         if (!ok) ++m_errors;
@@ -317,8 +327,10 @@ private:
     double m_fps = 15.0;
     std::size_t m_frameStart = 0;
     std::unique_ptr<MsVideo1Decoder> m_msvideo1;
+#ifndef GROMADA_NO_INDEO3
     std::unique_ptr<Indeo3Decoder> m_indeo3;
     std::unique_ptr<YuvToRgb> m_yuv;
+#endif
     std::unique_ptr<Audio> m_audio;
     std::vector<std::uint32_t> m_picture;
     std::vector<std::uint8_t> m_buf;

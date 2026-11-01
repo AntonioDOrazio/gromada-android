@@ -16,6 +16,8 @@ Il core **non contiene asset del gioco**: legge i file della tua copia originale
   - Effetti dal `fw.res` (WAV mono 8 bit 11/22 kHz, ricampionati a 44,1 kHz).
   - Musica: le tracce CD Audio originali (2–12) in OGG, con la playlist di ogni livello
     letta dal suo script (`PlayMusic(m1,m2,m3,m4)`), ciclata come nel gioco originale.
+- Filmati: opzione **Riproduci filmato** (`avi/0.avi` … `3.avi`, MS Video 1 e Indeo 3, audio
+  sincronizzato a 60 e 120 fps; Start/A/B per saltare). Dettagli in [`docs/video.md`](docs/video.md).
 
 ## Preparare i file del gioco
 Serve la cartella installata del gioco con `fw.res` e `maps/`. In RetroArch carica come contenuto
@@ -60,5 +62,6 @@ e `gromada_libretro.info` nella cartella info.
   non è ancora utilizzabile con l'NDK. Gli header contengono le implementazioni:
   il core è compilato come singola unità di traduzione.
 - `src/engine`: livello runtime, renderer e mixer audio.
+- `src/video`: demuxer AVI, decoder MS Video 1 e Indeo 3, player dei filmati.
 - `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT).
 - `src/gromada_libretro.cpp`: API libretro.
