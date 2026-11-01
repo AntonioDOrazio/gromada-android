@@ -9,3 +9,5 @@ function(gromada_add_test name)
 endfunction()
 
 gromada_add_test(resources_test resources_test.cpp)
+gromada_add_test(ui_text_test ui_text_test.cpp)
+gromada_add_test(ui_data_test ui_data_test.cpp)
