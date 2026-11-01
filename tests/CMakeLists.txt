@@ -11,3 +11,4 @@ endfunction()
 gromada_add_test(resources_test resources_test.cpp)
 # Movies: synthetic tests (CI) and the full decode of the game's movies compared with ffmpeg.
 gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c)
+gromada_add_test(video_data_test video_data_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c)

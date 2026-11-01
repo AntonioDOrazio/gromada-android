@@ -281,8 +281,9 @@ void startMovie(int index) {
             m.outputFrames = 0;
             m.prevSkip = true; // a button held when the movie starts does not skip it
             core->mixer.setStream(m.movie->audio());
-            log(RETRO_LOG_INFO, "movie %s: %dx%d, %zu frames at %.3f fps (%.2f s)", path.string().c_str(),
-                m.movie->width(), m.movie->height(), m.movie->frameCount(), m.movie->frameRate(), m.movie->duration());
+            log(RETRO_LOG_INFO, "movie %s: %dx%d, %zu frames at %.3f fps (%.2f s), audio %.2f s", path.string().c_str(),
+                m.movie->width(), m.movie->height(), m.movie->frameCount(), m.movie->frameRate(), m.movie->videoDuration(),
+                m.movie->audioDuration());
         } catch (const std::exception& e) {
             log(RETRO_LOG_ERROR, "cannot play %s: %s", path.string().c_str(), e.what());
         }

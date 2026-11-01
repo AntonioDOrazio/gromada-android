@@ -7,8 +7,9 @@
 // shows the frame due at the current time t (frame floor(t * fps_movie)), then advances t;
 // the audio mixed during the same output frame covers [t, t + dt). So the picture is the
 // one whose interval contains the audio being played: audio and video can never be more
-// than one movie frame apart, at any output rate. The movie is finished once t reaches
-// frames / fps_movie.
+// than one movie frame apart, at any output rate. The movie is finished once t reaches the
+// end of the longer stream (3.avi has 17 s of soundtrack after its last, black, frame:
+// the last picture stays on screen meanwhile, as in common players).
 
 #include "engine/audio_stream.hpp"
 #include "video/avi.hpp"
@@ -144,7 +145,9 @@ public:
     [[nodiscard]] int height() const noexcept { return m_height; }
     [[nodiscard]] double frameRate() const noexcept { return m_fps; }
     [[nodiscard]] std::size_t frameCount() const noexcept { return m_frameStart + m_video->chunks.size(); }
-    [[nodiscard]] double duration() const noexcept { return static_cast<double>(frameCount()) / m_fps; }
+    [[nodiscard]] double videoDuration() const noexcept { return static_cast<double>(frameCount()) / m_fps; }
+    [[nodiscard]] double audioDuration() const noexcept { return m_audio ? m_audio->duration() : 0.0; }
+    [[nodiscard]] double duration() const noexcept { return std::max(videoDuration(), audioDuration()); }
     [[nodiscard]] double time() const noexcept { return m_time; }
     [[nodiscard]] bool finished() const noexcept { return m_time >= duration() - 1e-9; }
     // Index of the frame on screen (-1 before the first step).
@@ -220,7 +223,11 @@ private:
             // A delayed start (strh.dwStart, in blocks) is played as silence.
             if (s.rate > 0 && s.start > 0)
                 m_silence = static_cast<std::size_t>(std::llround(static_cast<double>(s.start) * s.scale / s.rate * f.sampleRate));
+            std::uint64_t bytes = 0;
+            for (const auto& c : s.chunks) bytes += c.size;
+            m_duration = static_cast<double>(m_silence + bytes / m_bytesPerFrame) / f.sampleRate;
         }
+        [[nodiscard]] double duration() const noexcept { return m_duration; }
         [[nodiscard]] int sampleRate() const override { return static_cast<int>(m_stream.audio.sampleRate); }
         std::size_t read(std::int16_t* out, std::size_t frames) override {
             std::size_t done = 0;
@@ -269,6 +276,7 @@ private:
         const AviStream& m_stream;
         std::size_t m_bytesPerFrame = 2;
         std::size_t m_chunk = 0, m_pos = 0, m_silence = 0;
+        double m_duration = 0.0;
         std::vector<std::uint8_t> m_buf;
     };
 
