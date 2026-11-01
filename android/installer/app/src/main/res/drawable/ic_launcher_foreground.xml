@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stylised CD with a "G": 108dp adaptive icon foreground (safe zone 66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#E0A040" android:fillType="evenOdd"
+        android:pathData="M54,24a30,30 0,1 1,-0.01 0zM54,48a6,6 0,1 0,0.01 0z" />
+    <path android:fillColor="#2B2118"
+        android:pathData="M54,33a21,21 0,1 0,21 21h-9a12,12 0,1 1,-12 -12v-9zM58,50h17v8h-17z" />
+</vector>
