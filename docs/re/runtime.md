@@ -24,14 +24,16 @@ Regole di esecuzione da seguire. Tutte a confidenza **alta** salvo dove indicato
   `<mappa>.ini` viene **compilato in un bytecode per una macchina a pila** (compilatore a discesa
   ricorsiva, 0x417cb0–0x41a790) ed eseguito dalla VM `0x41a790`. Un modo fedele e semplice per la
   issue #1 è replicare lo stesso bytecode: `tools/re/runtime/gscript.py` è una replica del
-  compilatore (vedi §2) e compila senza errori tutti i 38 script del gioco.
+  compilatore (vedi §2) e compila senza errori tutti i 38 script del gioco. Non esiste bytecode
+  originale con cui confrontarla byte per byte, ma la disposizione delle variabili coincide con
+  quella registrata nelle tre demo (§8).
 - **`main()` viene eseguita da capo una volta per frame** di gioco (una "tick"): la VM parte
   sempre dall'offset 0, dove il compilatore ha messo `CALL main; JMP +30000`. Non c'è stato di
   esecuzione che sopravviva tra un frame e l'altro, tranne le **variabili globali** e le
   **`iff` già scattate**. Un `return` in `main` termina l'esecuzione di quel frame.
 - Ordine dentro un frame (0x401550 → 0x4141f0): avanzamento orologio (`GetTime`), campionamento
   input, **script (`main`)**, simulazione (0x40b880), aggiornamento menu (0x40c1d0: hover/click),
-  input del giocatore (0x415e20: scorrimento, cursore, comandi alla Kassandra), azzeramento di
+  input del giocatore (0x415e20: scorrimento, cursore, comandi di selezione), azzeramento di
   tasto e click, rendering. Quindi `MenuVid()` letto dallo script al frame N riflette il click
   elaborato alla fine del frame N−1, e vale per un solo frame.
 - Il frame rate non è fisso: un frame per iterazione del ciclo dei messaggi. L'orologio di gioco
@@ -97,7 +99,7 @@ Livelli dal più stretto al più largo (tutti associativi a sinistra):
 
 Differenze da C: confronti e shift hanno la stessa precedenza; `& ^ | && ||` hanno la stessa
 precedenza; **`&&` e `||` non cortocircuitano** (entrambi gli operandi vengono sempre
-valutati, risultato 0/1). Il controllo statico (§2.10) mostra che nessuno script del gioco
+valutati, risultato 0/1). Il controllo statico (§2.9) mostra che nessuno script del gioco
 mescola operatori il cui risultato cambierebbe rispetto a C, ma la mancanza di cortocircuito
 conta per gli effetti collaterali (chiamate a builtin in entrambi i lati).
 
@@ -150,7 +152,8 @@ stesso: è il salto a essere trasformato e la `iff` può scattare **una seconda 
 raggiunta per un'altra strada. Succede in 6 punti degli script (§2.9), tra cui
 `iff(n_map>0 && n_map<=30)` in `Tact()` quando nello stesso frame scatta un ramo della catena
 dei cheat (evento praticamente impossibile al primo frame). Un'implementazione con "flag per
-sito" è quindi corretta per il gioco reale; per la fedeltà assoluta conviene il bytecode.
+sito" si discosta dall'originale solo in quei 6 punti e solo in sequenze rare (negli script la
+seconda esecuzione è innocua); per la fedeltà assoluta conviene il bytecode.
 `iff ... else` è sintatticamente valido (dopo lo scatto si esegue sempre il ramo `else`) ma nessuno
 script lo usa.
 
@@ -334,7 +337,7 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | ID | Firma | Ritorno | Semantica | Handler | Conf. |
 |---|---|---|---|---|---|
 | 64 | `Load(string filename)` | — | Carica una mappa. Fuori dalla rete: `PostMessage(WM_COMMAND 40012, nome)`, cioè il caricamento avviene **dopo la fine del frame** (il resto di `main` continua). Il gestore copia il nome in 0x428068 e chiama 0x4149b0. Con `SetNet(≠0)` il nome è copiato in `obj+0x3446` e il caricamento è sincronizzato in rete. Un `.dem` avvia la riproduzione di una demo (§8). File inesistente = errore fatale | 0x412b5d | alta |
-| 65 | `SizeTo(int unit,int x,int y)` | int | Distanza `max(|ux−x|, (|uy−y|*3)>>1)` (0x40aff0); unit=0 → 60000 | 0x412bcc | alta |
+| 65 | `SizeTo(int unit,int x,int y)` | int | Distanza `max(abs(ux−x), abs(uy−y)*3>>1)` (0x40aff0); unit=0 → 60000 | 0x412bcc | alta |
 | 66 | `Print(int i)` | — | Scrive l'argomento (come stringa) in `error.log` (debug) | 0x412c2b | alta |
 | 67 | `Action(int unit,int act,int var1,int var2)` | int | unit=0 → 0. `act ≤ 15`: cambia azione/animazione (0x40b3e0(act,−1)) e restituisce 0. `act > 15`: restituisce `unit->Action(act,var1,var2)` | 0x412c51 | alta |
 | 68 | `Create(int nvid,int x,int y,int z)` | int | `CreateUnit(nvid,x,y,z,dir=0,0,0)` (0x40e1b0): 0 se fuori mappa, se `MaxUnit` raggiunto o se il vid lo richiede sposta x,y di ±8 a caso (2 chiamate a `rand`). nvid fuori tabella = errore fatale | 0x412cc0 | alta |
