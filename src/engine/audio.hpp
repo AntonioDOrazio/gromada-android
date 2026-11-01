@@ -3,21 +3,13 @@
 // samples that match the frame rate, so everything is mixed synchronously in retro_run:
 //  - sound effects: SoundData from fw.res (8/16-bit or float PCM, any rate), resampled
 //    with linear interpolation to the output rate;
-//  - music: the original CD audio tracks, provided by the user as OGG files
-//    (music/trackNN.ogg), streamed with stb_vorbis and cycled as a 4-entry playlist,
+//  - music: the original CD audio tracks, provided by the user as music/trackNN.flac,
+//    .ogg or .wav (engine/music_stream.hpp), streamed and cycled as a 4-entry playlist,
 //    mirroring the game's PlayMusic(m1, m2, m3, m4) script call.
 
 #include "core/std.hpp"
+#include "engine/music_stream.hpp"
 #include "libgromada/resources_sound.hpp"
-
-extern "C" {
-struct stb_vorbis;
-stb_vorbis* stb_vorbis_open_filename(const char* filename, int* error, const void* alloc_buffer);
-void stb_vorbis_close(stb_vorbis* f);
-int stb_vorbis_get_samples_short_interleaved(stb_vorbis* f, int channels, short* buffer, int num_shorts);
-}
-// stb_vorbis_get_info returns a struct by value; wrapped in the C unit (stb_vorbis_impl.c).
-extern "C" void gromada_vorbis_info(stb_vorbis* f, unsigned* sample_rate, int* channels);
 
 namespace gromada {
 
@@ -116,42 +108,37 @@ private:
 
     // --- music ---
 
-    std::optional<std::filesystem::path> findTrack(int track) const {
+    // Lookup order: for each music directory, extension (.flac, .ogg, .wav), then
+    // spelling (trackNN, TrackNN, "track NN", "Track NN"). The first readable file wins.
+    std::unique_ptr<MusicStream> findTrack(int track) const {
         for (const auto& dir : m_musicDirs) {
-            for (const auto* fmt : {"track{:02}.ogg", "Track{:02}.ogg", "track {:02}.ogg", "Track {:02}.ogg"}) {
-                auto p = dir / std::vformat(fmt, std::make_format_args(track));
-                std::error_code ec;
-                if (std::filesystem::exists(p, ec))
-                    return p;
+            for (const auto ext : MusicStream::Extensions) {
+                for (const auto* fmt : {"track{:02}", "Track{:02}", "track {:02}", "Track {:02}"}) {
+                    auto p = dir / (std::vformat(fmt, std::make_format_args(track)) + std::string{ext});
+                    std::error_code ec;
+                    if (!std::filesystem::exists(p, ec))
+                        continue;
+                    if (auto s = MusicStream::open(p))
+                        return s;
+                }
             }
         }
-        return std::nullopt;
+        return nullptr;
     }
 
     void openTrack(int track) {
         closeMusic();
-        const auto path = findTrack(track);
-        if (!path)
-            return;
-        int err = 0;
-        m_music = stb_vorbis_open_filename(path->string().c_str(), &err, nullptr);
+        m_music = findTrack(track);
         if (!m_music)
             return;
-        unsigned rate = 0;
-        int channels = 0;
-        gromada_vorbis_info(m_music, &rate, &channels);
-        m_musicStep = static_cast<double>(rate) / m_outRate;
+        m_musicStep = static_cast<double>(m_music->sampleRate()) / m_outRate;
         m_musicPos = 0.0;
         m_musicBuf.clear();
         m_musicBufStart = 0;
         m_currentTrack = track;
     }
 
-    void closeMusic() {
-        if (m_music)
-            stb_vorbis_close(m_music);
-        m_music = nullptr;
-    }
+    void closeMusic() { m_music.reset(); }
 
     // Ensures the decoded window covers source frame index `needed`; false at end of track.
     bool fillMusic(std::size_t needed) {
@@ -162,9 +149,9 @@ private:
                 m_musicBufStart += total - 1;
                 m_musicBuf.erase(m_musicBuf.begin(), m_musicBuf.end() - 2);
             }
-            short chunk[4096];
-            const int got = stb_vorbis_get_samples_short_interleaved(m_music, 2, chunk, 4096);
-            if (got <= 0)
+            std::int16_t chunk[4096];
+            const std::size_t got = m_music->read(chunk, 2048);
+            if (got == 0)
                 return false;
             m_musicBuf.insert(m_musicBuf.end(), chunk, chunk + got * 2);
         }
@@ -206,7 +193,7 @@ private:
     std::array<int, 4> m_playlist{};
     std::size_t m_playlistPos = 0;
     int m_currentTrack = 0;
-    stb_vorbis* m_music = nullptr;
+    std::unique_ptr<MusicStream> m_music;
     double m_musicStep = 1.0, m_musicPos = 0.0;
     std::vector<short> m_musicBuf;   // decoded window, interleaved stereo
     std::size_t m_musicBufStart = 0; // source frame index of m_musicBuf[0]

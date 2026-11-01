@@ -9,3 +9,9 @@ function(gromada_add_test name)
 endfunction()
 
 gromada_add_test(resources_test resources_test.cpp)
+
+# Music decoders (FLAC/WAV/OGG) through the Mixer, with synthetic files.
+gromada_add_test(music_test music_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
