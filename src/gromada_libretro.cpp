@@ -1,10 +1,12 @@
-// Gromada libretro core — milestone M1 ("viewer"):
+// Gromada libretro core — milestones M1 ("viewer") + M2 (audio):
 // loads the original game data (fw.res + maps), renders a level with the software
 // renderer and scrolls it with the gamepad. 60/120 fps and 4:3/16:9 are core options.
+// Audio: sound effects from fw.res and the CD soundtrack (music/trackNN.ogg).
 //
 // This is the ONLY translation unit of the core (libgromada is header-implemented).
 
 #include "core/std.hpp"
+#include "engine/audio.hpp"
 #include "engine/level.hpp"
 #include "engine/renderer.hpp"
 #include "libretro/libretro.h"
@@ -39,6 +41,8 @@ struct Options {
     int fps = 60;
     bool widescreen = false;
     int startLevel = 1;
+    int musicVolume = 80;
+    int sfxVolume = 100;
 };
 
 struct Core {
@@ -48,9 +52,11 @@ struct Core {
     Options options;
     int levelIndex = 1;
     float camX = 0, camY = 0;
-    bool prevL = false, prevR = false;
+    bool prevL = false, prevR = false, prevA = false, prevB = false;
+    int soundTest = -1;
     double audioDebt = 0;
-    std::vector<std::int16_t> silence;
+    std::vector<std::int16_t> audioBuf;
+    gromada::Mixer mixer{AudioRate};
 };
 
 std::unique_ptr<Core> core;
@@ -72,6 +78,8 @@ void declareOptions() {
         {"gromada_fps", "Frame rate; 60|120"},
         {"gromada_aspect", "Formato; 4:3|16:9"},
         {"gromada_level", levels.c_str()},
+        {"gromada_music_volume", "Volume musica; 80|90|100|0|10|20|30|40|50|60|70"},
+        {"gromada_sfx_volume", "Volume effetti; 100|0|10|20|30|40|50|60|70|80|90"},
         {nullptr, nullptr},
     };
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
@@ -89,6 +97,8 @@ Options readOptions() {
     if (const char* v = getVar("gromada_fps")) o.fps = std::strcmp(v, "120") == 0 ? 120 : 60;
     if (const char* v = getVar("gromada_aspect")) o.widescreen = std::strcmp(v, "16:9") == 0;
     if (const char* v = getVar("gromada_level")) o.startLevel = std::clamp(std::atoi(v), 1, LevelCount);
+    if (const char* v = getVar("gromada_music_volume")) o.musicVolume = std::clamp(std::atoi(v), 0, 100);
+    if (const char* v = getVar("gromada_sfx_volume")) o.sfxVolume = std::clamp(std::atoi(v), 0, 100);
     return o;
 }
 
@@ -122,7 +132,14 @@ bool loadLevel(int index) {
         core->camX = static_cast<float>(h.observerX);
         core->camY = static_cast<float>(h.observerY);
         log(RETRO_LOG_INFO, "level %02d: %ux%u, %zu entities", index, h.width, h.height, core->level->entities().size());
-        notify(std::format("Livello {:02}", index));
+        const auto script = core->resources->mapsPath() / "levels" / std::format("{:02}.INI", index);
+        if (const auto playlist = gromada::findLevelPlaylist(script)) {
+            core->mixer.playMusic(*playlist);
+            notify(std::format("Livello {:02} - musica: traccia {}", index, (*playlist)[0]));
+        } else {
+            core->mixer.stopMusic();
+            notify(std::format("Livello {:02}", index));
+        }
         return true;
     } catch (const std::exception& e) {
         log(RETRO_LOG_ERROR, "cannot load %s: %s", path.string().c_str(), e.what());
@@ -135,6 +152,8 @@ void applyOptions(bool initial) {
     const Options prev = core->options;
     core->options = next;
     core->renderer.setWidth(next.widescreen ? gromada::Renderer::MaxWidth : 640);
+    core->mixer.setMusicVolume(next.musicVolume / 100.0f);
+    core->mixer.setSfxVolume(next.sfxVolume / 100.0f);
     if (initial)
         return;
 
@@ -188,14 +207,31 @@ void handleLevelSwitch() {
     core->prevR = r;
 }
 
-void pushSilence() {
+// Sound test (viewer only, until gameplay triggers effects): A = next effect, B = previous.
+void handleSoundTest() {
+    const bool a = button(RETRO_DEVICE_ID_JOYPAD_A);
+    const bool b = button(RETRO_DEVICE_ID_JOYPAD_B);
+    const int count = static_cast<int>(core->resources->sounds().size());
+    if (count > 0 && ((a && !core->prevA) || (b && !core->prevB))) {
+        core->soundTest = a && !core->prevA ? (core->soundTest + 1) % count
+                                            : (core->soundTest <= 0 ? count - 1 : core->soundTest - 1);
+        core->mixer.playSfx(core->resources->sounds()[core->soundTest]);
+        notify(std::format("Effetto {}/{}", core->soundTest, count - 1));
+    }
+    core->prevA = a;
+    core->prevB = b;
+}
+
+void pushAudio() {
     // 44100 / 120 is not an integer: carry the fractional sample over to the next frame.
     core->audioDebt += static_cast<double>(AudioRate) / core->options.fps;
     const auto frames = static_cast<std::size_t>(core->audioDebt);
     core->audioDebt -= frames;
-    core->silence.assign(frames * 2, 0);
-    if (frames)
-        audio_batch_cb(core->silence.data(), frames);
+    if (!frames)
+        return;
+    core->audioBuf.resize(frames * 2);
+    core->mixer.render(core->audioBuf.data(), frames);
+    audio_batch_cb(core->audioBuf.data(), frames);
 }
 
 } // namespace
@@ -222,7 +258,7 @@ RETRO_API void retro_set_controller_port_device(unsigned, unsigned) {}
 RETRO_API void retro_get_system_info(retro_system_info* info) {
     *info = {};
     info->library_name = "Gromada";
-    info->library_version = "0.1.0-m1";
+    info->library_version = "0.2.0-m2";
     info->valid_extensions = "exe|res";
     info->need_fullpath = true;
     info->block_extract = true;
@@ -252,6 +288,8 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
         {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP, "Scorri in alto"},
         {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN, "Scorri in basso"},
         {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y, "Scorrimento veloce"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "Prova effetto successivo"},
+        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B, "Prova effetto precedente"},
         {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Livello precedente"},
         {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Livello successivo"},
         {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Scorri (orizzontale)"},
@@ -272,6 +310,7 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
     log(RETRO_LOG_INFO, "fw.res: %zu vids, %zu sounds, %zu weapons",
         core->resources->vids().size(), core->resources->sounds().size(), core->resources->weapons().size());
 
+    core->mixer.setMusicDirectories({gameDir / "music", gameDir / "MUSIC", gameDir});
     applyOptions(true);
     return loadLevel(core->options.startLevel);
 }
@@ -288,6 +327,7 @@ RETRO_API void retro_run() {
 
     input_poll_cb();
     handleLevelSwitch();
+    handleSoundTest();
 
     const float dt = 1.0f / core->options.fps;
     updateCamera(dt);
@@ -296,7 +336,7 @@ RETRO_API void retro_run() {
     auto& r = core->renderer;
     r.draw(*core->level, static_cast<int>(core->camX), static_cast<int>(core->camY));
     video_cb(r.xrgb(), r.width(), r.height(), r.pitch());
-    pushSilence();
+    pushAudio();
 }
 
 RETRO_API unsigned retro_get_region() { return RETRO_REGION_NTSC; }

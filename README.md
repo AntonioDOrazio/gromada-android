@@ -5,16 +5,30 @@ pensata per Android (Retroid Pocket Nova / Flip 2) con RetroArch in Vulkan e sha
 
 Il core **non contiene asset del gioco**: legge i file della tua copia originale.
 
-## Stato: M1 — "viewer"
+## Stato: M2 — viewer + audio
 - Carica `fw.res` e i 30 livelli originali, li disegna con il renderer software
   (sprite indicizzati, ombre, luce, trasparenze) e li fa scorrere col pad.
 - Opzioni core: **Frame rate 60/120**, **Formato 4:3 (640×480) / 16:9 (854×480)**, livello di anteprima.
-- Controlli: stick sinistro o d-pad = scorrimento, Y = veloce, L/R = livello precedente/successivo.
-- Audio: per ora silenzio (sincronizzato correttamente a 60 e 120 fps).
+- Opzioni audio: **Volume musica** e **Volume effetti**.
+- Controlli: stick sinistro o d-pad = scorrimento, Y = veloce, L/R = livello precedente/successivo,
+  A/B = prova effetto sonoro successivo/precedente.
+- Audio: mixer interno, sincronizzato al campione a 60 e 120 fps.
+  - Effetti dal `fw.res` (WAV mono 8 bit 11/22 kHz, ricampionati a 44,1 kHz).
+  - Musica: le tracce CD Audio originali (2–12) in OGG, con la playlist di ogni livello
+    letta dal suo script (`PlayMusic(m1,m2,m3,m4)`), ciclata come nel gioco originale.
 
 ## Preparare i file del gioco
 Serve la cartella installata del gioco con `fw.res` e `maps/`. In RetroArch carica come contenuto
 `gromada.exe` (o `fw.res`) da quella cartella.
+
+La colonna sonora è su CD Audio, quindi non viene installata: estrai le tracce 2–12 del CD
+in `music/track02.ogg` … `music/track12.ogg` dentro la cartella del gioco. Con un'immagine
+`.bin/.cue`, per esempio:
+
+    # traccia N dal cue: tempi di inizio/fine in settori, 2352 byte per settore
+    ffmpeg -f s16le -ar 44100 -ac 2 -ss <inizio_s> -t <durata_s> -i GROMADA.bin -c:a libvorbis -q:a 6 track02.ogg
+
+Senza questi file il gioco funziona lo stesso, solo senza musica.
 
 ## Build
 Desktop Linux (clang ≥ 18 + libc++):
@@ -45,5 +59,6 @@ e `gromada_libretro.info` nella cartella info.
   convertendo i moduli C++23 in header (`tools/demodularize.py`), perché `import std`
   non è ancora utilizzabile con l'NDK. Gli header contengono le implementazioni:
   il core è compilato come singola unità di traduzione.
-- `src/engine`: livello runtime e renderer.
+- `src/engine`: livello runtime, renderer e mixer audio.
+- `src/third_party/stb_vorbis.c`: decoder OGG (pubblico dominio / MIT).
 - `src/gromada_libretro.cpp`: API libretro.

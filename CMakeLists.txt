@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(gromada_libretro VERSION 0.1.0 LANGUAGES CXX)
+project(gromada_libretro VERSION 0.1.0 LANGUAGES C CXX)
 
 # Plain C++23 (no modules): builds with desktop clang + libc++ and with the Android NDK.
 set(CMAKE_CXX_STANDARD 23)
@@ -13,14 +13,19 @@ endif()
 
 # Desktop Linux: libc++ is required (libstdc++ 13 lacks <mdspan>).
 if(NOT ANDROID AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-stdlib=libc++)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
     add_link_options(-stdlib=libc++)
 endif()
 
-add_library(gromada_libretro SHARED src/gromada_libretro.cpp)
+add_library(gromada_libretro SHARED src/gromada_libretro.cpp src/third_party/stb_vorbis_impl.c)
 target_include_directories(gromada_libretro PRIVATE src)
-target_compile_options(gromada_libretro PRIVATE -Wall -Wno-unknown-attributes -Wno-deprecated-this-capture
-    -Wno-defaulted-function-deleted -Wno-parentheses -fvisibility=hidden)
+set(GROMADA_CXX_WARNINGS -Wall -Wno-unknown-attributes -Wno-deprecated-this-capture
+    -Wno-defaulted-function-deleted -Wno-parentheses)
+target_compile_options(gromada_libretro PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:${GROMADA_CXX_WARNINGS}>"
+    -fvisibility=hidden)
+# stb_vorbis is third-party C: keep it quiet.
+set_source_files_properties(src/third_party/stb_vorbis_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 set_target_properties(gromada_libretro PROPERTIES PREFIX "")
 
 if(ANDROID)

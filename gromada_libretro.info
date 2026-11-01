@@ -6,7 +6,7 @@ corename = "Gromada"
 categories = "Game"
 license = "MIT"
 permissions = ""
-display_version = "0.1.0-m1"
+display_version = "0.2.0-m2"
 
 # Hardware Information
 manufacturer = "Buka Entertainment"
@@ -29,5 +29,5 @@ needs_fullpath = "true"
 disk_control = "false"
 is_experimental = "true"
 
-notes = "Reimplementazione del motore di Gromada (Buka, 1999). Richiede i file del gioco originale: avvia gromada.exe o fw.res dalla cartella del gioco (deve contenere fw.res e la cartella maps)."
+notes = "Reimplementazione del motore di Gromada (Buka, 1999). Richiede i file del gioco originale: avvia gromada.exe o fw.res dalla cartella del gioco (deve contenere fw.res e la cartella maps). Musica opzionale: tracce CD in music/trackNN.ogg."
 description = "Core libretro che reimplementa il motore di Gromada leggendo i dati originali del gioco."

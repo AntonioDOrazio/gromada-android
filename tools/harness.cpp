@@ -22,6 +22,8 @@ static std::string outPrefix, hold;
 static int frame = 0, pressRAt = -1, lastW = 0, lastH = 0;
 static double fps = 0;
 static size_t audioFrames = 0;
+static std::vector<int16_t> audioCapture;
+static std::set<int> pressA;
 
 static void logcb(enum retro_log_level, const char* fmt, ...) {
     va_list a; va_start(a, fmt); std::vfprintf(stderr, fmt, a); va_end(a);
@@ -64,11 +66,12 @@ static void video(const void* data, unsigned w, unsigned h, size_t pitch) {
     std::fprintf(stderr, "wrote %s\n", path.c_str());
 }
 
-static size_t audio(const int16_t*, size_t frames) { audioFrames += frames; return frames; }
+static size_t audio(const int16_t* d, size_t frames) { audioFrames += frames; audioCapture.insert(audioCapture.end(), d, d + frames * 2); return frames; }
 static void poll() {}
 static int16_t input(unsigned port, unsigned device, unsigned, unsigned id) {
     if (port != 0 || device != RETRO_DEVICE_JOYPAD) return 0;
     if (id == RETRO_DEVICE_ID_JOYPAD_R && frame == pressRAt) return 1;
+    if (id == RETRO_DEVICE_ID_JOYPAD_A && pressA.count(frame)) return 1;
     static const std::map<std::string, unsigned> names = {
         {"right", RETRO_DEVICE_ID_JOYPAD_RIGHT}, {"left", RETRO_DEVICE_ID_JOYPAD_LEFT},
         {"up", RETRO_DEVICE_ID_JOYPAD_UP}, {"down", RETRO_DEVICE_ID_JOYPAD_DOWN}, {"y", RETRO_DEVICE_ID_JOYPAD_Y}};
@@ -94,6 +97,7 @@ int main(int argc, char** argv) {
         std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
         if (k == "hold") hold = v;
         else if (k == "press_r_at") pressRAt = std::atoi(v.c_str());
+        else if (k == "press_a_at") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) pressA.insert(std::atoi(t)); }
         else if (k == "shots") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) shots.insert(std::atoi(t)); }
         else opts[k] = v;
     }
@@ -116,6 +120,15 @@ int main(int argc, char** argv) {
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "ran %d frames (%ux%u) in %.1f ms -> %.2f ms/frame; audio frames %zu (expected %.0f)\n",
                  frames, lastW, lastH, ms, ms / frames, audioFrames, frames * av.timing.sample_rate / fps);
+    {   // dump captured audio as WAV
+        std::string path = outPrefix + ".wav"; FILE* f = std::fopen(path.c_str(), "wb");
+        uint32_t rate = uint32_t(av.timing.sample_rate), bytes = uint32_t(audioCapture.size() * 2), v32; uint16_t v16;
+        std::fwrite("RIFF", 1, 4, f); v32 = 36 + bytes; std::fwrite(&v32, 4, 1, f); std::fwrite("WAVEfmt ", 1, 8, f);
+        v32 = 16; std::fwrite(&v32, 4, 1, f); v16 = 1; std::fwrite(&v16, 2, 1, f); v16 = 2; std::fwrite(&v16, 2, 1, f);
+        std::fwrite(&rate, 4, 1, f); v32 = rate * 4; std::fwrite(&v32, 4, 1, f); v16 = 4; std::fwrite(&v16, 2, 1, f);
+        v16 = 16; std::fwrite(&v16, 2, 1, f); std::fwrite("data", 1, 4, f); std::fwrite(&bytes, 4, 1, f);
+        std::fwrite(audioCapture.data(), 2, audioCapture.size(), f); std::fclose(f);
+    }
     retro_unload_game(); retro_deinit();
     return 0;
 }
