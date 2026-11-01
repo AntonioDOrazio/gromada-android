@@ -59,7 +59,7 @@ public:
 
     TextManager() = default;
     explicit TextManager(TimingLookup timing) : m_timing{std::move(timing)} {}
-    // Typewriter timings taken from the font vids.
+    // Typewriter timings taken from the font vids (`fonts` must outlive the manager).
     explicit TextManager(const FontSet& fonts)
         : m_timing{[&fonts](int font) {
               const Vid* v = fonts.vid(font);
