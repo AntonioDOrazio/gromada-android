@@ -337,15 +337,18 @@ class MainActivity : Activity() {
 
     private fun installCore() = withRetroArch { ra ->
         if (!coreFile.isFile) return@withRetroArch toast("Scarica prima il core (passo 3).")
+        val game = File(gameDir, "gromada.exe").takeIf { it.isFile }
         val go = {
-            Platform.sideloadCore(this, ra, coreFile)
+            // With the game, RetroArch copies the core and starts the game right away.
+            Platform.sideloadCore(this, ra, coreFile, game)
             prefs.edit().putString("sideloadedCommit", prefs.getString("coreCommit", null))
                 .putString("sideloadedPackage", ra.packageName).apply()
             appendLog("Richiesta installazione del core a ${ra.packageName}")
         }
-        val msg = "RetroArch copierà il core nella sua cartella privata e poi si aprirà (o si chiuderà, se era già aperto).\n\n" +
-            "Se compare “Done!” e RetroArch si apre, esci da RetroArch (Menu principale → Esci) e torna qui.\n" +
-            "Se compare un errore “Input file doesn't exist”, RetroArch non ha il permesso di leggere i file: aprilo e concedilo."
+        val msg = "RetroArch copierà il core nella sua cartella privata e poi si avvierà " +
+            (if (game != null) "con il gioco.\n\n" else "con il core.\n\n") +
+            "Se RetroArch è già aperto, prima chiudilo (Menu principale → Esci): altrimenti si chiude da solo e va riaperto.\n" +
+            "Se compare “Input file doesn't exist”, RetroArch non ha il permesso di leggere i file: aprilo e concedilo."
         if (ra.storage == RetroArch.StorageAccess.SCOPED)
             AlertDialog.Builder(this).setMessage(describe(ra) + "\n\nProvare comunque?")
                 .setPositiveButton("Prova") { _, _ -> go() }.setNegativeButton(android.R.string.cancel, null).show()

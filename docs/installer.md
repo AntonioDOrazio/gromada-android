@@ -21,8 +21,9 @@ di accesso ai file. Poi, nell'installer:
 3. **Core** – *Scarica / aggiorna core* scarica `gromada_libretro_android.so` e
    `gromada_libretro.info` dalla nightly del repository indicato (predefinito
    `AntonioDOrazio/gromada-android`) in `<cartella del gioco>/core/`.
-4. **RetroArch** – *Installa il core in RetroArch* (vedi sotto come funziona), *Crea playlist
-   “Gromada”*, poi *Gioca*.
+4. **RetroArch** – *Installa il core in RetroArch*: RetroArch copia il core e avvia subito il gioco
+   (vedi sotto come funziona). Poi *Crea playlist “Gromada”*; le volte successive basta *Gioca* (o la
+   playlist dentro RetroArch).
 
 Per aggiornare: all'avvio l'app controlla la nightly; se il commit è cambiato mostra
 “È disponibile un core più recente”: ripeti i passi 3 e 4 (*Scarica* e *Installa il core*).
@@ -50,7 +51,7 @@ novembre 2026):
 
 | Operazione | Come | Automatico? |
 |---|---|---|
-| Installare il core | `CoreSideloadActivity` (esportata, senza permessi) con l'extra `LIBRETRO` = percorso del `.so`: RetroArch lo copia in `dataDir/cores/` e si avvia con quel core | Sì, un tocco (vedi limiti) |
+| Installare il core | `CoreSideloadActivity` (esportata, senza permessi) con gli extra `LIBRETRO` = percorso del `.so` e `ROM` = `gromada.exe`: RetroArch lo copia in `dataDir/cores/` e avvia il gioco | Sì, un tocco (vedi limiti) |
 | Avviare il gioco | `RetroActivityFuture` con gli stessi extra del launcher di RetroArch: `ROM`, `LIBRETRO`, `CONFIGFILE`, `IME`, `DATADIR`, `APK`, `SDCARD`, `EXTERNAL` | Sì (*Gioca*) |
 | Playlist | file JSON `Gromada.lpl` (formato 1.5) in `/storage/emulated/0/RetroArch/playlists` | Sì, se RetroArch usa la cartella predefinita |
 | File `.info` del core | va in `dataDir/info/`, privata | **No** (non necessario) |
@@ -61,11 +62,14 @@ Perché non si può fare di più:
 - **I core si caricano solo dalla cartella privata di RetroArch** (`/data/user/0/<pacchetto>/cores`).
   La memoria condivisa è montata `noexec` ed è fuori dal namespace del linker; nessun'altra app può
   scrivere nella cartella privata. L'unica porta d'ingresso è `CoreSideloadActivity`, pensata per
-  gli sviluppatori: copia il file e avvia RetroArch con il core **senza** passare `CONFIGFILE`, quindi
-  quell'avvio usa una configurazione di ripiego. Per questo l'installer avvisa: se RetroArch si apre
-  dopo “Done!”, esci da RetroArch e torna all'installer; poi usa *Gioca* o la playlist, che usano
-  la tua configurazione normale. Se RetroArch era già aperto, alla richiesta si chiude da solo
-  (`onNewIntent` con un core diverso → `finish()`), dopo aver copiato il core.
+  gli sviluppatori: copia il file e avvia RetroArch con il core (e il contenuto, se passato). Nelle
+  versioni rilasciate (1.17 … 1.22.2) l'avvio passa la configurazione dell'utente come il launcher
+  di RetroArch; sul `master` attuale passa solo `ROM` e `LIBRETRO`, quindi con le versioni future
+  conviene uscire da RetroArch dopo l'installazione e avviare il gioco con *Gioca* o dalla playlist.
+- **RetroArch già aperto**: RetroArch è `singleInstance`. Se riceve un avvio con lo stesso core e lo
+  stesso contenuto si limita a tornare in primo piano; con un core o un contenuto diverso si chiude
+  (`finish()` + `System.exit(0)`) e va riaperto con un secondo tocco. Per questo l'app consiglia di
+  chiudere RetroArch (*Menu principale → Esci*) prima di installare o aggiornare il core.
 - **L'installer non può verificare** che il core sia stato copiato (la cartella è privata). Il
   ricevitore `com.retroarch.QUERY_INSTALLED_CORES` esiste solo su `master`, non nelle versioni
   rilasciate: per ora l'app ricorda quale versione ha inviato a RetroArch.
@@ -148,6 +152,20 @@ L'APK è firmato con una chiave di debug **pubblica** inclusa nel repository
 sopra l'altra senza disinstallare. Non è una chiave segreta: chiunque può firmare un APK
 equivalente. Prima di una distribuzione più ampia va sostituita con una chiave di rilascio custodita
 nei secret della CI.
+
+### Verifica su emulatore con RetroArch vero
+
+Il workflow `installer-e2e` (file `android/installer/e2e/run.sh`) avvia un emulatore Android 13
+x86_64, installa RetroArch 1.22.2 dal sito (`RetroArch_aarch64.apk`, che contiene anche le librerie
+x86_64) e una build x86_64 del core, poi esegue il codice dell'app:
+
+- rilevamento della build (`targetSdk` 28, archiviazione legacy, non da Google Play);
+- playlist scritta in `/sdcard/RetroArch/playlists/Gromada.lpl` con l'accesso a tutti i file;
+- `CoreSideloadActivity`: il core risulta copiato in `/data/data/com.retroarch.aarch64/cores/`
+  (SHA-256 identico, controllato da root) e RetroArch riceve `Config file`, `Libretro path` e
+  `Auto-start game` (log `[ENV]` di RetroArch);
+- *Gioca* a RetroArch chiuso: stessi extra ricevuti; a RetroArch già aperto con lo stesso gioco:
+  RetroArch torna in primo piano senza riavviarsi.
 
 ## Verifica e test
 

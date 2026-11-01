@@ -30,6 +30,12 @@ class RetroArchTest {
     }
 
     @Test
+    fun sideloadExtras() {
+        assertEquals(mapOf("LIBRETRO" to "/sd/c.so"), RetroArch.sideloadExtras("/sd/c.so"))
+        assertEquals(mapOf("LIBRETRO" to "/sd/c.so", "ROM" to "/sd/g.exe"), RetroArch.sideloadExtras("/sd/c.so", "/sd/g.exe"))
+    }
+
+    @Test
     fun playlistIsValidJsonWithEscapes() {
         val text = RetroArch.playlist("/sd/Gro\"mada\\x/gromada.exe", "/data/c.so")
         assertTrue(text.contains("\"path\": \"/sd/Gro\\\"mada\\\\x/gromada.exe\""))
