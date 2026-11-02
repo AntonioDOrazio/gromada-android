@@ -219,6 +219,28 @@ void testGamma() {
     }
 }
 
+// Format 4 runs with blue factor 0 and a red/green factor take the path 0x4021c0 of the
+// original, which overwrites the low word of the table pointer with the pixel (`mov bx, ax`)
+// and reads a heap-address-dependent entry: not reproducible, we implement the intended
+// brightening (docs/engine.md D5). Marks the surface pixels such runs cover.
+void markFormat4Bug(const std::vector<std::byte>& d, int x0, int y0, int fbw, int fbh, std::vector<bool>& mask) {
+    const auto u16 = [&](std::size_t p) { return std::to_integer<int>(d[p]) | (std::to_integer<int>(d[p + 1]) << 8); };
+    const int startY = u16(0), lines = u16(2);
+    std::size_t p = 4;
+    for (int ly = startY; ly < startY + lines; ++ly) {
+        int x = 0;
+        for (int w; (w = u16(p)), p += 2, (w & 0x7f) != 0;) {
+            const int n = w & 0x7f;
+            if (((w >> 7) & 7) == 0 && (w >> 10) != 0)
+                for (int i = 0; i < n; ++i) {
+                    const int px = x0 + x + i, py = y0 + ly;
+                    if (px >= 0 && px < fbw && py >= 0 && py < fbh) mask[static_cast<std::size_t>(py * fbw + px)] = true;
+                }
+            x += n;
+        }
+    }
+}
+
 void testPutcadr() {
     const Json j = load("hicolor_putcadr");
     const Json& a = j.at("arrays");
@@ -243,7 +265,7 @@ void testPutcadr() {
     }
     Tally t{"putcadr"};
     std::vector<RGBA8> pixels(FBW * FBH);
-    int index = 0;
+    int index = 0, skipped = 0;
     for (const auto& c : j.at("cases").arr) {
         const auto v = ints(c);
         const int fmt = static_cast<int>(v[0]);
@@ -255,9 +277,15 @@ void testPutcadr() {
         if (castShadow)
             hc::drawFrame(frame, x - (z >> 1) - (z >> 2), y + (z >> 2) - (z >> 1), palette, fb, hc::FrameVisitor::Pass::CastShadow);
         hc::drawFrame(frame, x, y - z, palette, fb, hc::FrameVisitor::Pass::Normal, castShadow);
+        std::vector<bool> skip(pixels.size());
+        if (fmt == 4) {
+            if (castShadow) markFormat4Bug(data[fmt], x - (z >> 1) - (z >> 2), y + (z >> 2) - (z >> 1), FBW, FBH, skip);
+            markFormat4Bug(data[fmt], x, y - z, FBW, FBH, skip);
+        }
         int bad = 0;
         std::int64_t firstExpected = 0, firstGot = 0;
         for (std::size_t i = 0; i < pixels.size(); ++i) {
+            if (skip[i]) { ++skipped; continue; }
             const auto got = hc::fromPixel(pixels[i]);
             if (got != v[5 + i]) {
                 if (!bad) { firstExpected = v[5 + i] | (static_cast<std::int64_t>(i) << 16); firstGot = got; }
@@ -266,6 +294,7 @@ void testPutcadr() {
         }
         t.check(bad == 0, index++, firstExpected, firstGot);
     }
+    std::fprintf(stderr, "putcadr: %d format-4 pixels on the original's bugged path not compared\n", skipped);
 }
 
 void testPixelModel() {
@@ -280,9 +309,95 @@ void testPixelModel() {
     CHECK_EQ(hc::fade(0xFFFF, 9), 0);
 }
 
+// The EndFrame state machine (0x406ea0): level sequences and their timing.
+void testEffectSequences() {
+    using gromada::game::ScreenEffects;
+    const auto run = [](int effect, std::uint32_t last0, int frameMs, int frames) {
+        ScreenEffects fx;
+        std::vector<int> levels;
+        int r = 0;
+        // Prime the 71 ms timer: a previous effect stepped at last0.
+        if (last0) { fx.start(5, [&] { return r; }); for (std::uint32_t c = last0 - 9 * 71 - 71; fx.effect(); c += 71) fx.endFrame(std::nullopt, c, false); }
+        fx.start(effect, [&] { return r; });
+        std::uint32_t clock = last0 + 100;   // the 71 ms timer last stepped long ago
+        for (int i = 0; i < frames && fx.effect(); ++i, clock += static_cast<std::uint32_t>(frameMs)) {
+            levels.push_back(fx.level());
+            fx.endFrame(std::nullopt, clock, false);
+        }
+        levels.push_back(fx.effect());
+        return levels;
+    };
+    // eff_nuke at 71 ms frames: 1, 3, 5, -32 (one frame), -30 .. -2, then off.
+    {
+        const auto l = run(1, 0, 71, 100);
+        std::vector<int> want{1, 3, 5, -32};
+        for (int v = -30; v <= -2; v += 2) want.push_back(v);
+        want.push_back(0);
+        CHECK(l == want);
+    }
+    // eff_bnuke: the negative branch starts at -30.
+    {
+        const auto l = run(4, 0, 71, 100);
+        CHECK(l.size() > 4 && l[3] == -30 && l[4] == -28);
+    }
+    // eff_fade: 1..9, -9 (one frame), -8 .. -1, off.
+    {
+        const auto l = run(5, 0, 71, 100);
+        std::vector<int> want;
+        for (int v = 1; v <= 9; ++v) want.push_back(v);
+        for (int v = -9; v <= -1; ++v) want.push_back(v);
+        want.push_back(0);
+        CHECK(l == want);
+    }
+    // At 20 ms frames a level lasts until 71 ms of clock passed since the last step.
+    {
+        const auto l = run(5, 0, 20, 400);
+        CHECK(l.size() > 6 && l[0] == 1 && l[1] == 2 && l[2] == 2 && l[3] == 2 && l[4] == 2 && l[5] == 3);
+    }
+    // Effect(0) stops a running effect; eff_random draws rand() % 6 + 1.
+    {
+        ScreenEffects fx;
+        fx.start(1, [] { return 0; });
+        fx.start(0, [] { return 0; });
+        CHECK_EQ(fx.effect(), 0);
+        fx.start(255, [] { return 10; });   // 10 % 6 + 1 = 5
+        CHECK_EQ(fx.effect(), 5);
+    }
+    // eff_openwindow: the previous picture stays outside a window that opens from the centre.
+    {
+        ScreenEffects fx;
+        constexpr int W = 64, H = 48;
+        std::vector<RGBA8> pic(W * H);
+        FramebufferRef fb{pic.data(), H, W};
+        const RGBA8 oldc{{255, 0, 0}, 255}, newc{{0, 0, 255}, 255};
+        std::ranges::fill(pic, oldc);
+        fx.endFrame(fb, 1000, false);              // the previous frame
+        fx.start(6, [] { return 0; });
+        fx.start(1, [] { return 0; });             // ignored while the window opens
+        CHECK_EQ(fx.effect(), 6);
+        std::uint32_t clock = 1017;
+        std::ranges::fill(pic, newc);
+        fx.endFrame(fb, clock, false);             // window = centre +-5
+        CHECK(pic[static_cast<std::size_t>(24 * W + 32)].b == 255 && pic[0].r == 255);
+        CHECK(pic[static_cast<std::size_t>(24 * W + 26)].r == 255 && pic[static_cast<std::size_t>(24 * W + 27)].b == 255);
+        int frames = 0;
+        while (fx.effect() && frames < 1000) {
+            clock += 17;
+            std::ranges::fill(pic, newc);
+            fx.endFrame(fb, clock, false);
+            ++frames;
+        }
+        CHECK_EQ(fx.effect(), 0);
+        CHECK(pic[0].b == 255);
+        // 64 px wide: min(4, 64*37/1600 = 1) px per 37 ms -> (32-5)/1 steps of 37 ms.
+        CHECK(frames > 50 && frames < 70);
+    }
+}
+
 } // namespace
 
 int main() {
+    testEffectSequences();
     testPixelModel();
     testTables();
     testEffects();
