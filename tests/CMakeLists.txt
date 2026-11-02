@@ -70,6 +70,17 @@ set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
 add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
 target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
+# Game-level trace of a demo replay (issue #13), compared with the emulated original by
+# tools/oracle/compare_traces.py (docs/trace-oracle.md).
+add_executable(game_trace ${PROJECT_SOURCE_DIR}/tools/game_trace.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+target_include_directories(game_trace PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(game_trace PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
+# The first 1500 frames of each demo against the emulated original (needs GROMADA_DATA and
+# ORACLE_PYTHON, skipped otherwise; whole demos: tests/trace_oracle.sh ... 0).
+add_test(NAME trace_oracle COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/trace_oracle.sh $<TARGET_FILE:game_trace>
+         ${CMAKE_BINARY_DIR}/trace_oracle_out 1500)
+set_tests_properties(trace_oracle PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 # Game session (src/game/session*.hpp): synthetic tests (mock engine, synthetic scripts) and
 # the whole flow of the game + the three demos on the original data (provisional engine).
 gromada_add_test(session_test session_test.cpp

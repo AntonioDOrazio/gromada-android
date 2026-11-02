@@ -294,8 +294,17 @@ public:
 
     // ---- ScriptHost -------------------------------------------------------------------------------
     script::Value callBuiltin(const script::BuiltinInfo& b, std::span<const script::Value> args) override {
-        return dispatch(b.id, args);
+        script::Value r = dispatch(b.id, args);
+        if (builtinObserver)
+            builtinObserver(b.id, args, r);
+        return r;
     }
+    // Diagnostics (tools/game_trace): every builtin call of the script, with its result.
+    std::function<void(int, std::span<const script::Value>, const script::Value&)> builtinObserver;
+    // Diagnostics (tools/game_trace): the effect channels and a replacement for the mixer sink
+    // (nullptr restores the mixer).
+    [[nodiscard]] SoundChannels& soundChannels() noexcept { return m_sfx; }
+    void setSoundSink(SoundSink* sink) noexcept { m_sink = sink ? sink : &m_sfxSink; }
     void warning(const script::SourceLocation& loc, std::string_view message) override {
         if (m_warnings++ < 50)
             log(LogLevel::Warn, std::format("script {}: {}", loc.str(), message));
@@ -357,13 +366,13 @@ public:
         // --- audio ---
         case script::BuiltinId::PlaySFX: queueSfx(argInt(args, 0)); return Value{0};
         case script::BuiltinId::StopSFX:
-            m_sfx.stopAll(m_sfxSink);
+            m_sfx.stopAll(*m_sink);
             return Value{0};
-        case script::BuiltinId::StopSFXOne: m_sfx.stop(m_sfxSink, argInt(args, 0)); return Value{0};
+        case script::BuiltinId::StopSFXOne: m_sfx.stop(*m_sink, argInt(args, 0)); return Value{0};
         case script::BuiltinId::PlayAudio: playAudio({argInt(args, 0), argInt(args, 1), argInt(args, 2), argInt(args, 3)}); return Value{0};
         case script::BuiltinId::StopMusic: // also stops the PlayWAV slot (0x412e00 -> 0x408d80)
             stopMusic();
-            m_sfx.stop(m_sfxSink, playWavSlot());
+            m_sfx.stop(*m_sink, playWavSlot());
             return Value{0};
         case script::BuiltinId::SetSound: m_scriptSfx = std::clamp(argInt(args, 0), 0, 100); applyVolumes(); return Value{0};
         case script::BuiltinId::SetMusic: setMusic(std::clamp(argInt(args, 0), 0, 100)); return Value{0};
@@ -476,11 +485,15 @@ private:
             m_engine->draw(fb);
             drawUi(fb);
         }
+        // Positional sounds are computed while the sprites tick (0x409a20, inside World::Tact):
+        // with the camera of that moment, before the scroll and the clamp of the frame's end.
+        m_soundCam = m_engine->camera();
         m_engine->tactWorld();
-        // Screen objects are world sprites in the original: they tick with the world (0x40b880),
-        // before the menu update.
+        // Menus and texts are sprites of the world in the original: they tick in World::Tact,
+        // before the menu update (0x40c1d0) of the frame.
         for (const int s : m_ui.update(static_cast<float>(dtSeconds), static_cast<std::uint32_t>(m_engine->clock())))
             queueSfx(s);
+        m_screenSounds = m_ui.takeScreenSounds();
 
         // Menu update: screen coordinates of the script's screen.
         const auto [ox, oy] = menuOrigin();
@@ -918,14 +931,20 @@ private:
     // engines kept alive instead of restarted, 8 channels, 50 ms restart guard...): see
     // game/sound_channels.hpp.
     void playSounds() {
-        const auto& cam = m_engine->camera();
+        const Camera& cam = m_soundCam;
         for (const auto& e : m_engine->takeSounds()) {
             // DirectSound pan/attenuation of 0x409a20: pan 4*dx, attenuation -2*max(|dx|,|dy|),
             // both in 1/100 dB, relative to the centre of the view.
             const int dx = e.x - (cam.x + cam.width / 2), dy = e.y - (cam.y + cam.height / 2);
             m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
         }
-        m_sfx.tact(m_sfxSink, static_cast<std::uint32_t>(m_engine->clock()));
+        // Menus and texts are screen sprites (layers 10..14, after the world's units): their
+        // sounds are relative to the centre of the script's screen (0x409ab4).
+        for (const auto& e : std::exchange(m_screenSounds, {})) {
+            const int dx = e.x - m_screenW / 2, dy = e.y - m_screenH / 2;
+            m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
+        }
+        m_sfx.tact(*m_sink, static_cast<std::uint32_t>(m_engine->clock()));
     }
 
     // gromada::Mixer as the SoundChannels sink: one DirectSound buffer per channel (no mixer:
@@ -1024,7 +1043,7 @@ private:
     // is left alone (game/sound_channels.hpp). Returns N, 0 if the file cannot be opened.
     int playWav(const std::string& file) {
         using WavLoad = SoundChannels::WavLoad;
-        return m_sfx.playWav(m_sfxSink, file, [&] {
+        return m_sfx.playWav(*m_sink, file, [&] {
             m_wavLoaded = false; // the original frees the previous WAV first
             auto path = script::resolveCaseInsensitive(m_config.gameDir, file);
             if (!path)
@@ -1243,6 +1262,9 @@ private:
     std::string m_lastMovie;
 
     MixerSink m_sfxSink;
+    SoundSink* m_sink = &m_sfxSink;    // replaced by tools (game_trace) through setSoundSink()
+    Camera m_soundCam;                 // camera during tactWorld() (positional sounds)
+    std::vector<ui::ScreenSound> m_screenSounds;   // menu and text sounds of the frame
     SoundChannels m_sfx{[this](int n) { return sound(n); },
                         [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV

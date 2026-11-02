@@ -360,19 +360,23 @@ inline void GameEngine::scrollCamera() {
             const int lx = std::max(586, w - 54), ly = std::max(440, h - 40);
             if (m_camera.x < f->x - lx) m_camera.x = f->x - lx;
             if (m_camera.y < f->y - ly) m_camera.y = f->y - ly;
-            if (m_camera.x + w > f->x + lx) m_camera.x = f->x - w + lx;
-            if (m_camera.y + h > f->y + ly) m_camera.y = f->y - h + ly;
+            // the view rectangle is inclusive (x1 = width - 1, y1 = height - 1, 0x42da10/18):
+            // checked on the demos' recorded cameras (issue #13)
+            if (m_camera.x + (w - 1) > f->x + lx) m_camera.x = f->x - (w - 1) + lx;
+            if (m_camera.y + (h - 1) > f->y + ly) m_camera.y = f->y - (h - 1) + ly;
         }
     }
 }
 
-// 0x414838: keep the view inside the map.
+// 0x414838: keep the view inside the map: camX <= mapW - x1 - 1 with x1 = width - 1 (the view
+// rectangle is inclusive), i.e. the last column of the map is the last visible one. Checked on
+// the demos (issue #13): the recorded camera reaches mapH - 480 (demo2) and mapW - 640 (demo3).
 inline void GameEngine::clampCamera() {
     if (!m_loaded) return;
     if (m_camera.x < 0) m_camera.x = 0;
     if (m_camera.y < 0) m_camera.y = 0;
-    if (m_camera.x > m_world.mapWidth() - m_camera.width - 1) m_camera.x = m_world.mapWidth() - m_camera.width - 1;
-    if (m_camera.y > m_world.mapHeight() - m_camera.height - 1) m_camera.y = m_world.mapHeight() - m_camera.height - 1;
+    if (m_camera.x > m_world.mapWidth() - m_camera.width) m_camera.x = m_world.mapWidth() - m_camera.width;
+    if (m_camera.y > m_world.mapHeight() - m_camera.height) m_camera.y = m_world.mapHeight() - m_camera.height;
 }
 
 // ---------------------------------------------------------------------------- drawing

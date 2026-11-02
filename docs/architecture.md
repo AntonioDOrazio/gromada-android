@@ -11,6 +11,7 @@ sviluppati in parallelo attorno a un contratto fisso, `src/game/engine_api.hpp`.
 | `src/script` (interprete) | #9 | Allineamento alla semantica dell'originale (`docs/re/runtime.md` §1–2). |
 | `src/game/session*` (sessione) | #10 | Ciclo del frame nell'ordine originale, stati (logo, filmati, menu, briefing, livello, vittoria/sconfitta), caricamento mappe e script, builtin di menu/testo/audio/file/sistema, conversione `input::PcState` → `OriginalInput`, cursore, barra di stato, salvataggi `save1..5` e `fw.ini`, riproduzione delle demo, integrazione nel core libretro. |
 | `tests/oracle`, `tools/oracle` | #11 | Oracolo differenziale: funzioni originali di `gromada.exe` eseguite in emulazione (unicorn) per produrre vettori di test che verificano il motore. |
+| `tools/oracle/trace_game.py`, `tools/game_trace.cpp` | #13 | Oracolo a livello di partita: le tre demo rigiocate dall'originale in emulazione e dal core, confronto frame per frame di mondo, RNG, camera, builtin e audio (`docs/trace-oracle.md`). |
 
 Moduli già esistenti e riusati: `libgromada` (formati), `engine/audio.hpp` (mixer), `ui/` (font,
 testi, menu), `input/` (controller, cursori), `video/` (filmati), `demo/` (parser `.dem`).

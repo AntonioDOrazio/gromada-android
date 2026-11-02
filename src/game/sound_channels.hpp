@@ -68,9 +68,15 @@ public:
         clearQueue();
     }
 
+    // Diagnostics (tools/game_trace, issue #13): every request() as called (the channel
+    // operations are seen by the SoundSink).
+    std::function<void(int nsfx, int pan, int attenuation)> requestObserver;
+
     // 0x408dd0. nsfx outside 1..N (or N without a WAV) is ignored, attenuation below -2000
     // too; pan clamped to ±10000; non-positional sounds get attenuation 0.
     void request(int nsfx, int pan = 0, int attenuation = 0) {
+        if (requestObserver)
+            requestObserver(nsfx, pan, attenuation);
         const int n = m_count();
         if (nsfx <= 0 || nsfx > n || (nsfx == n && !m_lookup(n)) || attenuation < MinAttenuation)
             return;

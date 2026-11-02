@@ -252,6 +252,12 @@ inserimento).
 
 ## 5. Limiti
 
+- Le partite intere (ordine delle chiamate fra sprite, RNG su più frame, audio) sono verificate
+  dall'oracolo a livello di partita sulle demo: `docs/trace-oracle.md` (issue #13).
+- Prestazioni: `MAX_INSNS` passa a unicorn il parametro `count`, che aggiunge un hook a ogni
+  istruzione (circa 50 volte più lento); per esecuzioni lunghe usare `count=0` come
+  `trace_game.py`.
+
 - Si testano funzioni e tratti isolati, non partite intere: l'ordine delle chiamate fra sprite e
   il consumo dell'RNG su più frame restano da verificare con le demo (issue #3/#8).
 - Le dipendenze sono sostituite da registratori: per esempio la fisica non esegue la vera

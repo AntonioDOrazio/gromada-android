@@ -36,7 +36,7 @@ Tutti header-only. La sessione dipende dal contratto, non da un'implementazione 
    degli oggetti di schermo (che nell'originale sono sprite del mondo) e la macchina da scrivere.
 5. Aggiornamento dei menu (vedi sotto): se consuma il click, il record viene rimandato al motore
    con i bit azzerati prima di `tactPlayers()` (come `0x40c1d0`, che azzera i bit prima di
-   `0x415e20`); `tactPlayers()` e subito dopo la barra di stato (`StateBar::Tact`, chiamata
+   `0x415e20`; prima, i tick di menu e testi come sprite di `World::Tact`); `tactPlayers()` e subito dopo la barra di stato (`StateBar::Tact`, chiamata
    dall'originale dentro `Player::Tact`), `tactGroupAi()`, `updateCamera()`; suoni (motore +
    `PlaySFX` + menu).
 6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine, `docs/engine.md` §8),
@@ -138,10 +138,12 @@ Dal disassemblato:
   una volta per frame, senza recupero (`lastTact = orologio`; a 60 fps un vid da 71 ms avanza
   ogni 5 frame, come gli sprite del motore). Fine di `act_birth` → `act_stand`; fine di
   `act_death` → l'oggetto sparisce; le altre azioni (luci dei pulsanti, indicatori della mappa
-  delle missioni) ricominciano. `ChangeAction` (`0x40b3e0`) non fa nulla se azione e direzione
-  non cambiano, altrimenti riparte dal primo fotogramma e riarma il suono (`state & 0x200`), che
-  suona al primo tick successivo e una sola volta per azione (le Image non lo riarmano a fine
-  ciclo). Il pulsante cliccato ha `lastTact −= 1000` (`0x40c2c4`): avanza al frame dopo. `Init`
+  delle missioni) ricominciano. `ChangeAction` (`0x40b3e0`) riarma sempre il suono (`state & 0x200`,
+  azzerato anche se azione e direzione non cambiano) e, se cambiano, riparte dal primo
+  fotogramma; il suono suona al primo tick successivo (le Image non lo riarmano a fine ciclo),
+  **posizionale** rispetto al centro dello schermo degli script (pan `4·dx`, attenuazione
+  `−2·max(|dx|,|dy|)`, `0x409ab4`), dopo i suoni del mondo; i testi (macchina da scrivere,
+  `TextManager::tick`) allo stesso modo. Verificato sulle tre demo (issue #13). Il pulsante cliccato ha `lastTact −= 1000` (`0x40c2c4`): avanza al frame dopo. `Init`
   (`0x40bf30`) fa partire un'animazione di attesa da un fotogramma casuale (`rand()` condiviso
   con il motore; per le Image solo se ha più di 2 fotogrammi). `Pause(0)` riporta indietro
   l'orologio e i timer degli oggetti con lui. Il disegno usa il renderer a 16 bit del motore

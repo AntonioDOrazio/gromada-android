@@ -228,9 +228,10 @@ verifica la mappatura, quello con dati che il frame venga consumato esattamente.
 
 ## Ipotesi e domande aperte (per #3 e il runtime)
 
-1. **Cadenza della macchina da scrivere**: un passo ogni 71 ms (`frameDuration` del font) e un
-   suono a passo. Non ho trovato con certezza chi invia `act_nextcommand` né con che periodo
-   (0x40a1fb lo invia nel tick dell'oggetto).
+1. ~~Cadenza della macchina da scrivere~~ (risolto, issue #13): `TextManager::tick(clock)` riproduce
+   lo sprite STEXT dell'originale (`0x40e01c` nel tick dello sprite, timer di 150 ms dopo un a capo,
+   suono del passo al tick successivo, posizionale): verificato sulle tre demo. `update(dt)` resta
+   per gli strumenti senza orologio di gioco.
 2. **SetGamma**: `GameMenuOn()` chiama `SetGamma(gammamenu)` con `gammamenu = 96 = 0x060`, il
    default è `gamma = 0x777`, il centro servizi usa `624 = 0x270`. Ipotesi: tre guadagni a 3 bit
    0xRGB (7 = neutro) applicati ai vid senza `IgnoreGlobalGamma` (flag 0x800, presente su tutti

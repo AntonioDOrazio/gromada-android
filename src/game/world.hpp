@@ -212,9 +212,12 @@ public:
         m_clock += static_cast<std::uint32_t>(elapsedMs > fx::ClockStepCapMs ? fx::ClockStepCapMs : elapsedMs);
     }
 
-    // 0x40ac70 Pause(flag). Divergence: on resume only the sprites that ticked during the
-    // pause (screen sprites, state & 4) are shifted back; the others keep their lastTact, so
-    // they do not get one huge tick (the "jump forward" of the original).
+    // 0x40ac70 Pause(flag). On resume every sprite of the lists and of their child chains gets
+    // lastTact += pauseStart - curclock (32-bit wrap; a sub-object also linked in a list is
+    // shifted twice, like the original), then curclock = pauseStart. Sprites keep ticking
+    // during the pause (SpriteTact only skips physics and commands), so this keeps the time
+    // since their last tick: no sprite gets a long dt. Verified on the demos (issue #13: the
+    // recorded games pause and resume).
     void pause(bool on) {
         if (on) {
             if (!m_paused) m_pauseStart = m_clock;
@@ -226,7 +229,7 @@ public:
         for (auto* head : m_layers)
             for (Sprite* s = head; s; s = s->next)
                 for (Sprite* c = s; c; c = c->child)
-                    if (c->lastTact > m_pauseStart) c->lastTact -= std::min(shift, c->lastTact - m_pauseStart);
+                    c->lastTact -= shift;
         m_clock = m_pauseStart;
         m_paused = false;
     }

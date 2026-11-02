@@ -68,7 +68,7 @@ a 0 differenze salvo le divergenze di §5.
 
 | sottosistema | stato |
 |---|---|
-| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (pausa: D1; tempo negativo: D13); oracolo: `rand`, `clock`, `tick_schedule`, `sprite_timer`, `random_builtin` |
+| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (pausa verificata sulle demo, `docs/trace-oracle.md`; tempo negativo: D13); oracolo: `rand`, `clock`, `tick_schedule`, `sprite_timer`, `random_builtin` |
 | matematica: direzione CORDIC, distanze, tabelle, vid derivati | fedele, aritmetica a 32 bit con riavvolgimento; oracolo: `direction`, `distance_*`, `sizeto`, `tables`, `rotation_tables`, `map_scale_tables`, `vid_derived` |
 | liste per strato z, inserimento ordinato, puntatore "prossimo" salvato durante l'iterazione | fedele |
 | `CreateUnit`, `Init` (sotto-oggetto collegato, fase casuale), figli per azione (`CreateChildren`, offset ruotati con la prospettiva, dispersione dell'arma) | fedele; oracolo: `create_children` (`CreateUnit` non coperta) |
@@ -121,11 +121,10 @@ a 0 differenze salvo le divergenze di §5.
 
 ## 5. Divergenze volute dall'originale
 
-- **D1 Pausa senza salto in avanti.** In `Pause(0)` l'originale sposta indietro `lastTact` di tutti
-  gli sprite, che al tick successivo ricevono un `dt` lungo quanto la pausa. Qui solo gli sprite
-  aggiornati durante la pausa (quelli di schermo) vengono riallineati; gli altri riprendono con il
-  `dt` normale. L'orologio, come nell'originale, continua a correre in pausa (gli script misurano i
-  tempi dei menu con `GetTime()`) e torna al valore salvato alla ripresa.
+- ~~D1 Pausa senza salto in avanti~~ (rimossa, issue #13): gli sprite ricevono il tick anche in
+  pausa (salta solo fisica e comandi), quindi `Pause(0)` dell'originale (`lastTact += pauseStart -
+  curclock` per tutti) non provoca nessun salto. Ora è riprodotto alla lettera: la versione con il
+  limite a `pauseStart` faceva divergere demo1 alla ripresa dalla pausa.
 - **D2 Riferimenti come id.** `target`, flagman e "unità sotto il cursore" sono id e non puntatori:
   un bersaglio distrutto diventa "nessuno" invece di un puntatore pendente. La memoria di uno
   sprite distrutto viene riusata solo dal `tactWorld()` successivo.
@@ -158,7 +157,9 @@ a 0 differenze salvo le divergenze di §5.
   memorizzate e non disegnate.
 - **D8 Camera.** Scroll, guinzaglio e clamp sono tutti in `updateCamera()`; nell'originale lo scroll
   avviene prima dei giocatori. I margini della barra di stato e i tasti `+`/`-` (finestra di gioco
-  ridotta) non sono gestiti: la vista è `camera().width × height`. Il guinzaglio (586×440 =
+  ridotta) non sono gestiti: la vista è il rettangolo inclusivo `[0, width−1] × [0, height−1]`
+  (`0x42da0c..0x42da18`), quindi la camera arriva a `mapW − width` (verificato sulle camere
+  registrate nelle demo, issue #13). Il guinzaglio (586×440 =
   vista 640×480 meno 54×40) su viste più larghe (16:9) mantiene lo stesso margine dal bordo
   (`larghezza − 54`, `altezza − 40`): identico in 640×480 (issue #16).
 - **D9 Torretta del giocatore.** `Player::Tact` ruota la testa di un passo di direzione per

@@ -370,13 +370,20 @@ void testTexts() {
     const int t = ui.print(10, 10, "HELLO WORLD", 127);
     CHECK(isTextHandle(t));
     CHECK_EQ(ui.text(t)->visible, std::size_t{11});
-    // Action(t, act_settextcount, 0, 0): the typewriter starts (one step per 71 ms).
+    // Action(t, act_settextcount, 0, 0): the typewriter starts, one step per tick of the text
+    // sprite (71 ms of game clock); each step's sound at the next tick, from its position.
     ui.objectAction(t, act::SetTextCount, 0, 0);
     CHECK_EQ(ui.text(t)->visible, std::size_t{0});
-    const auto sounds = ui.update(0.075f, 0);
+    ui.update(0.f, 0);                  // the frame of the creation: no tick
+    CHECK_EQ(ui.text(t)->visible, std::size_t{0});
+    ui.update(0.f, 71);
     CHECK_EQ(ui.text(t)->visible, std::size_t{1});
-    CHECK(!sounds.empty() && sounds[0] == 23);
-    ui.update(1.0f, 0);
+    CHECK(ui.takeScreenSounds().empty());
+    ui.update(0.f, 142);
+    CHECK_EQ(ui.text(t)->visible, std::size_t{2});
+    const auto sounds = ui.takeScreenSounds();
+    CHECK(sounds.size() == 1 && sounds[0].nsfx == 23 && sounds[0].x == 10 && sounds[0].y == 10);
+    for (std::uint32_t c = 213; c < 71 * 20; c += 71) ui.update(0.f, c);
     CHECK(!ui.text(t)->typing());
     CHECK_EQ(ui.position(t).value()[0], 10);
     // Destroy through Action and DeleteText.
