@@ -711,6 +711,8 @@ void testWeapons() {
     std::vector<Vid> vids = blankVids(16);
     std::vector<Weapon> weapons(4);
     World w{vids, weapons};
+    w.vid(15).flags = vf::PresentOnGrid;   // 32 px grid cells (a 1 px grid would cost seconds per map)
+    setSizes(w.vid(15), 64, 64, 0);
     auto setWeapon = [&](int targetCategory, int flags, int range, int scatter, int cooldown) {
         Weapon& wp = w.weapons()[0];
         wp.targetCategory = static_cast<ObjectCategory>(targetCategory);
