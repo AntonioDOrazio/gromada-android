@@ -48,6 +48,9 @@ class World {
 public:
     static constexpr int MaxLayers = 16;
     static constexpr int MaxPlayers = 4;
+    // Where the original sometimes uses a sprite pointer as an x coordinate (D15): a typical
+    // heap address of the original's sprites.
+    static constexpr int kPointerX = 0x00800000;
 
     explicit World(const GameResources& resources) : World(resources.vids(), resources.weapons()) {}
     // Vids and weapons only (synthetic tests): vids without graphics tick every 71 ms.
@@ -100,6 +103,11 @@ public:
     InputRecord& localInput() noexcept { return m_localInput; }
     // Diagnostics for tools and tests: called for every act_damage (target, amount, source).
     std::function<void(const Sprite&, int, int)> damageHook;
+    // Test seams (tests/engine_oracle_test.cpp), unset in the game: like the recorders of the
+    // differential oracle (docs/oracle.md) they see every virtual Action / ChangeAction call and
+    // intercept it by returning true (`ret` = the value Action returns).
+    std::function<bool(Sprite&, int act, int v1, int v2, int& ret)> actionHook;
+    std::function<bool(Sprite&, int act, int dir)> changeActionHook;
     std::uint64_t fireCount = 0;   // successful Fire() calls (diagnostics)
     [[nodiscard]] Sprite* flagman(int player) const noexcept {
         return player >= 0 && player < MaxPlayers ? byId(m_players[static_cast<std::size_t>(player)].flagman) : nullptr;
@@ -353,6 +361,15 @@ public:
 
     // 0x40a950 SPRITE::CreateChildren: generators of the current action.
     void createChildren(Sprite& s) {
+        createChildren(
+            s, [this](int x, int y, int z, int nv) { return askPlaceVid(x, y, z, nv) != nullptr; },
+            [this](int nv, int x, int y, int z, int dir, Sprite* parent) { return createUnit(nv, x, y, z, 0, dir, parent); },
+            [this](Sprite& c, int x, int y, int z) { setDestination(c, x, y, z); });
+    }
+    // The same with AskPlaceVid 0x40a2d0, CreateUnit 0x40e1b0 and SetDestination 0x409770 passed
+    // in (oracle tests, tools/oracle/gen_weapons.py).
+    template <class Occupied, class Create, class Dest>
+    void createChildren(Sprite& s, Occupied&& occupied, Create&& create, Dest&& dest) {
         const int nv = std::abs(static_cast<int>(vidOf(s).childNvid[s.action]));
         if (!nv || nv >= static_cast<int>(m_vids.size())) return;
         for (int i = 0; i < vidOf(s).childCount[s.action]; ++i) {
@@ -385,14 +402,14 @@ public:
             }
             const int cx = s.x + ox, cy = s.y + oy, cz = s.z + offZ;
             Sprite* c = nullptr;
-            if (m_vids[static_cast<std::size_t>(nv)].cls != cls::Vehicle || !askPlaceVid(cx, cy, cz, nv))
-                c = createUnit(nv, cx, cy, cz, 0, dir, &s);
+            if (m_vids[static_cast<std::size_t>(nv)].cls != cls::Vehicle || !occupied(cx, cy, cz, nv))
+                c = create(nv, cx, cy, cz, dir, &s);
             if (!c) continue;
             if (s.action == act::fight) {
                 const int sc = weaponOf(s).scatter;
                 const int yy = s.attackY - rand() % (2 * sc + 1) + sc + ty;   // y first (0x40abd9)
                 const int xx = s.attackX - rand() % (2 * sc + 1) + sc + tx;
-                setDestination(*c, xx, yy, s.attackZ);
+                dest(*c, xx, yy, static_cast<int>(s.attackZ));
             }
             action(*c, act::child, s.id, i);
         }
@@ -413,6 +430,7 @@ public:
 
     // 0x40b3e0 ChangeAction(act, dir = -1).
     void changeAction(Sprite& s, int a, int dir) {
+        if (changeActionHook && changeActionHook(s, a, dir)) return;
         s.state &= ~st::SoundDone;
         a &= 0xff;
         if (s.child) {
@@ -553,7 +571,7 @@ public:
             !(s.state & st::Passive)) {
             const int step = physics(s);
             if (!s.alive) return 1;
-            if (s.frame > s.lastFrame || s.action < 6) nextCommand(s, step);
+            if (commandsDue(s)) nextCommand(s, step);
             if (!s.alive) return 1;
             if (vidOf(s).flags & vf::Calltact) action(s, act::calltact, 0, 0);
             if (!s.alive) return 1;
@@ -576,6 +594,13 @@ public:
     // 0x409cbb..0x40a116: gravity, speed, altitude, horizontal move, grid. Returns the
     // pixels travelled this tick (0x7fff when standing), used by NextCommand.
     int physics(Sprite& s) {
+        return physics(s, [this](Sprite& m, int x, int y, int z) { return checkMove(m, x, y, z) != nullptr; },
+                       [this](Sprite& m, int x, int y, int z) { return firstObstacleOnLine(m, x, y, z); });
+    }
+    // The same with the collaborators passed in (the oracle tests replace CheckMove 0x40a5c0 and
+    // FirstObstacleOnLine 0x40a770 like tools/oracle/gen_physics.py does).
+    template <class Blocked, class Obstacle>
+    int physics(Sprite& s, Blocked&& blocked, Obstacle&& obstacle) {
         const VidInfo& v = vidOf(s);
         const std::uint32_t dt = m_clock - s.lastTact;
         const bool gravity = (v.flags & vf::Gravity) != 0;
@@ -616,14 +641,14 @@ public:
             }
             const int nx = s.x + m.mx, ny = s.y + m.my;
             if (nx >= 0 && ny >= 0 && nx <= m_mapW && ny <= m_mapH) {
-                if (checkMove(s, nx, ny, s.z)) action(s, act::path_block, m.mx, m.my);
+                if (blocked(s, nx, ny, static_cast<int>(s.z))) action(s, act::path_block, m.mx, m.my);
                 else { s.x = static_cast<std::int16_t>(nx); s.y = static_cast<std::int16_t>(ny); }
             } else {
                 action(s, act::path_limit, m.mx, m.my);
             }
             if (!s.alive) return step;
         } else {
-            const std::uint32_t p = firstObstacleOnLine(s, s.goX, s.goY, s.goZ);
+            const std::uint32_t p = obstacle(s, static_cast<int>(s.goX), static_cast<int>(s.goY), static_cast<int>(s.goZ));
             if (p) { s.x = static_cast<std::int16_t>(p & 0xffff); s.y = static_cast<std::int16_t>(p >> 16); }
             else { s.x = s.goX; s.y = s.goY; }
             s.state |= st::ArrivedX | st::ArrivedY;
@@ -638,6 +663,10 @@ public:
         }
         return step;
     }
+
+    // 0x40a116: commands are evaluated at the end of the animation or while the sprite stands,
+    // moves or rotates (the sprite's *action* < 6, docs/oracle.md §3.1).
+    [[nodiscard]] static bool commandsDue(const Sprite& s) noexcept { return s.frame > s.lastFrame || s.action < 6; }
 
     // 0x40a12a: the command stack or act_nextcommand.
     void nextCommand(Sprite& s, int step) {
@@ -812,7 +841,9 @@ public:
     }
 
     [[nodiscard]] static int distance(const Sprite& a, const Sprite& b) noexcept { return fx::gameDistance(a.x - b.x, a.y - b.y); }
-    [[nodiscard]] static int distanceTo(const Sprite& a, int x, int y) noexcept { return fx::gameDistance(a.x - x, a.y - y); }
+    [[nodiscard]] static int distanceTo(const Sprite& a, int x, int y) noexcept {   // 0x40afc0: int32 point
+        return fx::gameDistance(fx::wrapSub(a.x, x), fx::wrapSub(a.y, y));
+    }
     fx::DirectionResult getDirection(int x1, int y1, int x2, int y2) {
         const auto d = fx::getDirection(x1, y1, x2, y2);
         m_lastDist = d.distance;
@@ -874,15 +905,21 @@ public:
     }
 
     // 0x40a770 FirstObstacleOnLine(x2, y2, z2): 16 px steps from the sprite; returns
-    // (y << 16) | x of the first blocked probe, 0 if the line is free.
+    // (y << 16) + x of the first blocked probe as a 32-bit sum (a negative x borrows from y, like
+    // the original), 0 if the line is free.
     std::uint32_t firstObstacleOnLine(Sprite& s, int x2, int y2, int z2) {
+        return firstObstacleOnLine(s, x2, y2, z2, [this](Sprite& m, int x, int y, int z) { return askPlace(m, x, y, z) != nullptr; });
+    }
+    // The same with the probe (AskPlace 0x40a430) passed in (oracle tests).
+    template <class Probe>
+    std::uint32_t firstObstacleOnLine(Sprite& s, int x2, int y2, int z2, Probe&& blocked) {
         const VidInfo& v = vidOf(s);
         if (v.category != cat::Vehicle && v.category != cat::Avia && v.category != cat::Cannon) return 0;
         if (v.flags & vf::NoCollision) return 0;
         int major = s.x, minor = s.y;
         int sMajor = x2 > s.x ? 1 : -1, sMinor = y2 > s.y ? 1 : -1;
-        std::uint32_t lMajor = static_cast<std::uint32_t>(std::abs(x2 - s.x));
-        std::uint32_t lMinor = static_cast<std::uint32_t>(std::abs(y2 - s.y));
+        std::uint32_t lMajor = static_cast<std::uint32_t>(fx::wrapAbs(fx::wrapSub(x2, s.x)));
+        std::uint32_t lMinor = static_cast<std::uint32_t>(fx::wrapAbs(fx::wrapSub(y2, s.y)));
         bool swapped = false;
         if (lMinor > lMajor) {
             std::swap(major, minor);
@@ -898,8 +935,8 @@ public:
         for (std::uint32_t t = 0; t < lMajor; t += 16) {
             if (t > 16) {
                 const int px = swapped ? minor : major, py = swapped ? major : minor;
-                if (askPlace(s, px, py, z))
-                    return (static_cast<std::uint32_t>(py) << 16) + static_cast<std::uint32_t>(px & 0xffff);
+                if (blocked(s, px, py, z))
+                    return (static_cast<std::uint32_t>(py) << 16) + static_cast<std::uint32_t>(px);   // 32-bit sum (0x40a91b)
             }
             if (err >= 0) {
                 do { minor += sMinor * 16; err -= twoMajor; } while (err >= 0);
@@ -908,8 +945,8 @@ public:
             z += zStep;
             err += twoMinor;
         }
-        if (askPlace(s, x2, y2, z2))
-            return (static_cast<std::uint32_t>(y2) << 16) + static_cast<std::uint32_t>(x2 & 0xffff);
+        if (blocked(s, x2, y2, z2))
+            return (static_cast<std::uint32_t>(y2) << 16) + static_cast<std::uint32_t>(x2);
         return 0;
     }
 
@@ -969,7 +1006,7 @@ public:
             if (!take) {
                 if (bestDist <= d) continue;
                 if (directional) {
-                    int dd = std::abs(static_cast<int>(fx::getDirection(s.x, s.y, u->x, u->y).dir()) - s.direction);
+                    int dd = std::abs(static_cast<int>(getDirection(s.x, s.y, u->x, u->y).dir()) - s.direction);
                     if (dd > 128) dd = 255 - dd;
                     if (dd >= 32) continue;
                 }
@@ -1128,6 +1165,16 @@ public:
     }
     [[nodiscard]] int gridShiftX() const noexcept { return m_gridShiftX; }
     [[nodiscard]] int gridShiftY() const noexcept { return m_gridShiftY; }
+    // Contents of one cell (nullptr outside the grid), in insertion order (tests).
+    [[nodiscard]] const std::vector<Sprite*>* gridCell(int cx, int cy) const noexcept {
+        if (cx < 0 || cy < 0 || cx >= m_gridCols || cy >= m_gridRows) return nullptr;
+        return &m_cells[static_cast<std::size_t>((cy << m_gridRowShift) + cx)];
+    }
+    // Map bounds without rebuilding the grid (tests: the oracle vectors vary them per case).
+    void setMapSize(int w, int h) noexcept { m_mapW = w; m_mapH = h; }
+    // Global 0x439d4c: the distance left by the last GetDirection.
+    [[nodiscard]] int lastDistance() const noexcept { return m_lastDist; }
+    void setLastDistance(int d) noexcept { m_lastDist = d; }
 
     void gridAdd(Sprite* s) {   // 0x40d870
         cellAdd(s->x >> m_gridShiftX, s->y >> m_gridShiftY, s);
@@ -1218,8 +1265,10 @@ private:
         out.speedY = static_cast<std::int16_t>(v.speedY);
         out.acceleration = v.acceleration;
         out.dirs = v.directionsCount ? v.directionsCount : 1;
-        out.rotationPeriod = static_cast<std::int8_t>(static_cast<std::int8_t>(v.rotationPeriod) * 6 / v.directionsCount);
-        if (!v.directionsCount) out.rotationPeriod = static_cast<std::int8_t>(v.rotationPeriod);
+        // 0x406705; dirs == 0 divides by zero in the original (D10: the raw value is kept)
+        out.rotationPeriod = v.directionsCount
+            ? static_cast<std::int8_t>(static_cast<std::int8_t>(v.rotationPeriod) * 6 / v.directionsCount)
+            : static_cast<std::int8_t>(v.rotationPeriod);
         out.army = v.army;
         out.weapon = v.someWeaponIndex;
         out.deathDamageRadius = static_cast<std::int16_t>(v.deathDamageRadius);

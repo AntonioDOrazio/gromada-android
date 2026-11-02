@@ -4,7 +4,8 @@ L'oracolo esegue funzioni (o tratti di codice) dell'originale `gromada.exe` in u
 ([unicorn](https://www.unicorn-engine.org/)) e ne registra ingressi e uscite come **vettori di
 test numerici** (`tests/data/oracle/*.json`). Le funzioni di riferimento C++ pure di
 `src/game/reference_math.hpp` devono riprodurli **bit per bit** (`tests/oracle_test.cpp`).
-Il motore (issue #8) può chiamare direttamente queste funzioni o essere confrontato con esse.
+Dalla issue #12 anche il **codice del motore** (`World`, `GameEngine`, l'interprete) è verificato
+direttamente su tutti i vettori (`tests/engine_oracle_test.cpp`, §8).
 
 - I vettori contengono solo numeri (ingressi scelti dal generatore e uscite dell'originale):
   nessun byte dell'eseguibile né dati del gioco. Sono nel repo, quindi la CI non ha bisogno
@@ -41,6 +42,12 @@ Il motore (issue #8) può chiamare direttamente queste funzioni o essere confron
   vtable, griglia spaziale `0x431ab0` con celle costruite a mano, con gli offset di
   `docs/re/engine.md` §2. I campi derivati dei vid sono calcolati come il caricatore (verificato
   dalla famiglia `vid_derived`).
+- **Vtable reali e allocatore** (issue #12): per le `Action` delle classi gli sprite sintetici
+  hanno la vtable vera della classe (`tools/oracle/units.py`, `VTABLE`), così le chiamate
+  virtuali interne eseguono il codice originale; `malloc`/`realloc`/`free` della CRT
+  (`0x41ca48`/`0x41c928`/`0x41c881`) sono sostituiti da un allocatore sull'heap sintetico (pile dei
+  comandi). Un accesso a memoria non valida dell'originale (es. `0x40c0e0` oltre la fine della
+  catena dei figli) è registrato come `crash = 1`.
 - **Controlli di robustezza**:
   - i generatori usano un `random.Random` con seme fisso per famiglia: due rigenerazioni danno
     file identici;
@@ -76,12 +83,24 @@ Il motore (issue #8) può chiamare direttamente queste funzioni o essere confron
 | `sprite_timer` | `SPRITE::Tact` `0x409b39..0x409b76` | intervallo | 600 | timer a 16 bit |
 | `sound_edge`, `sound_random` | oggetto audio: `0x408dd0`, `0x408f20`, `0x408910`, `0x409550`, `0x408d80`, `0x408c50` | thiscall | 255 + 1100 sequenze | famiglia "suono" (§8): chiamate DirectSound registrate |
 | `sound_table` | `0x407640` + `0x408730` su `fw.res` | thiscall | 48 descrittori | solo con i dati; tipo, formato, CRC32 |
+| `ask_place` | `AskPlace` `0x40a430` / `AskPlaceVid` `0x40a2d0` + griglia | thiscall `ret 0xc` / cdecl | 1200 | come `check_move`; `AskPlaceVid` incontra lo sprite stesso nella griglia |
+| `first_obstacle` | `FirstObstacleOnLine` `0x40a770`, `AskPlace` registrata | thiscall, `ret 0xc` | 2000 | sequenza delle sonde (numero, somme, ultima), blocco alla sonda k, linee lunghe/corte/verticali, posizioni negative, punti int32 |
+| `first_obstacle_grid` | `FirstObstacleOnLine` con `AskPlace` e griglia reali | thiscall | 800 | oggetti lungo la linea, quota crescente |
+| `find_target` | `FindTarget` `0x40c970` | thiscall | 1500 | lista unità con lo sprite stesso in posizione varia, eserciti (2 = neutrale), invisibili, raggio, armi direzionali e antiaeree (`rand`) |
+| `aim_fire` | `Fire` `0x40e6b0` / `Aim` `0x40ada0`, `TurnTo` reale, `ChangeAction` registrata | thiscall, `ret 0xc` | 1500 | torretta collegata o no, flag 1/4/8, portata, `g_dist` stantio, timer |
+| `create_children` | `CreateChildren` `0x40a950`; `CreateUnit`, `AskPlaceVid`, `SetDestination`, `act_child` registrate | thiscall | 1200 | offset ruotati e casuali, direzione casuale, dispersione, figli Vehicle, creazioni fallite |
+| `action_projectile` | `Action` Projectile `0x40f710` | thiscall, `ret 0xc` | 600 | azioni 15 31 38 39 40 43 45 46 57 65 |
+| `action_vehicle` | `Action` Vehicle `0x40ea20` | thiscall, `ret 0xc` | 1400 | 24 azioni, `act_nextcommand` (waypoint, sterzata, bersagli, fuoco, radar) |
+| `action_kassandra` | `Action` Kassandra `0x411a60` | thiscall, `ret 0xc` | 1000 | input del giocatore (`0x43d045`), salto, munizioni, `act_coor_attack` con le teste `0x58..0x5c` |
+| `action_building` | `Action` Building `0x410e10` | thiscall, `ret 0xc` | 800 | produzione (timer, `CreateUnit` che fallisce), sollevamento del carico, `act_buildunit` |
 
 Formato dei file: `{"family", "function", "columns", "notes", "cases": [[...], ...]}`, un caso per
 riga; `tables` ha invece `"arrays"`. Le famiglie con oggetti in numero variabile (`check_move`,
 `area_damage`, `commands`) hanno `"objectColumns"`: ogni caso è formato dalle colonne fisse
-seguite da `nObjects` gruppi di `objectColumns`. Dimensione totale ≈ 1,9 MB, più ≈ 1,5 MB della
-famiglia "suono" (righe di lunghezza variabile, formato in §8).
+seguite da `nObjects` gruppi di `objectColumns` (anche `ask_place`, `first_obstacle_grid`,
+`find_target`, `create_children`). Dimensione totale ≈ 6 MB: ≈ 4,5 MB per le famiglie del motore
+(le `action_*` hanno più di 100 colonne: stato completo di vid, arma, sprite, bersaglio e torretta
+prima e dopo) e ≈ 1,5 MB per la famiglia "suono" (righe di lunghezza variabile, formato in §8).
 
 ### Convenzioni di chiamata trovate
 
@@ -169,6 +188,34 @@ più importanti per il motore.
 16. Caricatore dei vid: `rotationPeriod = (s8)(rot·6 / dirs)` con segno; `0x127 = (u8)(256/dirs)`
     (0 per `dirs = 1`); `dirs = 0` divide per zero.
 
+Trovate con le famiglie della issue #12 (tutte corrette nel motore salvo dove indicato):
+
+17. **`FirstObstacleOnLine` restituisce `(y << 16) + x` come somma a 32 bit** (`0x40a91b`): una x
+    negativa prende in prestito da y (chi decodifica legge `y − 1`). Le sonde partono dalla terza
+    (`t > 16`), a passi di 16 px sull'asse maggiore; l'ultima prova è sempre il punto finale.
+18. **Antiaereo = `weapon.targetCategory & 8`**, non `flags & 8`: `act_coor_attack` di Vehicle
+    (`0x40eadb`) e Kassandra (`0x411c41`) e la torretta del giocatore (`0x416be1`) mirano 80 px più in
+    alto se l'arma colpisce gli aerei. `flags & 8` è usato solo da `FindTarget` (la preferenza 1/3).
+    `docs/re/engine.md` §7.1 attribuisce il "+80" al flag.
+19. La torretta del giocatore (`Player::Tact`) usa l'arma del **vid della testa** per il flag 4 e
+    per l'antiaereo; l'arma del flagman solo per filtrare l'unità sotto il cursore.
+20. Projectile `act_nextcommand` (`0x40f7f6`): se `TurnTo` avvia una rotazione la funzione
+    **ritorna** (niente `act_go`).
+21. Projectile `act_attack` (`0x40f917`): la direzione è calcolata verso `(v1, v2)`, cioè verso
+    l'**indirizzo** del bersaglio (un bug dell'originale: un puntatore di heap, quindi circa est);
+    la destinazione invece è giusta.
+22. Kassandra `act_damage` letale (`0x41211a`): incrementa un contatore statistico nel record del
+    giocatore (`0x439fbd + army·0x255 + …`, indicizzato dal gruppo di palette di chi spara o dagli
+    nvid `0x70`/`0x78`) prima del danno materiale. Il parametro `v2` (lo sprite che spara) è
+    dereferenziato: non può essere nullo.
+23. `0x40c0e0` (rimozione degli effetti di ferita) dereferenzia la fine della catena dei figli:
+    l'originale va in errore se il vid `childNvid[13]` non è agganciato (3+2 casi `crash` nelle
+    famiglie `action_*`).
+24. `FindTarget` con arma direzionale chiama `GetDirection`, che **riscrive `g_dist`** (`0x439d4c`):
+    lo leggono poi `Aim` e altri (il motore usava la versione pura senza effetti).
+25. `act_coor_attack` della Kassandra legge la testa senza controllo di nullità e indicizza le
+    munizioni con `nvid − 0x58`/`− 0xca`/`− 0xcf` senza controllo dei limiti.
+
 `tools/oracle/check_engine_reference.py` confronta automaticamente `engine_reference.py` con i
 vettori (tabelle, direzione, distanza, orologio, velocità, moto, periodo dei tick).
 
@@ -210,9 +257,10 @@ inserimento).
   delle divisioni balistiche di `SetDestination` (`INT_MIN / −1`, praticamente irraggiungibile).
 - `ChangeAction` è testata con vid sintetici (stessa logica dei vid reali: legge solo lunghezze,
   `dirs` e `0x127`); niente dati del gioco nei vettori.
-- Non coperte (ancora): `FirstObstacleOnLine` `0x40a770`, `AskPlace` `0x40a430`, `FindTarget`
-  `0x40c970`, `Aim`/`Fire`, `CreateChildren`, le `Action` delle classi; si aggiungono con lo stesso
-  schema.
+- Non coperte (ancora): `CreateUnit`/`Init`, le `Action` di Avia, Mine, missili, Bonus, Effect2,
+  `Player::Tact` (verificato solo con un test di regressione), il disegno. Nelle `action_*`
+  `CreateUnit` restituisce sempre 0 (nessuna unità creata), il giocatore 0 non ha unità sotto il
+  cursore e la mappa non è in rete.
 
 ## 6. Rigenerare i vettori
 
@@ -324,3 +372,29 @@ Limiti: `0x408730` è verificata solo su `fw.res`; i casi in cui l'originale and
 `INT_MIN / −1`) sono esclusi; l'audio disattivato (`+0x2a4`) fa uscire subito tutte le funzioni e
 non è modellato. L'ordine delle richieste fra sprite in una partita è verificato dall'oracolo di
 partita (#13), non qui.
+
+## 9. Il motore sui vettori (issue #12)
+
+`tests/engine_oracle_test.cpp` (senza dati del gioco, nella CI) esegue il **codice del motore** su
+tutte le 33 famiglie: `World` costruito da vid sintetici (`World{vids, weapons}` + `loadEmpty`), gli
+sprite creati con `createUnit` e poi riempiti con i campi del caso, la griglia con celle di 32 px
+(un vid fittizio `PresentOnGrid` di 64 px fissa la dimensione della cella), `GameEngine::callBuiltin`
+per `SizeTo`/`Random`, l'interprete di `src/script` per `vm_arith`. Lettore dei vettori condiviso:
+`tests/oracle_vectors.hpp`.
+
+Dove l'oracolo registra un collaboratore invece di eseguirlo, il motore offre punti di aggancio
+minimi, senza effetti nel gioco:
+
+| aggancio | usato da |
+|---|---|
+| `World::actionHook`, `World::changeActionHook` (intercettano `Action` virtuale e `ChangeAction`) | `turn_to`, `set_destination`, `physics`, `commands`, `check_move`, `damage`, `area_damage`, `find_target`, `aim_fire`, `create_children` |
+| `World::physics(s, blocked, obstacle)` | `physics` (`CheckMove`, `FirstObstacleOnLine`) |
+| `World::firstObstacleOnLine(s, x, y, z, probe)` | `first_obstacle` (`AskPlace`) |
+| `World::createChildren(s, occupied, create, dest)` | `create_children` |
+| `World::commandsDue`, `gridCell`, `setMapSize`, `lastDistance`/`setLastDistance` | `commands`, `physics`, `set_destination`, `aim_fire`, `action_*` |
+
+Le divergenze volute (`docs/engine.md` §5: D10 dirs = 0, `Random(−1)`, direzione stantia del flag 4,
+catena dei figli; D13 orologio; D15 puntatori) sono contate e stampate per famiglia ("documented
+divergences"), mai ignorate in silenzio. Le famiglie `action_*` confrontano tutti i campi dello
+sprite, dell'unità, del bersaglio e della torretta, il valore restituito, lo stato di `rand()` e
+`g_dist`.

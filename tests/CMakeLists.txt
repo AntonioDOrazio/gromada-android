@@ -57,6 +57,9 @@ target_compile_definitions(sound_oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE
 # Differential oracle (issue #11): reference math vs vectors from the original exe (no game data).
 gromada_add_test(oracle_test oracle_test.cpp)
 target_compile_definitions(oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# The engine's own code against the same vectors (issue #12), no game data.
+gromada_add_test(engine_oracle_test engine_oracle_test.cpp)
+target_compile_definitions(engine_oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
 # Simulation engine (src/game, issue #8): synthetic tests, data-backed level runs and the
 # desktop driver tools/engine_run (screenshots + trace).
 gromada_add_test(engine_test engine_test.cpp)

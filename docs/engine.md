@@ -17,6 +17,7 @@ nel disassemblato (indirizzi citati nel codice e qui sotto, §4).
 | `src/game/engine.hpp` | `GameEngine : Engine`: fasi del frame, giocatori (`0x4169b0`), camera (`0x415e20`, `0x414838`), disegno (`0x40b880`, `0x40b620`, `0x4021f0`), effetti, gamma, le 28 builtin |
 | `tools/engine_run.cpp` | strumento desktop: carica un livello, mette la Kassandra dove la mette lo script, simula N secondi a passo fisso con input scriptato, salva screenshot PPM e una traccia |
 | `tests/engine_test.cpp`, `tests/engine_data_test.cpp` | test sintetici (CI) e con i dati del gioco (locali) |
+| `tests/engine_oracle_test.cpp` | il codice del motore sui vettori dell'oracolo (33 famiglie, CI; `docs/oracle.md` §8) |
 
 Tutto è header-only e va incluso una volta per binario (`engine.hpp` include `libgromada_all.hpp`).
 Costruzione: `game::GameEngine engine{resources};` (`GameResources` di `fw.res`), poi `loadMap()`.
@@ -55,16 +56,21 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
 
 ## 3. Fedeltà per sottosistema
 
+Colonna "oracolo": famiglie di `tests/data/oracle` verificate sul codice del motore (issue #12),
+a 0 differenze salvo le divergenze di §5.
+
 | sottosistema | stato |
 |---|---|
-| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (pausa: vedi divergenza D1) |
+| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (pausa: D1; tempo negativo: D13); oracolo: `rand`, `clock`, `tick_schedule`, `sprite_timer`, `random_builtin` |
+| matematica: direzione CORDIC, distanze, tabelle, vid derivati | fedele, aritmetica a 32 bit con riavvolgimento; oracolo: `direction`, `distance_*`, `sizeto`, `tables`, `rotation_tables`, `map_scale_tables`, `vid_derived` |
 | liste per strato z, inserimento ordinato, puntatore "prossimo" salvato durante l'iterazione | fedele |
-| `CreateUnit`, `Init` (sotto-oggetto collegato, fase casuale), figli per azione (`CreateChildren`, offset ruotati con la prospettiva, dispersione dell'arma) | fedele |
+| `CreateUnit`, `Init` (sotto-oggetto collegato, fase casuale), figli per azione (`CreateChildren`, offset ruotati con la prospettiva, dispersione dell'arma) | fedele; oracolo: `create_children` (`CreateUnit` non coperta) |
 | `SpriteTact`: suoni di ciclo, timer, figli, morte, orfani degli Effect2, fisica, comandi, `act_calltact`, catena dei figli | fedele |
-| fisica: gravità, accelerazione/decelerazione, quota con arresto a `goZ`, moto con accumulatori, vento, raggio istantaneo (`speed 9999`), bit di arrivo, aggiornamento della griglia | fedele |
+| fisica: gravità, accelerazione/decelerazione, quota con arresto a `goZ`, moto con accumulatori, vento, raggio istantaneo (`speed 9999`), bit di arrivo, aggiornamento della griglia | fedele; oracolo: `physics`, `commands`, `change_action`, `turn_to`, `set_destination` |
 | pila dei comandi: fondo/cima, `act_cyclecommand`, `act_submove`, waypoint con chiusura del giro, `GetCommands`/`SetCommands` | fedele |
-| collisioni AABB con quota, terreno con maschere, schiacciamento, griglia con celle potenze di 2 | fedele |
-| armi: `FindTarget` (preferenze, 1/3 per l'antiaereo, settore per armi direzionali), `Aim`, `Fire`, proiettili come figli di `act_fight`, danno ad area, ferita/guarigione | fedele |
+| collisioni AABB con quota, terreno con maschere, schiacciamento, griglia con celle potenze di 2 | fedele; oracolo: `check_move`, `ask_place`, `first_obstacle`, `first_obstacle_grid` |
+| armi: `FindTarget` (preferenze, 1/3 per l'antiaereo, settore per armi direzionali), `Aim`, `Fire`, proiettili come figli di `act_fight`, danno ad area, ferita/guarigione | fedele; oracolo: `find_target`, `aim_fire`, `damage`, `area_damage` |
+| `Action` per classe | Projectile, Vehicle, Kassandra, Building: oracolo `action_*` (tutte le azioni gestite in proprio salvo quelle che creano unità o usano il cursore); le altre classi dalla lettura del disassemblato |
 | IA: veicoli (waypoint, sterzata residua ±30, retromarcia, inseguimento, torrette, radar), aviazione (volo a cerchi, quota 50–120, decollo), fabbriche (produzione casuale, uscita, copia dei comandi, `act_uncom`), mine, missili a ricerca, squadre | fedele |
 | Kassandra: input del giocatore in `act_nextcommand`, frecce, salto, cambio arma della torretta, munizioni, bonus, morte con munizioni lanciate | fedele |
 | giocatore (`Player::Tact`): clic sinistro = `clearcom` + `act_move`, destro = `act_coor_attack`, torretta verso il mouse, unità sotto il cursore, tipo di cursore | fedele |
@@ -99,6 +105,11 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
 - `TurnTo`: se lo sprite sta già ruotando nel verso opposto torna ad `act_go` invece di invertire.
 - Effect2 `act_child` (`0x412a30`): si aggancia in fondo alla catena del padre; se il padre sta
   sparando genera subito i propri figli e muore.
+- Trovate con l'oracolo (issue #12, `docs/oracle.md` §3): passo del vento (n. 3), punto impacchettato
+  di `FirstObstacleOnLine` (17), antiaereo = `targetCategory & 8` (18) e arma della testa nella
+  torretta del giocatore (19), ritorno di Projectile `act_nextcommand` (20), `GetDirection` che
+  aggiorna `g_dist` anche in `FindTarget` e `Player::Tact` (24), `SizeTo` con il punto troncato a s16
+  (14), aritmetica a 32 bit di `GetDirection`/`Distance(x, y)` con punti int32 (4, 5).
 
 ## 5. Divergenze volute dall'originale
 
@@ -139,6 +150,17 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
   ma il motore riceve un solo input locale.
 - **D12 Testo.** La classe Font è un segnaposto: i testi (`PrintText`, `Message`) sono della
   sessione.
+- **D13 Tempo negativo.** `advanceClock(elapsedMs)` riceve un tempo di frame con segno: un valore
+  negativo (non valido) non fa avanzare l'orologio. L'originale calcola `timeGetTime() − ultimo`
+  senza segno: una differenza ≥ 2³¹ ms vale 71 ms. Per i tempi validi (0..2³¹−1) è identico.
+- **D14 Statistiche delle morti.** Il colpo letale sulla Kassandra incrementa nell'originale un
+  contatore nel record del giocatore (`0x41211a`, `docs/oracle.md` §3.22); il motore non tiene
+  queste statistiche (nessuna builtin del motore le legge).
+- **D15 Puntatori usati come coordinate.** Projectile `act_attack` calcola la direzione verso
+  `(puntatore del bersaglio, v2)`: il motore usa `World::kPointerX` (`0x800000`, un indirizzo di
+  heap tipico), che dà la stessa direzione dell'originale (circa est).
+- Aggiunte a D10: `0x40c0e0` senza l'effetto di ferita nella catena, `act_coor_attack` della
+  Kassandra senza testa o con una testa fuori dalle tabelle delle munizioni.
 
 ## 6. Verifica
 
@@ -152,6 +174,13 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
   ordine di movimento e uno di fuoco; nelle 19 missioni vere (gli altri livelli sono mappe
   segnaposto da meno di 200 oggetti che gli script riempiono) i nemici si muovono e combattono, il
   flagman obbedisce; determinismo (stesso seme → stesso mondo); prestazioni del livello 19.
+- `tests/engine_oracle_test.cpp` (senza dati, CI): il codice del motore su tutti i vettori
+  dell'oracolo (`docs/oracle.md` §8) più un test di regressione della torretta del giocatore.
+  Divergenze trovate e corrette (issue #12): passo del vento (1131 valori), `GetDirection` e
+  `Distance(x, y)` con punti int32, `SizeTo`, `Random(INT_MAX)`, divisione per zero con `dirs = 0`
+  nel caricamento dei vid (il motore andava in crash), punto impacchettato di
+  `FirstObstacleOnLine`, Projectile `act_nextcommand`/`act_attack`, antiaereo di `act_coor_attack`
+  e della torretta, `g_dist` di `FindTarget`.
 - `tools/engine_run --data DIR --level 19 --seconds 60 --shots 1000,5000` per screenshot e traccia;
   opzioni `--step 8.333`, `--input "500:move:300,60;4000:fire:150,140:1500;7000:up:0,0:2000"`
   (coordinate relative al flagman), `--weapon 90` (testa iniziale), `--spawn x,y`,
@@ -167,4 +196,6 @@ Funzioni pure in `game::fx`: `getDirection`, `gameDistance`, `tickPeriod`, `inte
 `PerspectiveTables`; RNG `game::MsvcRand`. Con un `World` costruito da vid sintetici
 (`World{vids, weapons}` + `loadEmpty`) sono richiamabili isolatamente anche `checkMove`,
 `askPlace`, `askPlaceVid`, `firstObstacleOnLine`, `findTarget`, `setDestination`, `turnTo`,
-`createChildren`, `action(s, act_damage, ...)` e `spriteTact`.
+`createChildren`, `action(s, act_damage, ...)` e `spriteTact`. Per sostituire i collaboratori come
+fa l'oracolo: `actionHook`/`changeActionHook`, e le versioni di `physics`, `firstObstacleOnLine` e
+`createChildren` che ricevono le funzioni da chiamare (`docs/oracle.md` §8).
