@@ -28,6 +28,7 @@ testi, menu), `input/` (controller, cursori), `video/` (filmati), `demo/` (parse
   unità del motore devono restare sotto `0x40000000`.
 - Ganci opzionali aggiunti dalla #10 (implementazione vuota di default): `setScrollLock(bool)` e
   `drawScreenEffects(fb)`; vedi `docs/session.md`.
+- Gancio opzionale aggiunto dalla #15: `stateBarInfo()` (dati della barra di stato).
 - Il motore si costruisce in un solo punto: `makeGameEngine()` in `src/gromada_libretro.cpp`.
 - Finché il motore (#8) non è fuso, la sessione usa un'implementazione provvisoria del contratto
   basata su `engine/level.hpp` (disegno del livello, builtin minime), così da poter sviluppare menu,

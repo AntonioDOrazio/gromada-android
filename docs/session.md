@@ -32,12 +32,15 @@ Tutti header-only. La sessione dipende dal contratto, non da un'implementazione 
    `GetNetKey`, `GetNetInputState` leggono lo stesso record.
 3. `main()` dello script (una volta per frame, da capo).
 4. `engine.draw()` e sopra menu, testi e barra di stato (l'originale disegna prima di
-   aggiornare: si vede lo stato del frame precedente); poi `engine.tactWorld()`.
+   aggiornare: si vede lo stato del frame precedente); poi `engine.tactWorld()` e le animazioni
+   degli oggetti di schermo (che nell'originale sono sprite del mondo) e la macchina da scrivere.
 5. Aggiornamento dei menu (vedi sotto): se consuma il click, il record viene rimandato al motore
    con i bit azzerati prima di `tactPlayers()` (come `0x40c1d0`, che azzera i bit prima di
-   `0x415e20`); animazioni dei menu e macchina da scrivere; `tactPlayers()`, `tactGroupAi()`,
-   `updateCamera()`; suoni (motore + `PlaySFX` + menu).
-6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine), cursore.
+   `0x415e20`); `tactPlayers()` e subito dopo la barra di stato (`StateBar::Tact`, chiamata
+   dall'originale dentro `Player::Tact`), `tactGroupAi()`, `updateCamera()`; suoni (motore +
+   `PlaySFX` + menu).
+6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine, `docs/engine.md` §8),
+   cursore.
 7. **Dopo il frame**, nell'ordine in cui lo script li ha chiesti (in originale sono
    `PostMessage`): `Load()`, `PlayAVI()`, `SetGraphMode()`, `Exit()`.
 
@@ -129,20 +132,50 @@ Dal disassemblato:
 - `MenuAction(nvid,dir,azione)` agisce sugli oggetti della lista con quel nvid e indice.
 - **Disegno**: strati 0..15, dentro lo strato per y, z, x e ordine di creazione (ordine
   d'inserimento delle liste del mondo); i testi sono sprite dello strato del font (14).
-- **Animazioni** (ipotesi ragionevole, non verificata): un fotogramma ogni `frameDuration` del vid
-  anche in pausa (oggetti fissi allo schermo); un vid con animazione di nascita parte in
-  `act_birth` e poi sta fermo; `act_death` rimuove l'oggetto a fine animazione (rumore dello
-  schermo armi); il suono dell'azione suona una volta all'inizio dell'azione.
+- **Animazioni** (verificate nel disassemblato, issue #15): gli oggetti di schermo sono sprite
+  del mondo e si animano come `SpriteTact` (`0x409a20`) sull'orologio di gioco, anche in pausa
+  (sprite di schermo): un fotogramma quando `orologio − lastTact ≥ frameDuration`, controllato
+  una volta per frame, senza recupero (`lastTact = orologio`; a 60 fps un vid da 71 ms avanza
+  ogni 5 frame, come gli sprite del motore). Fine di `act_birth` → `act_stand`; fine di
+  `act_death` → l'oggetto sparisce; le altre azioni (luci dei pulsanti, indicatori della mappa
+  delle missioni) ricominciano. `ChangeAction` (`0x40b3e0`) non fa nulla se azione e direzione
+  non cambiano, altrimenti riparte dal primo fotogramma e riarma il suono (`state & 0x200`), che
+  suona al primo tick successivo e una sola volta per azione (le Image non lo riarmano a fine
+  ciclo). Il pulsante cliccato ha `lastTact −= 1000` (`0x40c2c4`): avanza al frame dopo. `Init`
+  (`0x40bf30`) fa partire un'animazione di attesa da un fotogramma casuale (`rand()` condiviso
+  con il motore; per le Image solo se ha più di 2 fotogrammi). `Pause(0)` riporta indietro
+  l'orologio e i timer degli oggetti con lui. Il disegno usa il renderer a 16 bit del motore
+  (`game/hicolor.hpp`: trasparenza esatta della barra di stato e del vetro dell'interfaccia).
 
 ## Testi e barra di stato
 
 `PrintText`/`PrintFile` usano `ui::TextManager` (font, macchina da scrivere, suoni 23/24: vedi
 `docs/ui.md`); `PrintFile` cerca nella cartella del gioco e poi in quella di salvataggio.
 `StateBar(1)` carica `statebar.men` in una lista propria (non cliccabile) e abilita `Message`.
-Contenuto della barra (**ipotesi**, l'originale non è analizzato): la direzione della barra dei
-punti vita (vid 49, 79 direzioni) è `hp · 78 / maxhp` (hp del flagman da `Action(act_gethp)`,
-`maxhp` globale dello script), la direzione della barra (vid 266) è `nweapon`; `Message` scrive
-in (24,452). `Message` non è usata dagli script del gioco.
+Tab (Select sul pad) la mostra e la nasconde (`HEADER.INI`: `opt_player ^= OPT_STATEBAR`).
+
+Contenuto (`StateBar::Tact` `0x416de0`, verificato nel disassemblato, issue #15). L'originale la
+esegue dentro `Player::Tact` del giocatore locale, quindi solo con un flagman e fuori dalla pausa;
+la sessione la esegue subito dopo `tactPlayers()` con i dati di `Engine::stateBarInfo()`. Per
+ogni oggetto della barra, in ordine di lista (`statebar.men`: 266, 61, 49):
+- **266** (la barra, formato 8 con trasparenza, 5 direzioni), solo se il flagman ha una testa
+  d'arma (sotto-oggetto): il nome del vid della testa e i 5 contatori di munizioni (`s16` a
+  `+0x54`, il quinto sono i salti), scritti con il font 127 direttamente nell'immagine
+  (`putcadr`, angolo in alto a sinistra, passo 7 px) a y = 266.y + 225 − 15: il nome da
+  x = 266.x − 299, i numeri (`itoa`) allineati a destra in x = 266.x − 299 + 391 + 48·i; la
+  direzione è l'indice dell'arma ricavato dal nvid della testa (`nvid−88` sotto 92, `nvid−202`
+  sotto 207, 4 per 207, altrimenti `nvid−207`), convertito come `(i·256 + 256/dirs)/dirs`;
+- **61** (radar, 32 direzioni): per ogni oggetto della griglia entro ±464 px dal flagman (escluso
+  lui) un punto 2×2 in (radar + Δ/16) entro il rettangolo di ritaglio: giallo (200,200,50) per
+  gli `AviaMissile`, aviazione ciano (56,145,165) dell'armata 1 o (35,88,100) delle altre, mine
+  rosse (200,50,50), unità di terra verdi (83,165,54) dell'armata 1 o grigie (`0x7bef`) delle
+  altre; la direzione punta all'unità più vicina dell'armata 1 (distanza ≤ 60000), 0 se nessuna;
+- **49** (punti vita, 79 direzioni): direzione `hp · 127 / maxHP` del vid del flagman (metà
+  delle direzioni), 0 se `maxHP` è 0.
+`SetDirection` (`0x40b610`) riparte dal primo fotogramma: questi oggetti non si animano.
+`Message(testo)` (`0x416cf0`) scrive con un'unità font creata da `StateBar(1)` e spostata in
+(266.x − 299, 266.y + 225) = (21, 465): primo glifo in (21, 466); dopo 5 s (orologio di gioco)
+dall'ultimo `Message` il testo torna vuoto. `Message` non è usata dagli script del gioco.
 
 ## Input
 
@@ -258,6 +291,8 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
   e i tasti `+`/`-`, che sono del motore;
 - `drawScreenEffects(FramebufferRef)`: gli effetti di `Effect()` valgono per tutta l'immagine,
   menu compresi, quindi vanno disegnati dopo i menu.
+- `stateBarInfo()` (issue #15): i dati del mondo che `StateBar::Tact` legge (punti vita, testa
+  d'arma, munizioni, punti del radar, nemico più vicino); `nullopt` senza flagman o in pausa.
 
 ## Core libretro
 
@@ -292,8 +327,8 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
 
 ## Ipotesi e domande aperte
 
-1. Animazioni degli oggetti di menu e ritorno da `act_birth`/`act_menupress*` (sopra).
-2. Contenuto della barra di stato e posizione di `Message`.
+1. (Chiusa, issue #15) Animazioni degli oggetti di menu: verificate, vedi sopra.
+2. (Chiusa, issue #15) Contenuto della barra di stato e posizione di `Message`: verificati.
 3. Disegno: menu e testi sono disegnati sopra tutto il mondo; nell'originale sono negli stessi
    strati degli sprite (uno sprite del mondo di strato ≥ 10 coprirebbe la lente). Raro.
 4. Ripetizione dei tasti: tempi predefiniti di Windows (ritardo 1, velocità ~15/s).

@@ -74,6 +74,10 @@ Il motore (issue #8) può chiamare direttamente queste funzioni o essere confron
 | `clock` | `SVGA::BeginFrame` `0x401fb0..0x401feb` | intervallo (`timeGetTime` stub) | 600 | limite 71 ms, wraparound di `timeGetTime` |
 | `tick_schedule` | `World::Tact` `0x40bc35..0x40bc9d` | intervallo (`edi`=sprite) | 1200 | `Randomized`, `SkipUpdate`, dt "negativi" |
 | `sprite_timer` | `SPRITE::Tact` `0x409b39..0x409b76` | intervallo | 600 | timer a 16 bit |
+| `hicolor_tables` | `SVGA::SetMode` `0x404ed0..0x40541e` (RGB565), RGB → 16 bit `0x405560` | intervallo / thiscall | 1029 + tabelle | maschere, schiarimento, scurimento, trasparenza, dissolvenza (issue #15, `tests/hicolor_test.cpp`) |
+| `hicolor_effects` | `0x405da0`, `0x405e20`, `0x405c40` | thiscall | 531 | hash dell'uscita su tutti i 65536 valori |
+| `hicolor_gamma` | gamma `0x4072c0` | thiscall | 4300 | hash su una palette di 256 colori; uscite intere per le gamme degli script |
+| `hicolor_putcadr` | `putcadr` `0x4021f0` | thiscall | 40 | frame sintetici dei formati 2/3/4/8, ombra proiettata; superfici 56×18 |
 
 Formato dei file: `{"family", "function", "columns", "notes", "cases": [[...], ...]}`, un caso per
 riga; `tables` ha invece `"arrays"`. Le famiglie con oggetti in numero variabile (`check_move`,
