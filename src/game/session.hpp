@@ -1290,12 +1290,9 @@ private:
     void present() {
         if (!m_hiRes) {
             std::ranges::fill(m_xrgb, 0u);
-            for (int y = 0; y < m_outH; ++y) {
-                const RGBA8* src = m_view.data() + static_cast<std::size_t>(y) * m_viewW;
-                std::uint32_t* dst = m_xrgb.data() + static_cast<std::size_t>(y) * m_outW + m_viewX;
-                for (int x = 0; x < m_viewW; ++x)
-                    dst[x] = (std::uint32_t{src[x].r} << 16) | (std::uint32_t{src[x].g} << 8) | src[x].b;
-            }
+            for (int y = 0; y < m_outH; ++y)
+                view::toXrgb(m_view.data() + static_cast<std::size_t>(y) * m_viewW,
+                             m_xrgb.data() + static_cast<std::size_t>(y) * m_outW + m_viewX, m_viewW);
         } else {
             const int k = m_renderScale, w = m_viewW * k, h = m_outH * k;
             if (m_viewX > 0)   // pillarbox (demos in 16:9)

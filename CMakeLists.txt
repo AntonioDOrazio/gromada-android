@@ -20,6 +20,10 @@ endif()
 add_library(gromada_libretro SHARED src/gromada_libretro.cpp
     src/third_party/stb_vorbis_impl.c src/third_party/dr_libs_impl.c)
 target_include_directories(gromada_libretro PRIVATE src)
+# The picture is drawn in bands on a few worker threads (issue #20, docs/rendering.md).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(gromada_libretro PRIVATE Threads::Threads)
 set(GROMADA_CXX_WARNINGS -Wall -Wno-unknown-attributes -Wno-deprecated-this-capture
     -Wno-defaulted-function-deleted -Wno-parentheses)
 target_compile_options(gromada_libretro PRIVATE

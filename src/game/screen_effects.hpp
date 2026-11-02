@@ -34,6 +34,8 @@
 #include "core/std.hpp"
 #include "game/hicolor.hpp"
 
+#include <cstring>
+
 namespace gromada::game {
 
 class ScreenEffects {
@@ -146,11 +148,15 @@ private:
     }
 
     void copyRect(FramebufferRef fb, const Rect& r, bool toSurface) {
-        for (int y = std::max(r.top, 0); y <= std::min(r.bottom, m_h - 1); ++y)
-            for (int x = std::max(r.left, 0); x <= std::min(r.right, m_w - 1); ++x) {
-                if (toSurface) m_offscreen[idx(x, y)] = fb[y, x];
-                else fb[y, x] = m_offscreen[idx(x, y)];
-            }
+        const int x0 = std::max(r.left, 0), x1 = std::min(r.right, m_w - 1);
+        if (x1 < x0) return;
+        const std::size_t n = static_cast<std::size_t>(x1 - x0 + 1) * sizeof(RGBA8);
+        for (int y = std::max(r.top, 0); y <= std::min(r.bottom, m_h - 1); ++y) {   // row by row (rows are contiguous)
+            RGBA8* pic = &fb[y, x0];
+            RGBA8* surface = &m_offscreen[idx(x0, y)];
+            if (toSurface) std::memcpy(surface, pic, n);
+            else std::memcpy(pic, surface, n);
+        }
     }
 
     // 0x405700: the surface is presented three times, the screen shows it everywhere.

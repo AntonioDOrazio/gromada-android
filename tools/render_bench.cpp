@@ -3,11 +3,12 @@
 // internal resolution, zoom, aspect, frame rate and smooth motion; prints the time of a frame
 // (Session::runFrame, picture included) with and without drawing, so the cost of the picture
 // is the difference; optionally writes PPM screenshots. Times are the CPU time of the thread
-// (CLOCK_THREAD_CPUTIME_ID): other processes on the machine do not count.
+// (CLOCK_THREAD_CPUTIME_ID): other processes on the machine do not count. With --threads > 1
+// the other threads' work is not in it: use --wall (elapsed time) to see the speed-up.
 //
 // usage: render_bench --data DIR [--level 19] [--frames 600] [--warmup 300] [--fps 120]
 //                     [--aspect 4:3|16:9] [--scale 1..4] [--zoom 1] [--smooth 1] [--repeat 1]
-//                     [--shots f1,f2,...] [--out prefix] [--no-baseline]
+//                     [--shots f1,f2,...] [--out prefix] [--no-baseline] [--threads N] [--wall]
 #include "core/std.hpp"
 #include "libgromada/libgromada_all.hpp"
 #include "game/engine.hpp"
@@ -24,15 +25,16 @@ using namespace gromada::game;
 
 namespace {
 
+bool g_wall = false;
 double cpuMs() {
     timespec t{};
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    clock_gettime(g_wall ? CLOCK_MONOTONIC : CLOCK_THREAD_CPUTIME_ID, &t);
     return static_cast<double>(t.tv_sec) * 1e3 + static_cast<double>(t.tv_nsec) * 1e-6;
 }
 
 struct Options {
     std::filesystem::path data;
-    int level = 19, frames = 600, warmup = 300, fps = 120, scale = 1, repeat = 1;
+    int level = 19, frames = 600, warmup = 300, fps = 120, scale = 1, repeat = 1, threads = 0;
     bool wide = false, smooth = true, baseline = true;
     float zoom = 1;
     std::set<int> shots;
@@ -67,6 +69,7 @@ Result run(const GameResources& res, const Options& o, bool render) {
     cfg.render = render;
     cfg.renderScale = o.scale;
     cfg.smoothMotion = o.smooth;
+    cfg.renderThreads = o.threads;
     Session s{res.vids(), res.sounds(), std::make_unique<GameEngine>(res), nullptr, nullptr, cfg};
     s.setZoom(o.zoom);
     s.start(std::format("maps\\levels\\{:02}.map", o.level));
@@ -109,6 +112,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc;) {
         const std::string k = argv[i];
         if (k == "--no-baseline") { o.baseline = false; ++i; continue; }
+        if (k == "--wall") { g_wall = true; ++i; continue; }
         if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", k.c_str()); return 1; }
         const std::string v = argv[i + 1];
         i += 2;
@@ -122,6 +126,7 @@ int main(int argc, char** argv) {
         else if (k == "--zoom") o.zoom = static_cast<float>(std::atof(v.c_str()));
         else if (k == "--smooth") o.smooth = v != "0";
         else if (k == "--repeat") o.repeat = std::max(1, std::atoi(v.c_str()));
+        else if (k == "--threads") o.threads = std::atoi(v.c_str());
         else if (k == "--out") o.out = v;
         else if (k == "--shots") {
             for (std::size_t p = 0; p < v.size();) {
@@ -136,8 +141,8 @@ int main(int argc, char** argv) {
     for (int rep = 0; rep < o.repeat; ++rep) {
         const Result drawn = run(res, o, true);
         const Stats a = stats(drawn.ms);
-        std::printf("level %02d %s %d fps scale %d zoom %.2f smooth %d: %zu sprites, %zux%zu: frame mean %.3f ms median %.3f p95 %.3f max %.3f",
-                    o.level, o.wide ? "16:9" : "4:3", o.fps, o.scale, o.zoom, o.smooth, drawn.sprites,
+        std::printf("level %02d %s %d fps scale %d zoom %.2f smooth %d threads %d %s: %zu sprites, %zux%zu: frame mean %.3f ms median %.3f p95 %.3f max %.3f",
+                    o.level, o.wide ? "16:9" : "4:3", o.fps, o.scale, o.zoom, o.smooth, o.threads, g_wall ? "wall" : "cpu", drawn.sprites,
                     static_cast<std::size_t>((o.wide ? 854 : 640) * o.scale), static_cast<std::size_t>(480 * o.scale), a.mean, a.median,
                     a.p95, a.max);
         if (o.baseline) {

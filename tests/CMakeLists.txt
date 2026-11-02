@@ -2,6 +2,7 @@
 # included once per binary). Exit code 77 = skipped (no game data).
 function(gromada_add_test name)
     add_executable(${name} ${ARGN})
+    target_link_libraries(${name} PRIVATE Threads::Threads)
     target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
     target_compile_options(${name} PRIVATE -w)
     add_test(NAME ${name} COMMAND ${name})
@@ -71,6 +72,7 @@ set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
 add_executable(render_bench ${PROJECT_SOURCE_DIR}/tools/render_bench.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_include_directories(render_bench PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(render_bench PRIVATE Threads::Threads)
 target_compile_options(render_bench PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
 add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
 target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -80,6 +82,7 @@ target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-par
 add_executable(game_trace ${PROJECT_SOURCE_DIR}/tools/game_trace.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_include_directories(game_trace PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(game_trace PRIVATE Threads::Threads)
 target_compile_options(game_trace PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
 # The first 1500 frames of each demo against the emulated original (needs GROMADA_DATA and
 # ORACLE_PYTHON, skipped otherwise; whole demos: tests/trace_oracle.sh ... 0).

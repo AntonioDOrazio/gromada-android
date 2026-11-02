@@ -106,6 +106,16 @@ private:
     bool m_stop = false;
 };
 
+// RGBA8 (bytes r, g, b, a) -> XRGB8888: a byte swap of each little-endian word, vectorized.
+inline void toXrgb(const RGBA8* src, std::uint32_t* out, int n) noexcept {
+    static_assert(sizeof(RGBA8) == 4);
+    for (int i = 0; i < n; ++i) {
+        std::uint32_t v;
+        std::memcpy(&v, src + i, 4);
+        out[i] = ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
+    }
+}
+
 // ---------------------------------------------------------------------------- composite
 // The internal-resolution picture (k > 1). Per frame:
 //   1. the world is drawn into `world` (k * viewW x k * viewH);
@@ -195,7 +205,7 @@ private:
                     int e = x + 1;   // a run of world pixels: one tight loop
                     while (e < lw && modes[static_cast<std::size_t>(e)] == mode) ++e;
                     if (mode == 0) {
-                        convert(src + x * k, out + x * k, (e - x) * k);
+                        toXrgb(src + x * k, out + x * k, (e - x) * k);
                     } else {
                         for (int X = x * k; X < e * k; ++X)
                             out[X] = xrgb(hicolor::toPixel(ScreenEffects::applyOp(m_effect.colorKind, m_effect.colorLevel, hicolor::fromPixel(src[X]))));
@@ -211,15 +221,6 @@ private:
         std::uint32_t v;
         std::memcpy(&v, &p, 4);
         return v & 0x00FFFFFFu;
-    }
-    // RGBA8 (bytes r, g, b, a) -> XRGB8888: a byte swap of each little-endian word, vectorized.
-    static void convert(const RGBA8* src, std::uint32_t* out, int n) noexcept {
-        static_assert(sizeof(RGBA8) == 4);
-        for (int i = 0; i < n; ++i) {
-            std::uint32_t v;
-            std::memcpy(&v, src + i, 4);
-            out[i] = ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
-        }
     }
     static void snapshot(FramebufferRef fb, std::vector<RGBA8>& out) {
         const std::size_t n = static_cast<std::size_t>(fb.extent(0)) * static_cast<std::size_t>(fb.extent(1));
