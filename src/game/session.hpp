@@ -249,8 +249,13 @@ public:
 
     // ---- ScriptHost -------------------------------------------------------------------------------
     script::Value callBuiltin(const script::BuiltinInfo& b, std::span<const script::Value> args) override {
-        return dispatch(b.id, args);
+        script::Value r = dispatch(b.id, args);
+        if (builtinObserver)
+            builtinObserver(b.id, args, r);
+        return r;
     }
+    // Diagnostics (tools/game_trace): every builtin call of the script, with its result.
+    std::function<void(int, std::span<const script::Value>, const script::Value&)> builtinObserver;
     void warning(const script::SourceLocation& loc, std::string_view message) override {
         if (m_warnings++ < 50)
             log(LogLevel::Warn, std::format("script {}: {}", loc.str(), message));

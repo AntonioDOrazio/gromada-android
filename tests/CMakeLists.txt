@@ -55,6 +55,12 @@ set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
 add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
 target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
+# Game-level trace of a demo replay (issue #13), compared with the emulated original by
+# tools/oracle/compare_traces.py (docs/trace-oracle.md).
+add_executable(game_trace ${PROJECT_SOURCE_DIR}/tools/game_trace.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+target_include_directories(game_trace PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(game_trace PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
 # Game session (src/game/session*.hpp): synthetic tests (mock engine, synthetic scripts) and
 # the whole flow of the game + the three demos on the original data (provisional engine).
 gromada_add_test(session_test session_test.cpp
