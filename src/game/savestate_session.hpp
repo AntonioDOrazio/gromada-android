@@ -714,13 +714,13 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
     static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
 GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
 GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3184);
-GROMADA_SAVESTATE_TRIPWIRE(Session, 2768);
-GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 352);
+GROMADA_SAVESTATE_TRIPWIRE(Session, 2992);     // + #13 tool hooks and per-frame sound buffers (not state)
+GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 416);    // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
 GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);
 GROMADA_SAVESTATE_TRIPWIRE(DemoPlayer, 160);
 GROMADA_SAVESTATE_TRIPWIRE(DemoRecorder, 24);
-GROMADA_SAVESTATE_TRIPWIRE(SoundChannels, 608);
+GROMADA_SAVESTATE_TRIPWIRE(SoundChannels, 656); // + #13 requestObserver (tool hook, not state)
 GROMADA_SAVESTATE_TRIPWIRE(Sprite, 168);
 GROMADA_SAVESTATE_TRIPWIRE(VidInfo, 288);
 GROMADA_SAVESTATE_TRIPWIRE(Player, 36);
@@ -730,8 +730,8 @@ GROMADA_SAVESTATE_TRIPWIRE(ScreenObject, 64);
 GROMADA_SAVESTATE_TRIPWIRE(MenuState, 16);
 GROMADA_SAVESTATE_TRIPWIRE(script::Interpreter, 320);
 GROMADA_SAVESTATE_TRIPWIRE(script::StringMemory, 24);
-GROMADA_SAVESTATE_TRIPWIRE(ui::TextManager, 112);
-GROMADA_SAVESTATE_TRIPWIRE(ui::ScreenText, 56);
+GROMADA_SAVESTATE_TRIPWIRE(ui::TextManager, 144); // + #13 per-frame screen sounds (not state)
+GROMADA_SAVESTATE_TRIPWIRE(ui::ScreenText, 80);  // v3: game-clock typewriter fields
 GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 488);
 GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 112);
 GROMADA_SAVESTATE_TRIPWIRE(input::RawInput, 112);

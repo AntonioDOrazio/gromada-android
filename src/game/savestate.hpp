@@ -34,7 +34,7 @@
 namespace gromada::game {
 
 inline constexpr std::array<char, 8> SaveStateMagic = {'G', 'R', 'M', 'D', 'S', 'T', 'A', 'T'};
-inline constexpr std::uint32_t SaveStateVersion = 2;
+inline constexpr std::uint32_t SaveStateVersion = 3; // v3: game-clock typewriter (issue #13)
 inline constexpr std::size_t SaveStateHeaderSize = 64;
 // retro_serialize_size(): libretro wants one size for the whole session, so this is a fixed
 // upper bound (see docs/savestates.md for the measured sizes); a larger state fails to save.

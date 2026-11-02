@@ -1,7 +1,8 @@
 #pragma once
 // Save states of the on-screen texts (issue #14, docs/savestates.md): every text with its
-// typewriter progress, the pending typewriter sounds and the next handle. The timing lookup
-// (font vids) is static data and is not stored.
+// typewriter progress (including the game-clock typewriter of issue #13), the pending
+// typewriter sounds and the next handle. Not stored: the timing lookup (font vids, static data)
+// and m_screenSounds (filled and taken within one frame, always empty between frames).
 // decode() validates into a staged value, apply() cannot fail. Header-only.
 
 #include "core/state_io.hpp"
@@ -27,6 +28,12 @@ struct SaveStateAccess {
             w.u64(t.visible);
             w.f32(t.pause);
             w.f32(t.clock);
+            // game-clock typewriter (issue #13, format v3)
+            w.boolean(t.started);
+            w.u32(t.lastTact);
+            w.i32(t.timerMs);
+            w.i32(t.action);
+            w.boolean(t.soundDone);
         }
         w.array(std::span<const int>{m.m_sounds});
         w.i32(m.m_nextHandle);
@@ -34,7 +41,7 @@ struct SaveStateAccess {
 
     static TextManagerState decode(state::Reader& r) {
         TextManagerState s;
-        const std::size_t n = r.count(36, 1u << 16);
+        const std::size_t n = r.count(50, 1u << 16);
         s.texts.resize(n);
         for (ScreenText& t : s.texts) {
             t.handle = r.i32();
@@ -47,6 +54,12 @@ struct SaveStateAccess {
             t.visible = static_cast<std::size_t>(visible);
             t.pause = r.finite32();
             t.clock = r.finite32();
+            t.started = r.boolean();
+            t.lastTact = r.u32();
+            t.timerMs = r.i32();
+            t.action = r.i32();
+            if (t.timerMs < 0 || t.action < 0 || t.action > 2) throw state::Error("save state: bad typewriter state");
+            t.soundDone = r.boolean();
             if (t.handle <= 0) throw state::Error("save state: bad text handle");
         }
         s.sounds = r.array<int>(1u << 16);

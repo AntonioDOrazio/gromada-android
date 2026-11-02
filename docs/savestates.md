@@ -21,14 +21,14 @@ lo stesso audio (musica ed effetti compresi) dell'esecuzione originale, byte per
 Ogni classe serializzata dichiara `friend struct SaveStateAccess;` (una riga): il codice dello
 stato vive nei file sopra, non dentro le classi.
 
-## Formato (versione 2)
+## Formato (versione 3)
 
 Intestazione di 64 byte, poi i chunk:
 
 | offset | campo |
 |---|---|
 | 0 | magic `GRMDSTAT` |
-| 8 | versione (`SaveStateVersion` = 2; la 1 aveva lo scheduler dei suoni e gli effetti prima delle issue #15–#18, non si carica più) |
+| 8 | versione (`SaveStateVersion` = 3; la 2 non aveva la macchina da scrivere a tempo di gioco della issue #13, la 1 lo scheduler dei suoni e gli effetti prima delle issue #15–#18: non si caricano più) |
 | 12 | dimensione dell'intestazione (64) |
 | 16 | dimensione del payload (u64) |
 | 24 | checksum a 64 bit di intestazione (con questo campo a zero) e payload |
@@ -192,3 +192,12 @@ Procedura (anche per chi fonde un branch e vede fallire la compilazione):
 - I file su disco non tornano indietro con lo stato.
 - Uno stato salvato a 16:9 si carica anche a 4:3 (e viceversa): la vista prende la dimensione
   attuale dal frame successivo; il determinismo vale a parità di opzioni.
+
+## Campi della issue #13 (versione 3)
+
+- Salvati: per ogni testo, lo stato della macchina da scrivere a tempo di gioco (`started`,
+  `lastTact`, `timerMs`, `action`, `soundDone` di `ui::ScreenText`).
+- Non salvati, perché non sono stato: gli agganci degli strumenti (`Session::builtinObserver`,
+  `Session::m_sink`, `SoundChannels::requestObserver`) e i buffer riempiti e svuotati nello stesso
+  frame (`m_screenSounds` di sessione, interfaccia e testi; `Session::m_soundCam`, la camera al
+  momento del tick del mondo). Tra due frame sono vuoti o vengono riscritti prima dell'uso.
