@@ -133,8 +133,11 @@ class WeaponHud {
 public:
     static constexpr float Duration = 2.0f;
 
-    // Returns true while the indicator should be drawn.
-    bool update(int current, int requested, float dt) {
+    // Returns true while the indicator should be drawn. `poke`: a weapon key was pressed
+    // (shown even when nothing changes, e.g. a single weapon available).
+    bool update(int current, int requested, float dt, bool poke = false) {
+        if (poke && current >= 0)
+            m_timer = Duration;
         if (current != m_current || requested != m_requested) {
             if (m_current >= 0 && current >= 0)
                 m_timer = Duration; // not on the first frame of a level

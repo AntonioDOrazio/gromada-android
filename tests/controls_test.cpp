@@ -126,6 +126,8 @@ void testWeaponHud() {
     CHECK(h.update(1, 1, 0.9f));
     CHECK(!h.update(1, 1, 0.2f));
     CHECK(!h.update(-1, -1, 0.1f));
+    CHECK(!h.update(0, 0, 0.1f));
+    CHECK(h.update(0, 0, 0.1f, true)); // key pressed, nothing changes: shown anyway
 }
 
 } // namespace

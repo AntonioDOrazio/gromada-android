@@ -1029,7 +1029,10 @@ private:
         }
         const WeaponSlots w = currentWeapons();
         const int requested = m_pc.weaponPending ? m_pc.weaponSlot : w.current;
-        if (!m_weaponHud.update(w.current, requested, static_cast<float>(dt)) || m_stateBar || m_ui.hasMenu())
+        bool poke = false;
+        for (int k = 0; k < 4; ++k)
+            poke |= m_pc.key(static_cast<input::Key>(static_cast<int>(input::Key::Num1) + k)).pressed;
+        if (!m_weaponHud.update(w.current, requested, static_cast<float>(dt), poke) || m_stateBar || m_ui.hasMenu())
             return;
         const int head = w.nvid[static_cast<std::size_t>(std::clamp(requested, 0, 3))];
         if (!head)
@@ -1043,6 +1046,13 @@ private:
         const int ammo = ammoValue ? ammoValue->toInt() : -1;
         const std::string text = WeaponHud::label(requested, name ? name->toString() : std::string{}, ammo,
                                                   requested != w.current);
+        // darkened box behind the text: the game font is green, like much of the scenery
+        const int x0 = 6, y0 = m_outH - 30, x1 = std::min(m_viewW, 18 + 7 * static_cast<int>(text.size())), y1 = m_outH - 8;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                auto& p = fb[y, x];
+                p = RGBA8{{static_cast<std::uint8_t>(p.r >> 2), static_cast<std::uint8_t>(p.g >> 2), static_cast<std::uint8_t>(p.b >> 2)}, 255};
+            }
         m_ui.fonts().drawText(text, ui::vids::Font, 12, m_outH - 24, fb);
     }
 

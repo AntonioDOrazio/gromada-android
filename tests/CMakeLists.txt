@@ -83,3 +83,18 @@ add_test(NAME core_sfx_loop COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop
 add_test(NAME core_sfx_loop_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop.sh $<TARGET_FILE:harness>
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_120_out gromada_fps=120)
 set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_CODE 77)
+
+# Controls on the real gameplay (issue #16): direct scheme drives to a point and hits a target,
+# menus by pad only and by touch only; 60/120 fps x 4:3/16:9 (needs the game data).
+foreach(mode pad touch)
+    foreach(cfg "60;4:3" "120;4:3" "60;16:9" "120;16:9")
+        list(GET cfg 0 fps)
+        list(GET cfg 1 aspect)
+        string(REPLACE ":" "" tag "${aspect}")
+        set(name controls_e2e_${mode}_${fps}fps_${tag})
+        add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/controls_e2e.sh $<TARGET_FILE:harness>
+                 $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/${name}_out ${mode}
+                 gromada_fps=${fps} gromada_aspect=${aspect})
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+endforeach()
