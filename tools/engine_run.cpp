@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     std::string events;
     bool player = true, quiet = false;
     int width = 640, height = 480;
-    int spawnX = -1, spawnY = -1, camX = -1, camY = -1;
+    int spawnX = -1, spawnY = -1, camX = -1, camY = -1, weapon = 88;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
         else if (a == "--trace") traceEvery = std::stoi(next());
         else if (a == "--input") events = next();
         else if (a == "--no-player") player = false;
+        else if (a == "--weapon") weapon = std::stoi(next());
         else if (a == "--camera") { const auto v = next(); const auto c = v.find(','); camX = std::stoi(v.substr(0, c)); camY = std::stoi(v.substr(c + 1)); }
         else if (a == "--spawn") { const auto v = next(); const auto c = v.find(','); spawnX = std::stoi(v.substr(0, c)); spawnY = std::stoi(v.substr(c + 1)); }
         else if (a == "--quiet") quiet = true;
@@ -160,7 +161,7 @@ int main(int argc, char** argv) {
         flagman = call(68, {kassandra, px, py, 0}).toInt();     // Create
         call(119, {0, flagman});                                // SetFlagman(0, ...)
         w.players()[0].type = 1;
-        call(67, {flagman, 35, 88, 0});                         // act_changeweapon
+        call(67, {flagman, 35, weapon, 0});                     // act_changeweapon (V_FLAGMANHEAD11 = 88)
         const int noammo[8] = {20, 80, 60, 10, 10, 0, 0, 0};
         for (int k = 0; k < 8; ++k) call(67, {flagman, 63, noammo[k], k});   // act_addammo
         call(126, {px, py});                                    // SetPosition

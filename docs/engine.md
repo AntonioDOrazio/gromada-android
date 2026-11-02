@@ -152,7 +152,10 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
   ordine di movimento e uno di fuoco; nelle 19 missioni vere (gli altri livelli sono mappe
   segnaposto da meno di 200 oggetti che gli script riempiono) i nemici si muovono e combattono, il
   flagman obbedisce; determinismo (stesso seme → stesso mondo); prestazioni del livello 19.
-- `tools/engine_run --data DIR --level 19 --seconds 60 --shots 1000,5000` per screenshot e traccia.
+- `tools/engine_run --data DIR --level 19 --seconds 60 --shots 1000,5000` per screenshot e traccia;
+  opzioni `--step 8.333`, `--input "500:move:300,60;4000:fire:150,140:1500;7000:up:0,0:2000"`
+  (coordinate relative al flagman), `--weapon 90` (testa iniziale), `--spawn x,y`,
+  `--camera x,y --no-player`, `ENGINE_TRACE_DAMAGE=1` per stampare ogni `act_damage`.
 
 Prestazioni misurate (desktop condiviso, build Release): livello 19 (15.300 sprite) tick del
 mondo p99 ≈ 0,6 ms, massimo < 1 ms, disegno 640×480 ≈ 1 ms.
