@@ -5,7 +5,7 @@ L'oracolo esegue funzioni (o tratti di codice) dell'originale `gromada.exe` in u
 test numerici** (`tests/data/oracle/*.json`). Le funzioni di riferimento C++ pure di
 `src/game/reference_math.hpp` devono riprodurli **bit per bit** (`tests/oracle_test.cpp`).
 Dalla issue #12 anche il **codice del motore** (`World`, `GameEngine`, l'interprete) è verificato
-direttamente su tutti i vettori (`tests/engine_oracle_test.cpp`, §8).
+direttamente su tutti i vettori (`tests/engine_oracle_test.cpp`, §9).
 
 - I vettori contengono solo numeri (ingressi scelti dal generatore e uscite dell'originale):
   nessun byte dell'eseguibile né dati del gioco. Sono nel repo, quindi la CI non ha bisogno

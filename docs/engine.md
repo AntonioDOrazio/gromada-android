@@ -17,7 +17,7 @@ nel disassemblato (indirizzi citati nel codice e qui sotto, §4).
 | `src/game/engine.hpp` | `GameEngine : Engine`: fasi del frame, giocatori (`0x4169b0`), camera (`0x415e20`, `0x414838`), disegno (`0x40b880`, `0x40b620`, `0x4021f0`), effetti, gamma, le 28 builtin |
 | `tools/engine_run.cpp` | strumento desktop: carica un livello, mette la Kassandra dove la mette lo script, simula N secondi a passo fisso con input scriptato, salva screenshot PPM e una traccia |
 | `tests/engine_test.cpp`, `tests/engine_data_test.cpp` | test sintetici (CI) e con i dati del gioco (locali) |
-| `tests/engine_oracle_test.cpp` | il codice del motore sui vettori dell'oracolo (33 famiglie, CI; `docs/oracle.md` §8) |
+| `tests/engine_oracle_test.cpp` | il codice del motore sui vettori dell'oracolo (33 famiglie, CI; `docs/oracle.md` §9) |
 
 Tutto è header-only e va incluso una volta per binario (`engine.hpp` include `libgromada_all.hpp`).
 Costruzione: `game::GameEngine engine{resources};` (`GameResources` di `fw.res`), poi `loadMap()`.
@@ -175,7 +175,7 @@ a 0 differenze salvo le divergenze di §5.
   segnaposto da meno di 200 oggetti che gli script riempiono) i nemici si muovono e combattono, il
   flagman obbedisce; determinismo (stesso seme → stesso mondo); prestazioni del livello 19.
 - `tests/engine_oracle_test.cpp` (senza dati, CI): il codice del motore su tutti i vettori
-  dell'oracolo (`docs/oracle.md` §8) più un test di regressione della torretta del giocatore.
+  dell'oracolo (`docs/oracle.md` §9) più un test di regressione della torretta del giocatore.
   Divergenze trovate e corrette (issue #12): passo del vento (1131 valori), `GetDirection` e
   `Distance(x, y)` con punti int32, `SizeTo`, `Random(INT_MAX)`, divisione per zero con `dirs = 0`
   nel caricamento dei vid (il motore andava in crash), punto impacchettato di
@@ -198,4 +198,4 @@ Funzioni pure in `game::fx`: `getDirection`, `gameDistance`, `tickPeriod`, `inte
 `askPlace`, `askPlaceVid`, `firstObstacleOnLine`, `findTarget`, `setDestination`, `turnTo`,
 `createChildren`, `action(s, act_damage, ...)` e `spriteTact`. Per sostituire i collaboratori come
 fa l'oracolo: `actionHook`/`changeActionHook`, e le versioni di `physics`, `firstObstacleOnLine` e
-`createChildren` che ricevono le funzioni da chiamare (`docs/oracle.md` §8).
+`createChildren` che ricevono le funzioni da chiamare (`docs/oracle.md` §9).
