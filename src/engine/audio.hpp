@@ -54,7 +54,6 @@ public:
         if (m_playlist == playlist && m_music)
             return; // already playing this playlist: don't restart
         m_playlist = playlist;
-        m_playlistPos = 0;
         openTrack(m_playlist[0]);
     }
 
@@ -149,6 +148,13 @@ private:
 
     void closeMusic() { m_music.reset(); }
 
+    [[nodiscard]] int nextTrack(int cur) const noexcept {
+        for (std::size_t i = 0; i + 1 < m_playlist.size(); ++i)
+            if (cur == m_playlist[i])
+                return m_playlist[i + 1];
+        return m_playlist[0];
+    }
+
     // Ensures the decoded window covers source frame index `needed`; false at end of track.
     bool fillMusic(std::size_t needed) {
         while (needed >= m_musicBufStart + m_musicBuf.size() / 2) {
@@ -174,9 +180,10 @@ private:
         for (std::size_t i = 0; i < frames; ++i) {
             const auto i0 = static_cast<std::size_t>(m_musicPos);
             if (!fillMusic(i0)) {
-                // track finished: next entry of the playlist (cycling, like the original)
-                m_playlistPos = (m_playlistPos + 1) % m_playlist.size();
-                openTrack(m_playlist[m_playlistPos]);
+                // track finished: the next one by the original's rule (0x409230, MM_MCINOTIFY):
+                // next = cur==t1 ? t2 : cur==t2 ? t3 : cur==t3 ? t4 : t1 (first match), so
+                // 8,9,8,9 alternates and 4,4,2,3 repeats track 4 (docs/re/runtime.md §9).
+                openTrack(nextTrack(m_currentTrack));
                 if (!m_music)
                     return;
                 --i;
@@ -200,7 +207,6 @@ private:
 
     std::vector<std::filesystem::path> m_musicDirs;
     std::array<int, 4> m_playlist{};
-    std::size_t m_playlistPos = 0;
     int m_currentTrack = 0;
     std::unique_ptr<MusicStream> m_music;
     double m_musicStep = 1.0, m_musicPos = 0.0;
