@@ -35,7 +35,7 @@ Tutti header-only. La sessione dipende dal contratto, non da un'implementazione 
    aggiornare: si vede lo stato del frame precedente); poi `engine.tactWorld()`.
 5. Aggiornamento dei menu (vedi sotto): se consuma il click, il record viene rimandato al motore
    con i bit azzerati prima di `tactPlayers()` (come `0x40c1d0`, che azzera i bit prima di
-   `0x415e20`); animazioni dei menu e macchina da scrivere; `tactPlayers()`, `tactGroupAi()`,
+   `0x415e20`); prima, i tick di menu e testi (animazioni, macchina da scrivere); `tactPlayers()`, `tactGroupAi()`,
    `updateCamera()`; suoni (motore + `PlaySFX` + menu).
 6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine), cursore.
 7. **Dopo il frame**, nell'ordine in cui lo script li ha chiesti (in originale sono
@@ -129,10 +129,15 @@ Dal disassemblato:
 - `MenuAction(nvid,dir,azione)` agisce sugli oggetti della lista con quel nvid e indice.
 - **Disegno**: strati 0..15, dentro lo strato per y, z, x e ordine di creazione (ordine
   d'inserimento delle liste del mondo); i testi sono sprite dello strato del font (14).
-- **Animazioni** (ipotesi ragionevole, non verificata): un fotogramma ogni `frameDuration` del vid
-  anche in pausa (oggetti fissi allo schermo); un vid con animazione di nascita parte in
-  `act_birth` e poi sta fermo; `act_death` rimuove l'oggetto a fine animazione (rumore dello
-  schermo armi); il suono dell'azione suona una volta all'inizio dell'azione.
+- **Animazioni e suoni** (verificati sulle demo, issue #13): gli oggetti di menu e i testi sono
+  sprite di schermo dell'originale e ricevono il tick come gli altri (`0x409a20`): al più uno per
+  frame, quando sono passati `frameDuration` ms di orologio di gioco, mai nel frame della
+  creazione, anche in pausa; avanzano di un fotogramma; un vid con animazione di nascita parte in
+  `act_birth` e poi sta fermo; `act_death` rimuove l'oggetto a fine animazione. Il suono
+  dell'azione suona al **tick successivo** al cambio d'azione (`ChangeAction` azzera il bit "suono
+  emesso" anche quando l'azione non cambia), posizionale rispetto al centro dello schermo degli
+  script (pan `4·dx`, attenuazione `−2·max(|dx|,|dy|)`), dopo i suoni del mondo. I tick avvengono
+  prima dell'aggiornamento dei menu del frame, come `World::Tact` prima di `0x40c1d0`.
 
 ## Testi e barra di stato
 

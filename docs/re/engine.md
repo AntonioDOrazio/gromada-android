@@ -192,9 +192,9 @@ Il Δ non supera mai 71: conferma il limite di `0x401f70`. Le demo sono state re
 `curclock` continua ad avanzare ma `SpriteTact` salta fisica, comandi e figli per tutti gli sprite
 tranne quelli "fissi allo schermo" (`state & 4`: menu, cursori). `Pause(0)` fa
 `s.lastTact += pauseStart - curclock` per ogni sprite (e catena di figli) e
-`curclock = pauseStart`. Per gli sprite congelati questo **aumenta** il dt del tick successivo
-della durata della pausa (comportamento originale probabilmente non voluto; in una
-reimplementazione basta congelare il tempo di simulazione).
+`curclock = pauseStart`. Poiché `World::Tact` dà il tick a tutti gli sprite anche in pausa
+(`lastTact = curclock` a ogni tick), lo spostamento conserva il tempo dall'ultimo tick: nessun
+salto (correzione della issue #13, verificata sulle demo che vanno in pausa).
 
 ---
 
@@ -749,7 +749,7 @@ SPRITE* CheckMove(int x, int y, int z) {           // AskPlace 0x40a430 è ugual
 | off | campo | uso |
 |---|---|---|
 | 0 | targetCategory | maschera di `ObjectCategory` dei bersagli (4 = veicoli, 8 = aerei, 0x0c = entrambi, 0 = nessuno) |
-| 1 | flags | 1 = spara anche se non allineato; 2 = torretta che ruota a vuoto quando inattiva; 4 = spara nella direzione attuale senza ruotare; 8 = mira 80 px più in alto (antiaereo, `+0x39 = 80`) (media sui nomi) |
+| 1 | flags | 1 = spara anche se non allineato; 2 = torretta che ruota a vuoto quando inattiva; 4 = spara nella direzione attuale senza ruotare (in `Player::Tact` letto sull'arma del vid della **torretta**); 8 = in `FindTarget` tiene il candidato già trovato con probabilità 1/3. "Mira 80 px più in alto" (`attackZ = 80`) vale per le armi con `targetCategory & 8` (bersagli aerei: `0x40eadb`, `0x411c41`, `0x416bdb`; issue #13) |
 | 2 | (sempre 0) | |
 | 4 | range (s16) | portata, in distanza "di gioco" `max(|dx|, 1,5|dy|)` |
 | 6 | scatter (u8) | dispersione ± sul punto d'impatto |

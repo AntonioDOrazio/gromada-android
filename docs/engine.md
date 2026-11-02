@@ -57,7 +57,7 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
 
 | sottosistema | stato |
 |---|---|
-| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (pausa: vedi divergenza D1) |
+| orologio, pausa, tick per sprite, jitter `Randomized`, consumo dell'RNG | fedele (verificato sulle tre demo, `docs/trace-oracle.md`) |
 | liste per strato z, inserimento ordinato, puntatore "prossimo" salvato durante l'iterazione | fedele |
 | `CreateUnit`, `Init` (sotto-oggetto collegato, fase casuale), figli per azione (`CreateChildren`, offset ruotati con la prospettiva, dispersione dell'arma) | fedele |
 | `SpriteTact`: suoni di ciclo, timer, figli, morte, orfani degli Effect2, fisica, comandi, `act_calltact`, catena dei figli | fedele |
@@ -102,11 +102,10 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
 
 ## 5. Divergenze volute dall'originale
 
-- **D1 Pausa senza salto in avanti.** In `Pause(0)` l'originale sposta indietro `lastTact` di tutti
-  gli sprite, che al tick successivo ricevono un `dt` lungo quanto la pausa. Qui solo gli sprite
-  aggiornati durante la pausa (quelli di schermo) vengono riallineati; gli altri riprendono con il
-  `dt` normale. L'orologio, come nell'originale, continua a correre in pausa (gli script misurano i
-  tempi dei menu con `GetTime()`) e torna al valore salvato alla ripresa.
+- ~~D1 Pausa senza salto in avanti~~ (rimossa, issue #13): gli sprite ricevono il tick anche in
+  pausa (salta solo fisica e comandi), quindi `Pause(0)` dell'originale (`lastTact += pauseStart -
+  curclock` per tutti) non provoca nessun salto. Ora è riprodotto alla lettera: la versione con il
+  limite a `pauseStart` faceva divergere demo1 alla ripresa dalla pausa.
 - **D2 Riferimenti come id.** `target`, flagman e "unità sotto il cursore" sono id e non puntatori:
   un bersaglio distrutto diventa "nessuno" invece di un puntatore pendente. La memoria di uno
   sprite distrutto viene riusata solo dal `tactWorld()` successivo.
@@ -126,7 +125,8 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
   analizzato).
 - **D8 Camera.** Scroll, guinzaglio e clamp sono tutti in `updateCamera()`; nell'originale lo scroll
   avviene prima dei giocatori. I margini della barra di stato e i tasti `+`/`-` (finestra di gioco
-  ridotta) non sono gestiti: la vista è `camera().width × height`.
+  ridotta) non sono gestiti: la vista è il rettangolo inclusivo `[0, width-1] × [0, height-1]`
+  (`0x42da0c..0x42da18`), quindi la camera arriva a `mapW - width` (verificato sulle demo).
 - **D9 Torretta del giocatore.** Come nell'originale ruota di un passo per frame disegnato
   (`0x40b220` in `Player::Tact`): a 60/120 fps gira più in fretta che a 25–35 fps. Non è stato
   normalizzato per non cambiare il ritmo del gioco senza un riferimento.
