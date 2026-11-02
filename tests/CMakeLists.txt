@@ -107,6 +107,15 @@ set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_C
 # vectors from the original exe (tests/data/oracle/hicolor_*.json; no game data needed).
 gromada_add_test(hicolor_test hicolor_test.cpp)
 target_compile_definitions(hicolor_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# Graphics enhancements (issue #21): synthetic passes (CI) and, with the game data, effects off
+# = bit-identical pictures, simulation untouched with effects on, cost per frame.
+gromada_add_test(enhance_test enhance_test.cpp)
+gromada_add_test(enhance_data_test enhance_data_test.cpp)
+foreach(fps 60 120)
+    add_test(NAME enhance_e2e_${fps}fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/enhance_e2e.sh $<TARGET_FILE:harness>
+             $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/enhance_e2e_${fps}_out gromada_fps=${fps})
+    set_tests_properties(enhance_e2e_${fps}fps PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
 # Controls on the real gameplay (issue #16): direct scheme drives to a point and hits a target,
 # menus by pad only and by touch only; 60/120 fps x 4:3/16:9 (needs the game data).
 foreach(mode pad touch)

@@ -713,7 +713,7 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
 #define GROMADA_SAVESTATE_TRIPWIRE(T, n) \
     static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
 GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
-GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3184);
+GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3200); // + #21 enhancement settings pointer and caches (presentation, not state)
 GROMADA_SAVESTATE_TRIPWIRE(Session, 3008);     // + #13 tool hooks and per-frame sound buffers (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 416);    // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <unordered_map>
 #include "game/engine_api.hpp"
+#include "game/enhance/enhance.hpp"
 #include "game/hicolor.hpp"
 #include "game/screen_effects.hpp"
 #include "game/world.hpp"
@@ -147,6 +148,11 @@ public:
         m_effectsDone = true;
     }
     [[nodiscard]] bool autoScroll() const noexcept { return m_autoScroll; }
+    // Optional graphics enhancements (issue #21, src/game/enhance, presentation only): the
+    // settings are owned by the caller (core options) and read at every draw(); nullptr or
+    // all off = draw() unchanged, bit for bit.
+    void setEnhancements(const enhance::Settings* settings) noexcept { m_fxSettings = settings; }
+    [[nodiscard]] enhance::Enhancer* enhancements() noexcept { return m_fx.get(); }
 
 private:
     static int argInt(std::span<const script::Value> a, std::size_t i) { return i < a.size() ? a[i].toInt() : 0; }
@@ -162,6 +168,8 @@ private:
     void clampCamera();
     void drawSprite(const Sprite& s, FramebufferRef fb);
     const std::array<ColorRgb8, 256>* paletteFor(const Sprite& s);
+    enhance::Enhancer* activeEnhancer();
+    [[nodiscard]] std::optional<enhance::DrawItem> fxItem(const Sprite& s) const;
     const VidInfo& graphicsOwner(int nvid) const;
     void setGlobalGamma(int g) {
         if (g == m_gamma) return;
@@ -193,6 +201,9 @@ private:
     std::vector<std::optional<std::array<ColorRgb8, 256>>> m_palettes;
     struct SortItem { const Sprite* s; int index; };
     std::vector<SortItem> m_sorted;
+    // issue #21: enhancement settings (owned by the core) and caches; not state.
+    const enhance::Settings* m_fxSettings = nullptr;
+    std::unique_ptr<enhance::Enhancer> m_fx;
 };
 
 // ---------------------------------------------------------------------------- players
@@ -425,12 +436,43 @@ inline void GameEngine::drawSprite(const Sprite& s, FramebufferRef fb) {
     hicolor::drawFrame(frame, sx, sy - z, *pal, fb, hicolor::FrameVisitor::Pass::Normal, cast);
 }
 
+// Issue #21: the enhancer while an effect is on (built on first use), else nullptr.
+inline enhance::Enhancer* GameEngine::activeEnhancer() {
+    if (!m_fxSettings || !m_fxSettings->any()) return nullptr;
+    if (!m_fx) {
+        std::vector<const Vid*> src;
+        for (const VidInfo& v : m_world.vids()) src.push_back(v.src);
+        m_fx = std::make_unique<enhance::Enhancer>(src);
+    }
+    m_fx->setSettings(*m_fxSettings);
+    return m_fx.get();
+}
+
+// Issue #21: a drawn sprite as the enhancement passes see it (same frame and position as
+// drawSprite; screen sprites are not part of the world).
+inline std::optional<enhance::DrawItem> GameEngine::fxItem(const Sprite& s) const {
+    const VidInfo& v = m_world.vidOf(s);
+    if (!v.gfx || (s.state & st::Screen) || s.frame < 0 || static_cast<std::size_t>(s.frame) >= v.gfx->frames.size()) return std::nullopt;
+    return enhance::DrawItem{&v.gfx->frames[static_cast<std::size_t>(s.frame)], static_cast<float>(s.x), static_cast<float>(s.y),
+                             static_cast<float>(s.z), s.nvid, v.cls, v.category, v.sizeX, v.sizeY, v.sizeZ, (v.flags & vf::ZeroZ) != 0};
+}
+
 // 0x40b880 draw half: layers 0..15 in list order, culling at +-512 px from the view centre,
 // sub-objects with dz < 0 before the sprite and the others after it. Layer 5 (the unsorted
 // layer of the units, head 0x439d0c) is re-sorted every frame: its visible sprites are
 // inserted with InsertSorted (y, z, x; later insertions first on ties) into a temporary
 // list that is drawn and then discarded, the update order is untouched.
+// Issue #21 hooks (only while an enhancement is on): contact shadows on the ground before
+// layer 5, dynamic light after the last layer (src/game/enhance, docs/architecture.md).
 inline void GameEngine::draw(FramebufferRef fb) {
+    enhance::Enhancer* enh = activeEnhancer();
+    const enhance::View fxView{static_cast<float>(m_camera.x), static_cast<float>(m_camera.y), 1.0f};
+    if (enh) enh->begin();
+    const auto put = [&](const Sprite& s) {
+        drawSprite(s, fb);
+        if (enh)
+            if (auto it = fxItem(s)) enh->drawn.push_back(*it);
+    };
     for (int y = 0; y < fb.extent(0); ++y)
         for (int x = 0; x < fb.extent(1); ++x) fb[y, x] = RGBA8{{0, 0, 0}, 255};
     const int cx = m_camera.x + (m_camera.width >> 1), cy = m_camera.y + (m_camera.height >> 1);
@@ -442,11 +484,11 @@ inline void GameEngine::draw(FramebufferRef fb) {
             const Sprite* parent = s;
             for (const Sprite* c = s->child; c; parent = c, c = c->child) {
                 if (m_world.vidOf(*parent).flags & vf::InvisibleSubobjects) break;
-                drawSprite(*c, fb);
+                put(*c);
             }
         };
         if (s->dz < 0) chain();
-        drawSprite(*s, fb);
+        put(*s);
         if (s->dz >= 0) chain();
     };
     for (int layer = 0; layer < World::MaxLayers; ++layer) {
@@ -461,6 +503,12 @@ inline void GameEngine::draw(FramebufferRef fb) {
                 if (a.s->x != b.s->x) return a.s->x < b.s->x;
                 return a.index > b.index;
             });
+            if (enh) {
+                enh->occluders.clear();
+                for (const auto& it : m_sorted)
+                    if (auto item = fxItem(*it.s)) enh->occluders.push_back(*item);
+                enh->ground(fb, fxView, enh->occluders);
+            }
             for (const auto& it : m_sorted) drawWithChain(it.s);
             continue;
         }
@@ -473,6 +521,7 @@ inline void GameEngine::draw(FramebufferRef fb) {
             drawWithChain(s);
         }
     }
+    if (enh) enh->finish(fb, fxView);
 }
 
 // ---------------------------------------------------------------------------- builtins

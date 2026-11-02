@@ -82,3 +82,42 @@ si usano invece i passi registrati nella demo.
   le demo, l'oracolo e i save state non cambiano.
 - Agenti: controlli (`zoomRate`, schemi), pipeline di rendering (`ViewZoom` → vista, risoluzione
   interna, interpolazione), miglioramenti grafici (passaggio separato sopra la pipeline).
+
+## Miglioramenti grafici (ondata 4, issue #21)
+
+Effetti opzionali di sola presentazione, spenti di default: luci dinamiche e ombre di contatto
+(progetto, costi e proposta GPU in `docs/enhancements.md`). Modulo header-only
+`src/game/enhance/` (`analysis.hpp`, `enhance.hpp`): dipende solo da `core/` e `libgromada/`;
+riceve gli sprite come `enhance::DrawItem`, non conosce `Sprite` né `World`.
+
+**Aggancio** (in `GameEngine::draw`, `src/game/engine.hpp`; attivo solo se un effetto è acceso,
+altrimenti `draw()` è identico bit per bit):
+
+1. `enh = activeEnhancer()` all'inizio (nullptr se le impostazioni mancano o sono tutte spente),
+   `enh->begin()`;
+2. ogni sprite disegnato, catene comprese, passa da `put()`: `drawSprite` più
+   `enh->drawn.push_back(fxItem(s))`;
+3. **dopo gli strati 0–4, prima dello strato 5** (gli sprite visibili e ordinati di `m_sorted`):
+   `enh->ground(fb, fxView, occluders)` scurisce il terreno al piede degli oggetti, che poi gli si
+   disegnano sopra;
+4. **dopo l'ultimo strato**: `enh->finish(fb, fxView)` (luci). Poi la sessione disegna menu,
+   testi, barra di stato, `Effect()` e cursore: gli effetti non li toccano.
+
+Dati dell'aggancio: il framebuffer del mondo (qualunque risoluzione), `enhance::View`
+{`originX`, `originY`, `scale`} con pixel = (mondo − origine) × scala (oggi la camera e 1), e per
+ogni sprite un `DrawItem` {frame disegnato, x, y, z di mondo, nvid, classe, categoria,
+`sizeX/Y/Z`, `ZeroZ`}. Le impostazioni (`enhance::Settings`) appartengono al chiamante:
+`GameEngine::setEnhancements(const Settings*)`, lette a ogni `draw()`; il core le legge dalle
+opzioni `gromada_fx_lights` e `gromada_fx_contact_shadows` e passa il puntatore in
+`makeGameEngine()`. Nessuna modifica al contratto `game::Engine` né alla sessione.
+
+**Al merge con la pipeline di rendering (#20)**: `fxView` diventa la camera interpolata e la
+scala (risoluzione interna × zoom); `fxItem()` deve usare le stesse posizioni (interpolate) di
+`drawSprite`; se il mondo si disegna su un framebuffer a risoluzione interna, `ground()` e
+`finish()` vanno chiamati su quel framebuffer (prima dello strato 5 e dopo l'ultimo), prima della
+riduzione all'uscita e della UI. Le griglie degli effetti hanno celle in pixel di mondo × scala,
+quindi la loro dimensione non cresce con la risoluzione; il costo per pixel sì (misure in
+`docs/enhancements.md` §4).
+
+Stato: le impostazioni e le cache (`m_fxSettings`, `m_fx`) non sono stato del gioco e non vanno
+nei save state (`GameEngine` 3184 → 3200 byte nel controllo di `savestate_session.hpp`).
