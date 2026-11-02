@@ -81,3 +81,19 @@ add_test(NAME core_sfx_loop COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop
 add_test(NAME core_sfx_loop_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop.sh $<TARGET_FILE:harness>
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_120_out gromada_fps=120)
 set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_CODE 77)
+
+# Save states (issue #14): synthetic tests (format, engine, VM, mixer, mapper) and, with the
+# game data, determinism of real levels, run-ahead, demos and corrupted states; plus the core
+# end to end through the harness (tests/savestate_e2e.sh).
+gromada_add_test(savestate_test savestate_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+gromada_add_test(savestate_data_test savestate_data_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+set_tests_properties(savestate_data_test PROPERTIES TIMEOUT 1800)
+add_test(NAME savestate_e2e COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/savestate_e2e.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/savestate_e2e_out)
+add_test(NAME savestate_e2e_169_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/savestate_e2e.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/savestate_e2e_169_out gromada_aspect=16:9 gromada_fps=120)
+set_tests_properties(savestate_e2e savestate_e2e_169_120fps PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)

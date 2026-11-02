@@ -2,7 +2,7 @@
 // Save states of the game (issue #14): RetroArch save/load, rewind and run-ahead.
 // Format, coverage and limits: docs/savestates.md.
 //
-// A state is a 64-byte header (magic, version, sizes, CRC-32 of the payload, fingerprint of
+// A state is a 64-byte header (magic, version, sizes, 64-bit checksum of header and payload, fingerprint of
 // fw.res) followed by chunks {u32 tag, u32 size, data}:
 //   CORE  extras of the frontend glue (audio sample debt, input mapper: INP1)
 //   SESS  the session (map, script identity, UI, files, input record builder, demo playback
@@ -38,7 +38,7 @@ inline constexpr std::uint32_t SaveStateVersion = 1;
 inline constexpr std::size_t SaveStateHeaderSize = 64;
 // retro_serialize_size(): libretro wants one size for the whole session, so this is a fixed
 // upper bound (see docs/savestates.md for the measured sizes); a larger state fails to save.
-inline constexpr std::size_t SaveStateMaxSize = 16u << 20;
+inline constexpr std::size_t SaveStateMaxSize = 8u << 20;
 
 // Identity of the game data a state belongs to (fw.res: vids, sounds, weapons).
 inline std::uint64_t dataFingerprint(std::span<const VidInfo> vids, std::span<const SoundData> sounds,
@@ -821,6 +821,7 @@ struct SaveStateAccess {
         return dataFingerprint(e.m_world.m_vids, s.m_sounds, e.m_world.m_weapons);
     }
     static std::uint64_t frames(const Session& s) { return s.m_frames; }
+    static void tripwire();   // size checks of private types (savestate_session.hpp)
     static std::optional<double> moviePosition(const Session& s) {
         return s.m_movies ? s.m_movies->position() : std::nullopt;
     }

@@ -109,12 +109,12 @@ private:
     double m_saveMs = 0, m_loadMs = 0;
 };
 
-// CRC-32 of a state: the header (with its CRC field as zero) and the payload.
-inline std::uint32_t stateCrc(std::span<const std::uint8_t> header, std::span<const std::uint8_t> payload) {
+// Checksum of a state: the header (with its checksum field as zero), then the payload.
+inline std::uint64_t stateChecksum(std::span<const std::uint8_t> header, std::span<const std::uint8_t> payload) {
     std::array<std::uint8_t, SaveStateHeaderSize> h{};
     std::memcpy(h.data(), header.data(), SaveStateHeaderSize);
-    std::memset(h.data() + 24, 0, 4);
-    return state::crc32(payload, state::crc32(h));
+    std::memset(h.data() + 24, 0, 8);
+    return state::checksum64(payload, state::checksum64(h));
 }
 
 // Script of a map: maps\x.map -> maps\x.ini (as Session::loadMapAndScript).
@@ -580,12 +580,13 @@ inline bool SaveStateManager::save(Session& session, std::vector<std::uint8_t>& 
         put32(8, SaveStateVersion);
         put32(12, static_cast<std::uint32_t>(SaveStateHeaderSize));
         put64(16, payload.size());
-        put32(28, 0);   // flags
+        put32(56, 0);   // flags
+        put32(60, 0);   // reserved
         put64(32, SaveStateAccess::fingerprint(session, *engine));
         put32(40, static_cast<std::uint32_t>(session.width()));
         put32(44, static_cast<std::uint32_t>(session.height()));
         put64(48, SaveStateAccess::frames(session));
-        put32(24, stateCrc({h, SaveStateHeaderSize}, payload));
+        put64(24, stateChecksum({h, SaveStateHeaderSize}, payload));
         out.resize(w.size());
     } catch (const std::exception& e) {
         m_error = e.what();
@@ -613,8 +614,8 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
         const std::uint64_t size = get64(16);
         if (size > data.size() - SaveStateHeaderSize) throw state::Error("truncated save state");
         const auto payload = data.subspan(SaveStateHeaderSize, static_cast<std::size_t>(size));
-        if (stateCrc(data.first(SaveStateHeaderSize), payload) != get32(24)) throw state::Error("corrupted save state (CRC mismatch)");
-        if (get32(28) != 0) throw state::Error("save state with unknown flags");
+        if (stateChecksum(data.first(SaveStateHeaderSize), payload) != get64(24)) throw state::Error("corrupted save state (checksum mismatch)");
+        if (get32(56) != 0 || get32(60) != 0) throw state::Error("save state with unknown flags");
         if (get64(32) != SaveStateAccess::fingerprint(session, *engine))
             throw state::Error("save state of different game data");
 
@@ -641,5 +642,46 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
     m_loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
+
+// ---------------------------------------------------------------------------- tripwire
+// The save states list every field of these classes by hand. A field added to one of them
+// changes its size and stops the build here (only on desktop x86-64 + libc++, where the sizes
+// were measured): add the field to the state (game/savestate*.hpp or the module's *_state.hpp,
+// see docs/savestates.md "Aggiungere un campo"), bump SaveStateVersion if the format changes,
+// then update the size below. GROMADA_NO_SAVESTATE_TRIPWIRE turns the check off.
+#if defined(__x86_64__) && defined(_LIBCPP_VERSION) && !defined(GROMADA_NO_SAVESTATE_TRIPWIRE)
+#define GROMADA_SAVESTATE_TRIPWIRE(T, n) \
+    static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
+GROMADA_SAVESTATE_TRIPWIRE(World, 2752);
+GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 2976);
+GROMADA_SAVESTATE_TRIPWIRE(Session, 2432);
+GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 304);
+GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
+GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);
+GROMADA_SAVESTATE_TRIPWIRE(DemoPlayer, 160);
+GROMADA_SAVESTATE_TRIPWIRE(DemoRecorder, 24);
+GROMADA_SAVESTATE_TRIPWIRE(SoundChannels, 608);
+GROMADA_SAVESTATE_TRIPWIRE(Sprite, 168);
+GROMADA_SAVESTATE_TRIPWIRE(VidInfo, 288);
+GROMADA_SAVESTATE_TRIPWIRE(Player, 36);
+GROMADA_SAVESTATE_TRIPWIRE(Group, 32);
+GROMADA_SAVESTATE_TRIPWIRE(CommandStack, 32);
+GROMADA_SAVESTATE_TRIPWIRE(ScreenObject, 56);
+GROMADA_SAVESTATE_TRIPWIRE(MenuState, 16);
+GROMADA_SAVESTATE_TRIPWIRE(script::Interpreter, 320);
+GROMADA_SAVESTATE_TRIPWIRE(script::StringMemory, 24);
+GROMADA_SAVESTATE_TRIPWIRE(ui::TextManager, 112);
+GROMADA_SAVESTATE_TRIPWIRE(ui::ScreenText, 56);
+GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 408);
+GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 104);
+GROMADA_SAVESTATE_TRIPWIRE(input::RawInput, 112);
+GROMADA_SAVESTATE_TRIPWIRE(Mixer, 248);
+inline void SaveStateAccess::tripwire() {
+    GROMADA_SAVESTATE_TRIPWIRE(SoundChannels::Request, 12);
+    GROMADA_SAVESTATE_TRIPWIRE(SoundChannels::Channel, 16);
+    GROMADA_SAVESTATE_TRIPWIRE(SaveFiles::File, 64);
+}
+#undef GROMADA_SAVESTATE_TRIPWIRE
+#endif
 
 } // namespace gromada::game

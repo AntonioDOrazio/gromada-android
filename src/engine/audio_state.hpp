@@ -109,6 +109,11 @@ struct SaveStateAccess {
         return s;
     }
 
+#if defined(__x86_64__) && defined(_LIBCPP_VERSION) && !defined(GROMADA_NO_SAVESTATE_TRIPWIRE)
+    // A new field of a voice must be saved too (see game/savestate_session.hpp, tripwire).
+    static_assert(sizeof(Mixer::Voice) == 48, "save states: Mixer::Voice changed size; serialize the new field (docs/savestates.md)");
+#endif
+
     static void apply(Mixer& m, MixerState&& s) {
         m.m_voices.clear();
         for (const auto& v : s.voices) {

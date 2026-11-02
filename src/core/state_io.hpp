@@ -54,6 +54,38 @@ inline std::uint32_t crc32(std::span<const std::uint8_t> data, std::uint32_t crc
     return ~crc;
 }
 
+// Fast 64-bit checksum of a state (xxHash64-style rounds on four lanes, ~8 bytes per cycle
+// of work): detects corruption and truncation of multi-megabyte states in a fraction of a
+// millisecond, where a bytewise CRC-32 took milliseconds (too slow for rewind).
+inline std::uint64_t checksum64(std::span<const std::uint8_t> data, std::uint64_t seed = 0) noexcept {
+    constexpr std::uint64_t P1 = 0x9E3779B185EBCA87ull, P2 = 0xC2B2AE3D27D4EB4Full, P3 = 0x165667B19E3779F9ull,
+                            P4 = 0x85EBCA77C2B2AE63ull, P5 = 0x27D4EB2F165667C5ull;
+    const auto rotl = [](std::uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+    const auto round = [&](std::uint64_t acc, std::uint64_t w) { return rotl(acc + w * P2, 31) * P1; };
+    const auto word = [&](std::size_t at) { std::uint64_t w; std::memcpy(&w, data.data() + at, 8); return w; };
+    const std::size_t n = data.size();
+    std::size_t i = 0;
+    std::uint64_t h;
+    if (n >= 32) {
+        std::uint64_t a = seed + P1 + P2, b = seed + P2, c = seed, d = seed - P1;
+        for (; i + 32 <= n; i += 32) {
+            a = round(a, word(i));
+            b = round(b, word(i + 8));
+            c = round(c, word(i + 16));
+            d = round(d, word(i + 24));
+        }
+        h = rotl(a, 1) + rotl(b, 7) + rotl(c, 12) + rotl(d, 18);
+        for (const std::uint64_t v : {a, b, c, d}) h = (h ^ round(0, v)) * P1 + P4;
+    } else {
+        h = seed + P5;
+    }
+    h += n;
+    for (; i + 8 <= n; i += 8) h = rotl(h ^ round(0, word(i)), 27) * P1 + P4;
+    for (; i < n; ++i) h = rotl(h ^ (data[i] * P5), 11) * P1;
+    h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P3; h ^= h >> 32;
+    return h;
+}
+
 // 64-bit FNV-1a (identity of scripts and data files, not a security hash).
 inline std::uint64_t fnv1a(std::span<const std::uint8_t> data, std::uint64_t h = 0xcbf29ce484222325ull) noexcept {
     for (const std::uint8_t b : data) {
