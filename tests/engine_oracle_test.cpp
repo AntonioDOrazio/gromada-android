@@ -706,6 +706,196 @@ void testCollisionQueries() {
     });
 }
 
+// ---- issue #12 families: FindTarget, Aim/Fire, CreateChildren ---------------------------------
+void testWeapons() {
+    std::vector<Vid> vids = blankVids(16);
+    std::vector<Weapon> weapons(4);
+    World w{vids, weapons};
+    auto setWeapon = [&](int targetCategory, int flags, int range, int scatter, int cooldown) {
+        Weapon& wp = w.weapons()[0];
+        wp.targetCategory = static_cast<ObjectCategory>(targetCategory);
+        wp.flags = std::uint8_t(flags);
+        wp.weaponRange = std::uint16_t(range);
+        wp.scatter = std::uint8_t(scatter);
+        wp.cooldown = std::uint16_t(cooldown);
+    };
+    std::map<const Sprite*, int> army;
+    forCases("find_target", [&](Tally& t, int i, Row r, const Family&) {
+        w.loadEmpty(2048, 2048, 1);
+        setWeapon(int(r("targetCategory")), int(r("weaponFlags")), 0, 0, 0);
+        VidInfo& v = w.vid(1);
+        v.visibilityRadius = std::int16_t(std::uint16_t(r("visibilityRadius")));
+        v.weapon = 0;
+        v.category = cat::Vehicle;
+        const int n = int(r("nUnits")), selfAt = int(r("selfAt"));
+        army.clear();
+        Sprite* self = nullptr;
+        std::vector<Sprite*> units;
+        auto spawnSelf = [&](bool grid) {
+            self = spawn(w, 1, int(r("x")), int(r("y")), 0, grid);
+            self->direction = std::uint8_t(r("direction"));
+            army[self] = int(r("army"));
+        };
+        for (int k = 0; k <= n; ++k) {
+            if (k == selfAt) spawnSelf(true);
+            if (k == n) break;
+            w.vid(2 + k).category = std::uint8_t(r.obj(k, "category"));
+            Sprite* u = spawn(w, 2 + k, int(r.obj(k, "x")), int(r.obj(k, "y")), 0, true);
+            u->state = std::uint16_t(r.obj(k, "state"));
+            army[u] = int(r.obj(k, "army"));
+            units.push_back(u);
+        }
+        if (selfAt < 0) spawnSelf(false);
+        int armyCalls = 0;
+        w.actionHook = [&](Sprite& s, int a, int, int, int& ret) {
+            if (a != act::getarmy) return false;
+            ++armyCalls;
+            ret = army.at(&s);
+            return true;
+        };
+        w.rng().seed(std::uint32_t(r("seed")));
+        Sprite* best = w.findTarget(*self);
+        w.actionHook = nullptr;
+        EXPECT(t, i, "result", r("result"), indexOf(units, self, best));
+        EXPECT(t, i, "seed", r("seed'"), w.rng().state);
+        EXPECT(t, i, "armyCalls", r("armyCalls"), armyCalls);
+    });
+
+    w.loadEmpty(4096, 4096, 1);
+    Sprite* self = spawn(w, 1, 10, 10, 0, false);
+    Sprite* child = spawn(w, 2, 10, 10, 0, false);
+    struct Change { int who, act, dir; };
+    std::vector<Change> changes;
+    w.changeActionHook = [&](Sprite& s, int a, int d) {
+        changes.push_back({&s == self ? 0 : &s == child ? 1 : 9, a, d});
+        return true;
+    };
+    forCases("aim_fire", [&](Tally& t, int i, Row r, const Family&) {
+        setWeapon(4, int(r("weaponFlags")), int(r("range")), 0, int(r("cooldown")));
+        VidInfo& v = w.vid(1);
+        setDirs(v, int(r("dirs")), int(r("dirStep")));
+        v.flags = std::uint16_t(r("vidFlags"));
+        v.weapon = 0;
+        v.linkedObjectVid = std::uint16_t(r("linked"));
+        v.childNvid = {};
+        v.childNvid[act::fight] = std::int16_t(r("fightChild"));
+        VidInfo& cv = w.vid(2);
+        setDirs(cv, int(r("childDirs")));
+        cv.flags = 0;
+        cv.childNvid = {};
+        cv.childNvid[act::fight] = std::int16_t(r("childFightChild"));
+        self->x = std::int16_t(r("x")); self->y = std::int16_t(r("y"));
+        self->direction = std::uint8_t(r("direction"));
+        self->action = std::uint8_t(r("action"));
+        self->timer = std::uint16_t(r("timer"));
+        self->child = r("hasChild") ? child : nullptr;
+        child->direction = std::uint8_t(r("childDirection"));
+        child->action = std::uint8_t(r("childAction"));
+        for (Sprite* p : {self, child}) { p->attackX = 0x1111; p->attackY = 0x2222; p->attackZ = 0x3333; }
+        w.setLastDistance(int(r("gDist")));
+        changes.clear();
+        const int x = int(r("argX")), y = int(r("argY")), z = int(r("argZ"));
+        const int ret = r("mode") == 0 ? w.fire(*self, x, y, z) : w.aim(*self, x, y, z);
+        EXPECT(t, i, "ret", r("ret"), ret);
+        EXPECT(t, i, "timer", r("timer'"), self->timer);
+        EXPECT(t, i, "direction", r("direction'"), self->direction);
+        EXPECT(t, i, "attackX", r("attackX"), self->attackX);
+        EXPECT(t, i, "attackY", r("attackY"), self->attackY);
+        EXPECT(t, i, "attackZ", r("attackZ"), self->attackZ);
+        EXPECT(t, i, "gDist", r("gDist'"), w.lastDistance());
+        if (r("hasChild")) {
+            EXPECT(t, i, "childDirection", r("childDirection'"), child->direction);
+            // D10: a turret weapon with flag 4 rotates the range point by the y argument (a stale
+            // direction): the original indexes the sine tables with it unmasked, the engine with y & 0xff.
+            const bool staleDir = (r("weaponFlags") & 4) && r("linked") && r("childFightChild") && ret &&
+                                  r("gDist") > std::int16_t(r("range")) && (y < 0 || y > 255);
+            if (staleDir) ++t.skipped;
+            else {
+                EXPECT(t, i, "childAttackX", r("childAttackX"), child->attackX);
+                EXPECT(t, i, "childAttackY", r("childAttackY"), child->attackY);
+            }
+            EXPECT(t, i, "childAttackZ", r("childAttackZ"), child->attackZ);
+        }
+        EXPECT(t, i, "nChanges", r("nChanges"), std::int64_t(changes.size()));
+        for (std::size_t k = 0; k < changes.size() && k < 2; ++k) {
+            const std::string p = k ? "ca2" : "ca1";
+            EXPECT(t, i, "caWho", r(p + "Who"), changes[k].who);
+            EXPECT(t, i, "caAct", r(p + "Act"), changes[k].act);
+            EXPECT(t, i, "caDir", r(p + "Dir"), changes[k].dir);
+        }
+    });
+    w.changeActionHook = nullptr;
+
+    forCases("create_children", [&](Tally& t, int i, Row r, const Family&) {
+        w.loadEmpty(4096, 4096, 1);
+        const int a = int(r("action")), nv = int(r("nv")), anv = std::abs(nv);
+        setWeapon(4, 0, 0, int(r("scatter")), 0);
+        VidInfo& v = w.vid(1);
+        v.weapon = 0;
+        v.childNvid = {};
+        v.childCount = {};
+        for (auto& row : v.childOff) row = {};
+        v.childNvid[std::size_t(a)] = std::int16_t(nv);
+        v.childCount[std::size_t(a)] = std::uint8_t(r("count"));
+        v.childOff[0][std::size_t(a)] = std::int16_t(r("offX"));
+        v.childOff[1][std::size_t(a)] = std::int16_t(r("offY"));
+        v.childOff[2][std::size_t(a)] = std::int16_t(r("offZ"));
+        if (anv) {
+            w.vid(anv).cls = std::uint8_t(r("childCls"));
+            w.vid(anv).flags = std::uint16_t(r("childFlags"));
+        }
+        Sprite* p = spawn(w, 1, 10, 10, 0, false);
+        p->x = std::int16_t(r("x")); p->y = std::int16_t(r("y")); p->z = std::int16_t(r("z"));
+        p->direction = std::uint8_t(r("direction"));
+        p->action = std::uint8_t(a);
+        p->attackX = std::int16_t(r("attackX")); p->attackY = std::int16_t(r("attackY")); p->attackZ = std::int16_t(r("attackZ"));
+        const auto askMask = r("askMask"), failMask = r("failMask");
+        // the log of the original's recorders: one row per iteration (see gen_weapons.py)
+        std::vector<std::array<std::int64_t, 15>> rows;
+        int asks = 0, creations = 0;
+        std::map<const Sprite*, int> created;
+        const bool vehicle = r("childCls") == cls::Vehicle;
+        auto row = [&]() -> std::array<std::int64_t, 15>& { return rows.back(); };
+        w.actionHook = [&](Sprite& c, int act, int v1, int v2, int& ret) {
+            if (act != act::child) return false;
+            EXPECT(t, i, "child parent", p->id, v1);
+            row()[13] = act;
+            row()[14] = v2;
+            ret = 0;
+            return true;
+        };
+        w.rng().seed(std::uint32_t(r("seed")));
+        w.createChildren(
+            *p,
+            [&](int x, int y, int z, int n) {
+                EXPECT(t, i, "ask nvid", anv, n);
+                rows.push_back({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1});
+                row()[0] = 1; row()[1] = x; row()[2] = y; row()[3] = z;
+                return ((askMask >> asks++) & 1) != 0;
+            },
+            [&](int n, int x, int y, int z, int dir, Sprite* parent) -> Sprite* {
+                EXPECT(t, i, "create nvid", anv, n);
+                EXPECT(t, i, "create parent", 1, parent == p);
+                if (!vehicle) rows.push_back({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1});
+                const bool fail = (failMask >> creations++) & 1;
+                row()[4] = fail ? 2 : 1; row()[5] = x; row()[6] = y; row()[7] = z; row()[8] = dir;
+                if (fail) return nullptr;
+                const auto rngState = w.rng().state;   // the helper sprite must not consume rand()
+                Sprite* c = spawn(w, anv, 10, 10, 0, false);
+                w.rng().state = rngState;
+                return c;
+            },
+            [&](Sprite&, int x, int y, int z) { row()[9] = 1; row()[10] = x; row()[11] = y; row()[12] = z; });
+        w.actionHook = nullptr;
+        EXPECT(t, i, "seed", r("seed'"), w.rng().state);
+        EXPECT(t, i, "nIterations", r("nIterations"), std::int64_t(rows.size()));
+        static const char* cols[] = {"asked", "askX", "askY", "askZ", "created", "cuX", "cuY", "cuZ", "cuDir", "dest",
+                                     "destX", "destY", "destZ", "childAct", "childIndex"};
+        for (int k = 0; k < int(rows.size()) && k < int(r("nIterations")); ++k)
+            for (int c = 0; c < 15; ++c) EXPECT(t, i, cols[c], r.obj(k, cols[c]), rows[std::size_t(k)][std::size_t(c)]);
+    });
+}
+
 } // namespace
 
 int main() {
@@ -719,5 +909,6 @@ int main() {
     testCheckMove();
     testDamage();
     testCollisionQueries();
+    testWeapons();
     return gromada_test::finish();
 }

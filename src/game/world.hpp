@@ -358,6 +358,15 @@ public:
 
     // 0x40a950 SPRITE::CreateChildren: generators of the current action.
     void createChildren(Sprite& s) {
+        createChildren(
+            s, [this](int x, int y, int z, int nv) { return askPlaceVid(x, y, z, nv) != nullptr; },
+            [this](int nv, int x, int y, int z, int dir, Sprite* parent) { return createUnit(nv, x, y, z, 0, dir, parent); },
+            [this](Sprite& c, int x, int y, int z) { setDestination(c, x, y, z); });
+    }
+    // The same with AskPlaceVid 0x40a2d0, CreateUnit 0x40e1b0 and SetDestination 0x409770 passed
+    // in (oracle tests, tools/oracle/gen_weapons.py).
+    template <class Occupied, class Create, class Dest>
+    void createChildren(Sprite& s, Occupied&& occupied, Create&& create, Dest&& dest) {
         const int nv = std::abs(static_cast<int>(vidOf(s).childNvid[s.action]));
         if (!nv || nv >= static_cast<int>(m_vids.size())) return;
         for (int i = 0; i < vidOf(s).childCount[s.action]; ++i) {
@@ -390,14 +399,14 @@ public:
             }
             const int cx = s.x + ox, cy = s.y + oy, cz = s.z + offZ;
             Sprite* c = nullptr;
-            if (m_vids[static_cast<std::size_t>(nv)].cls != cls::Vehicle || !askPlaceVid(cx, cy, cz, nv))
-                c = createUnit(nv, cx, cy, cz, 0, dir, &s);
+            if (m_vids[static_cast<std::size_t>(nv)].cls != cls::Vehicle || !occupied(cx, cy, cz, nv))
+                c = create(nv, cx, cy, cz, dir, &s);
             if (!c) continue;
             if (s.action == act::fight) {
                 const int sc = weaponOf(s).scatter;
                 const int yy = s.attackY - rand() % (2 * sc + 1) + sc + ty;   // y first (0x40abd9)
                 const int xx = s.attackX - rand() % (2 * sc + 1) + sc + tx;
-                setDestination(*c, xx, yy, s.attackZ);
+                dest(*c, xx, yy, static_cast<int>(s.attackZ));
             }
             action(*c, act::child, s.id, i);
         }
@@ -1162,6 +1171,7 @@ public:
     void setMapSize(int w, int h) noexcept { m_mapW = w; m_mapH = h; }
     // Global 0x439d4c: the distance left by the last GetDirection.
     [[nodiscard]] int lastDistance() const noexcept { return m_lastDist; }
+    void setLastDistance(int d) noexcept { m_lastDist = d; }
 
     void gridAdd(Sprite* s) {   // 0x40d870
         cellAdd(s->x >> m_gridShiftX, s->y >> m_gridShiftY, s);
