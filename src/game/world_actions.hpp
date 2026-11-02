@@ -7,6 +7,10 @@ namespace gromada::game {
 
 inline int World::action(Sprite& s, int a, int v1, int v2) {
     if (!s.alive) return 0;
+    if (actionHook) {
+        int ret = 0;
+        if (actionHook(s, a, v1, v2, ret)) return ret;
+    }
     switch (s.cls) {
         case cls::Terrain:
         case cls::Static: return actionMaterial(s, a, v1, v2);

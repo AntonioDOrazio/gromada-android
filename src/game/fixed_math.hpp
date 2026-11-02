@@ -49,23 +49,35 @@ struct DirectionResult {
 };
 
 // 0x40b030 GetDirection(x1,y1,x2,y2): 7-step CORDIC; direction 0 = north, 64 = east.
+// 32-bit x86 arithmetic (two's complement wraparound, like the original's registers).
+constexpr std::int32_t wrapAdd(std::int32_t a, std::int32_t b) noexcept {
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
+}
+constexpr std::int32_t wrapSub(std::int32_t a, std::int32_t b) noexcept {
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) - static_cast<std::uint32_t>(b));
+}
+constexpr std::int32_t wrapAbs(std::int32_t a) noexcept { return a < 0 ? wrapSub(0, a) : a; }   // abs(INT_MIN) = INT_MIN
+
+// 0x40b030 GetDirection(x1,y1,x2,y2): 7-step CORDIC; direction 0 = north, 64 = east. The
+// arguments are full int32 (script coordinates): differences wrap like the original.
 constexpr DirectionResult getDirection(int x1, int y1, int x2, int y2) noexcept {
-    std::int32_t x = x2 - x1, y = y2 - y1;
+    std::int32_t x = wrapSub(x2, x1), y = wrapSub(y2, y1);
     int angle;
-    if (x < 0) { x = -x; y = -y; angle = 0x180; } else angle = 0x80;
+    if (x < 0) { x = wrapSub(0, x); y = wrapSub(0, y); angle = 0x180; } else angle = 0x80;
     for (int i = 0; i < 7; ++i) {
         const std::int32_t ox = x;
-        if (y >= 0) { x += y >> i; y -= ox >> i; angle += CordicAngles[i]; }
-        else        { x -= y >> i; y += ox >> i; angle -= CordicAngles[i]; }
+        if (y >= 0) { x = wrapAdd(x, y >> i); y = wrapSub(y, ox >> i); angle += CordicAngles[i]; }
+        else        { x = wrapSub(x, y >> i); y = wrapAdd(y, ox >> i); angle -= CordicAngles[i]; }
     }
     const auto prod = static_cast<std::int32_t>(static_cast<std::uint32_t>(x) * 0x9b74eu);
     return {angle >> 1, prod >> 20};
 }
 
-// 0x40aff0 / 0x40afc0: the "game" distance used for ranges, visibility, squads.
+// 0x40aff0 / 0x40afc0: the "game" distance max(|dx|, 3|dy| >> 1) used for ranges, visibility,
+// squads, with the original's 32-bit wraparound (0x40afc0 takes an int32 point).
 constexpr int gameDistance(int dx, int dy) noexcept {
-    const int ax = dx < 0 ? -dx : dx;
-    const int ay = ((dy < 0 ? -dy : dy) * 3) >> 1;
+    const std::int32_t ax = wrapAbs(dx);
+    const std::int32_t ay = static_cast<std::int32_t>(static_cast<std::uint32_t>(wrapAbs(dy)) * 3u) >> 1;
     return ax < ay ? ay : ax;
 }
 
@@ -112,7 +124,7 @@ constexpr AxisStep verticalStep(std::int16_t vz, std::uint32_t dt, std::int8_t f
 struct MoveStep {
     int mx, my;
     std::int8_t fracX, fracY;
-    int step;  // pixels travelled this tick (before adding stepAccum)
+    int step;  // |speed*dt| >> 10 (|windStrength*dt| >> 10 for Wind vids), before adding stepAccum
 };
 
 // 0x409e7c..0x409f3e: horizontal move with 7-bit accumulators, plus the wind contribution.
@@ -121,13 +133,17 @@ constexpr MoveStep moveStep(std::int16_t speed, std::uint32_t dt, std::uint8_t d
     const auto d = static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::int32_t>(speed)) * dt);
     std::int32_t ax = (static_cast<std::int32_t>(static_cast<std::uint32_t>(d) * static_cast<std::uint32_t>(Sin[dir])) >> 13) + fracX;
     std::int32_t ay = (static_cast<std::int32_t>(static_cast<std::uint32_t>(d) * static_cast<std::uint32_t>(NegCos[dir])) >> 13) + fracY;
+    // The step counts |speed*dt| >> 10, except for Wind vids: there the original reuses the
+    // register for windStrength*dt (0x409ee6), so the step is the wind's (0 without wind) and
+    // not the sprite's own (docs/oracle.md §3.3).
+    std::int32_t travelled = d;
     if (wind) {
         const auto w = static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(windStrength))) * dt);
-        ax += static_cast<std::int32_t>(static_cast<std::uint32_t>(w) * static_cast<std::uint32_t>(Sin[windDir])) >> 13;
-        ay += static_cast<std::int32_t>(static_cast<std::uint32_t>(w) * static_cast<std::uint32_t>(NegCos[windDir])) >> 13;
+        ax = wrapAdd(ax, static_cast<std::int32_t>(static_cast<std::uint32_t>(w) * static_cast<std::uint32_t>(Sin[windDir])) >> 13);
+        ay = wrapAdd(ay, static_cast<std::int32_t>(static_cast<std::uint32_t>(w) * static_cast<std::uint32_t>(NegCos[windDir])) >> 13);
+        travelled = w;
     }
-    const int absD = d < 0 ? -d : d;
-    return {ax >> 7, ay >> 7, static_cast<std::int8_t>(ax & 0x7f), static_cast<std::int8_t>(ay & 0x7f), absD >> 10};
+    return {ax >> 7, ay >> 7, static_cast<std::int8_t>(ax & 0x7f), static_cast<std::int8_t>(ay & 0x7f), wrapAbs(travelled) >> 10};
 }
 
 // 0x40cf70: rotation step tables 0x431bf4 (one step counter-clockwise, act_l_rotate) and

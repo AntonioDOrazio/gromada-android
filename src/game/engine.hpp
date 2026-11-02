@@ -436,7 +436,9 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
         case 65: {   // SizeTo(unit, x, y)
             Sprite* u = unit(argInt(a, 0));
             if (!u) return Value{60000};
-            return Value{fx::gameDistance(u->x - argInt(a, 1), u->y - argInt(a, 2))};
+            // the point is truncated to s16 (0x412bcc, docs/oracle.md §3.14)
+            return Value{fx::gameDistance(u->x - static_cast<std::int16_t>(argInt(a, 1)),
+                                          u->y - static_cast<std::int16_t>(argInt(a, 2)))};
         }
         case 67: {   // Action(unit, act, var1, var2)
             Sprite* u = unit(argInt(a, 0));
@@ -480,7 +482,7 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
         }
         case 89: m_world.pause(argInt(a, 0) != 0); return Value{0};   // Pause(flag)
         case 90: {   // Random(max) = rand() % (max + 1)
-            const int m = argInt(a, 0) + 1;
+            const int m = fx::wrapAdd(argInt(a, 0), 1);
             const int r = m_world.rand();
             return Value{m ? r % m : 0};
         }
