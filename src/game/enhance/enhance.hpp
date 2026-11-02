@@ -38,6 +38,10 @@
 
 namespace gromada::game::enhance {
 
+// The shadow pass multiplies a pixel as one 32-bit word (r, g, b, a bytes, little endian).
+static_assert(sizeof(RGBA8) == 4 && std::is_trivially_copyable_v<RGBA8>);
+static_assert(std::endian::native == std::endian::little);
+
 // ---------------------------------------------------------------------------- settings
 // Levels: 0 = off (default), 1 = soft, 2 = normal, 3 = strong.
 struct Settings {
