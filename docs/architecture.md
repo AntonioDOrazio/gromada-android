@@ -78,6 +78,14 @@ si usano invece i passi registrati nella demo.
   `ViewZoom`, lo integra col tempo reale del frame (0,5×–2×, esponenziale) e lo passa alla pipeline
   di rendering, che decide la vista (dimensione = uscita / zoom) e la conversione schermo ↔ mondo
   per cursore, touch e record di input.
+  Per i controlli (issue #19) la pipeline deve anche: convertire allo stesso modo
+  `PcState::aimTarget` (il punto mirato dello schema diretto, anche fuori schermo: è il punto del
+  mouse nel record, come `moveTarget`), dare a `input::FrameInfo::zoom` lo zoom corrente (pixel
+  di schermo per pixel di mondo: scala gittata e corridoi di aggancio) e posizionare giocatore e
+  bersagli di `ControlsFrame` in pixel di schermo dopo lo zoom. Con lo zoom a 1 tutto coincide.
+  Fatto nella #20: `aimTarget` passa per `ScreenMapping` nello stesso ramo di `moveTarget`
+  (`InputRecordBuilder::build(pc, mapping, …)`), `f.zoom = s.mapping().zoom` in `runSession`,
+  giocatore e bersagli convertiti con `mapping()`; `weaponRange`/`aimLift` in pixel di mondo.
 - **Risoluzione interna** e **interpolazione** delle posizioni: solo nel disegno. La simulazione,
   le demo, l'oracolo e i save state non cambiano.
 - Agenti: controlli (`zoomRate`, schemi), pipeline di rendering (`ViewZoom` → vista, risoluzione
@@ -92,8 +100,9 @@ si usano invece i passi registrati nella demo.
   **vista del motore** (`camera()`: uscita / zoom pixel di mondo sui livelli), **immagine**
   (k × logico, `Session::width/height`; l'input mapper usa `logicalWidth/Height`).
 - Lo zoom si applica al mondo dei livelli (`maps\levels\…`), torna a 1 sotto i menu e i briefing,
-  mai nelle demo; i menu non sono mai zoomati. `ControlsFrame` (giocatore, bersagli, gittata)
-  è in pixel logici dell'uscita, convertito con la mappa schermo ↔ mondo dell'ultima immagine.
+  mai nelle demo; i menu non sono mai zoomati. `ControlsFrame`: giocatore e bersagli in pixel
+  logici dell'uscita, convertiti con la mappa schermo ↔ mondo dell'ultima immagine; gittata in
+  pixel di mondo (il mapper la scala con `FrameInfo::zoom`).
 - Opzioni core: `gromada_render_scale` (1x–4x), `gromada_smooth` (movimento fluido, attivo),
   `gromada_zoom` (zoom impostato), `gromada_render_threads` (automatico).
 - **Gancio per i miglioramenti grafici (#21)**: `Session::setWorldPass(fn)`; `fn(const WorldPass&)`

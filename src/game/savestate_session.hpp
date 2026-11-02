@@ -756,8 +756,8 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
     static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
 GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
 GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3264);  // + #20 effect view and draw scratch (per frame, not state)
-// + #20 zoom, anchor, mapping (state, v4); render scale, smooth, buffers, world pass (configuration/scratch)
-GROMADA_SAVESTATE_TRIPWIRE(Session, 3376);     // + #13 tool hooks and per-frame sound buffers (not state)
+// + #20 zoom, anchor, mapping (state, v5); render scale, smooth, buffers, world pass (configuration/scratch)
+GROMADA_SAVESTATE_TRIPWIRE(Session, 3392);     // + #13 tool hooks and per-frame sound buffers (not state); #19 PcState
 GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 416);    // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
 GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);
@@ -775,9 +775,9 @@ GROMADA_SAVESTATE_TRIPWIRE(script::Interpreter, 320);
 GROMADA_SAVESTATE_TRIPWIRE(script::StringMemory, 24);
 GROMADA_SAVESTATE_TRIPWIRE(ui::TextManager, 144); // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(ui::ScreenText, 80);  // v3: game-clock typewriter fields
-GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 496);   // + PcState::zoomRate (per frame, not state)
-GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 120);  // + zoomRate (recomputed every frame, not state)
-GROMADA_SAVESTATE_TRIPWIRE(input::RawInput, 112);
+GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 544);   // + PcState::zoomRate (per frame, not state); #19: settings, zoom buttons (v4)
+GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 128);  // + zoomRate, #19 aimTarget/cursorHidden (recomputed every frame, not state)
+GROMADA_SAVESTATE_TRIPWIRE(input::RawInput, 120); // + #19 analog triggers (current frame only, not state)
 GROMADA_SAVESTATE_TRIPWIRE(Mixer, 248);
 GROMADA_SAVESTATE_TRIPWIRE(ScreenEffects, 112);
 GROMADA_SAVESTATE_TRIPWIRE(FollowCamera, 56);

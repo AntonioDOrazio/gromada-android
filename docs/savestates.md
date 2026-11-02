@@ -21,14 +21,14 @@ lo stesso audio (musica ed effetti compresi) dell'esecuzione originale, byte per
 Ogni classe serializzata dichiara `friend struct SaveStateAccess;` (una riga): il codice dello
 stato vive nei file sopra, non dentro le classi.
 
-## Formato (versione 4)
+## Formato (versione 5)
 
 Intestazione di 64 byte, poi i chunk:
 
 | offset | campo |
 |---|---|
 | 0 | magic `GRMDSTAT` |
-| 8 | versione (`SaveStateVersion` = 4; la 3 non aveva lo zoom della vista della issue #20, la 2 la macchina da scrivere a tempo di gioco della issue #13, la 1 lo scheduler dei suoni e gli effetti prima delle issue #15–#18: non si caricano più) |
+| 8 | versione (`SaveStateVersion` = 5; la 4 non aveva lo zoom della vista della issue #20, la 3 i tasti dello zoom del mapper della issue #19, la 2 la macchina da scrivere a tempo di gioco della issue #13, la 1 lo scheduler dei suoni e gli effetti prima delle issue #15–#18: non si caricano più) |
 | 12 | dimensione dell'intestazione (64) |
 | 16 | dimensione del payload (u64) |
 | 24 | checksum a 64 bit di intestazione (con questo campo a zero) e payload |
@@ -193,7 +193,7 @@ Procedura (anche per chi fonde un branch e vede fallire la compilazione):
 - Uno stato salvato a 16:9 si carica anche a 4:3 (e viceversa): la vista prende la dimensione
   attuale dal frame successivo; il determinismo vale a parità di opzioni.
 
-## Campi della issue #20 (versione 4)
+## Campi della issue #20 (versione 5)
 
 - Sessione: `m_zoom` (zoom del giocatore, `ViewZoom`), `m_viewZoom` (zoom applicato: transizione
   verso 1 sotto i menu), `m_anchor` (centro sub-pixel della vista mentre lo zoom cambia, con la
@@ -209,6 +209,14 @@ Procedura (anche per chi fonde un branch e vede fallire la compilazione):
   dell'orologio: non ha storia da salvare.
 - L'immagine salvata durante le demo è alla dimensione logica qualunque sia k, quindi la
   dimensione massima dello stato non cambia.
+
+## Campi della issue #19 (versione 4)
+
+- Salvato: `Mapper::m_zoomArmed` (schema a puntamento: A/B premuti nel livello e ancora tenuti,
+  cioè quelli che fanno zoom; un tasto tenuto dal menu non zooma).
+- Non salvati, perché ricalcolati a ogni frame: `PcState::aimTarget`, `hasAimTarget`,
+  `cursorHidden` (come `zoomRate`), i grilletti analogici `RawInput::l2/r2` (letti solo nel
+  frame corrente, mai dall'input precedente), le nuove impostazioni del mapper (opzioni core).
 
 ## Campi della issue #13 (versione 3)
 

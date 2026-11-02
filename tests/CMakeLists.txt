@@ -34,6 +34,8 @@ gromada_add_test(ui_data_test ui_data_test.cpp)
 gromada_add_test(input_mapper_test input_mapper_test.cpp)
 # Controls on the gameplay (issue #16): move orders, follow camera, weapons (synthetic).
 gromada_add_test(controls_test controls_test.cpp)
+# Issue #19: weapon kinds of the Kassandra's heads from the original data (lock corridors).
+gromada_add_test(controls_data_test controls_data_test.cpp)
 gromada_add_test(cursor_file_test cursor_file_test.cpp)
 # Movies: synthetic tests (CI) and the full decode of the game's movies compared with ffmpeg.
 gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
@@ -131,7 +133,7 @@ gromada_add_test(render_data_test render_data_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 set_tests_properties(render_data_test PROPERTIES TIMEOUT 1800)
 # The core's output at 1x, zoom 1, smooth motion off is the one of main before the pipeline
-# (frame hashes recorded with bedb79d).
+# (frame hashes recorded with main 144d5d3).
 add_test(NAME render_e2e COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/render_e2e.sh $<TARGET_FILE:harness>
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/render_e2e_out)
 set_tests_properties(render_e2e PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
@@ -144,6 +146,21 @@ foreach(mode pad touch)
         string(REPLACE ":" "" tag "${aspect}")
         set(name controls_e2e_${mode}_${fps}fps_${tag})
         add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/controls_e2e.sh $<TARGET_FILE:harness>
+                 $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/${name}_out ${mode}
+                 gromada_fps=${fps} gromada_aspect=${aspect})
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+endforeach()
+# Console controls (issue #19): twin stick with the invisible lock (same damage as the cursor
+# on the target, off screen, beyond the old aim point), ballistic weapon in the wide corridor,
+# cursor scheme L2/R2 and A/B zoom; 60/120 fps x 4:3/16:9 (needs the game data).
+foreach(mode lock ballistic)
+    foreach(cfg "60;4:3" "120;4:3" "60;16:9" "120;16:9")
+        list(GET cfg 0 fps)
+        list(GET cfg 1 aspect)
+        string(REPLACE ":" "" tag "${aspect}")
+        set(name controls_lock_e2e_${mode}_${fps}fps_${tag})
+        add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/controls_lock_e2e.sh $<TARGET_FILE:harness>
                  $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/${name}_out ${mode}
                  gromada_fps=${fps} gromada_aspect=${aspect})
         set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)

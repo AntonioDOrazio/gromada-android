@@ -65,8 +65,13 @@ Il record di input (`OriginalInput`) porta quel punto come posizione nel mondo e
 sullo schermo, il cursore nella vista del motore (`(p − viewX) / zoom`): con lo zoom il bordo
 dell'uscita resta il bordo per lo scorrimento. Con zoom 1, risoluzione 1× e movimento fluido
 spento la mappa è `mondo = schermo + camera` dell'originale (stesso record bit per bit, test). I
-menu ricevono il cursore logico. Per l'input mapper (`controlsFrame()`) giocatore e bersagli sono
-convertiti con la stessa mappa e la gittata dell'arma è in pixel dell'uscita (× zoom).
+menu ricevono il cursore logico. Il punto del mouse nel record è, nell'ordine, il bersaglio di un
+ordine di movimento (`moveTarget`), il punto mirato dello schema diretto (`aimTarget`, issue #19,
+anche fuori schermo) o il cursore: tutti passano per la stessa mappa. Per l'input mapper
+(`controlsFrame()`) giocatore e bersagli sono in pixel logici dell'uscita dopo lo zoom (stessa
+mappa); gittata (`weaponRange`) e sollevamento antiaereo (`aimLift`) restano in pixel di mondo e
+`input::FrameInfo::zoom` (impostato in `runSession`) dà al mapper lo zoom dell'ultima immagine,
+con cui scala gittata e corridoi di aggancio (issue #19).
 
 ## 4. Movimento fluido
 
@@ -170,7 +175,7 @@ gancio non è salvato.
   (logo, filmati, menu, profilo, mappa, briefing, livello 1 con lo schema a cursore e con lo schema
   diretto) a 4:3/60 fps e 16:9/120 fps con movimento fluido spento e confronta l'hash di ogni
   frame (immagine e audio) con i valori registrati dal core di `main` prima di questa issue
-  (bedb79d). `render_view_test`: `drawView` con la vista identità è `draw()` bit per bit.
+  (144d5d3, dopo la #19). `render_view_test`: `drawView` con la vista identità è `draw()` bit per bit.
 - **Rasterizzatore** (`render_view_test`, CI): i 40 casi sintetici di `putcadr` dell'oracolo
   (formati 2/3/4/8, ombra proiettata) identici a scala 1 e, a scala 2 e 3, identici
   all'ingrandimento k × k; nessuna fessura a scale 0,5…8 e origini sub-pixel.

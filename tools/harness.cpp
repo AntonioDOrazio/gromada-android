@@ -7,6 +7,7 @@
 //   timed input (repeatable; "@from-to" or "@frame", default = whole run):
 //             btn=<a|b|x|y|l|r|l2|r2|l3|r3|start|select|up|down|left|right>@10-20
 //             lstick=<x>,<y>@...  rstick=<x>,<y>@...   (-1..1, y down)
+//             l2a=<p>@...  r2a=<p>@...                 (analog trigger pressure 0..1)
 //             touch=<px>,<py>[;<px>,<py>]@...         (fingers, in game-image pixels)
 //             mouse=<dx>,<dy>@...  mouse_btn=<left|right>@...
 //   savedir=<dir>   libretro save directory (default <out_prefix>_save; "none" = no save dir)
@@ -72,7 +73,9 @@ static bool parseTimed(const std::string& k, const std::string& v) {
         {"x", RETRO_DEVICE_ID_JOYPAD_X}, {"l", RETRO_DEVICE_ID_JOYPAD_L}, {"r", RETRO_DEVICE_ID_JOYPAD_R},
         {"l2", RETRO_DEVICE_ID_JOYPAD_L2}, {"r2", RETRO_DEVICE_ID_JOYPAD_R2}, {"l3", RETRO_DEVICE_ID_JOYPAD_L3},
         {"r3", RETRO_DEVICE_ID_JOYPAD_R3}};
-    if (k != "btn" && k != "lstick" && k != "rstick" && k != "touch" && k != "mouse" && k != "mouse_btn") return false;
+    if (k != "btn" && k != "lstick" && k != "rstick" && k != "touch" && k != "mouse" && k != "mouse_btn" && k != "l2a" &&
+        k != "r2a")
+        return false;
     Timed t;
     t.kind = k;
     const auto at = v.find('@');
@@ -89,6 +92,9 @@ static bool parseTimed(const std::string& k, const std::string& v) {
         t.id = it->second;
     } else if (k == "mouse_btn") {
         t.id = what == "right" ? RETRO_DEVICE_ID_MOUSE_RIGHT : RETRO_DEVICE_ID_MOUSE_LEFT;
+    } else if (k == "l2a" || k == "r2a") {
+        t.id = k == "l2a" ? RETRO_DEVICE_ID_JOYPAD_L2 : RETRO_DEVICE_ID_JOYPAD_R2;
+        t.xy.emplace_back(std::atof(what.c_str()), 0.0f);
     } else {
         for (size_t p = 0; p < what.size();) {
             size_t q = what.find(';', p); if (q == std::string::npos) q = what.size();
@@ -159,7 +165,10 @@ static size_t audio(const int16_t* d, size_t frames) {
 static void poll() {}
 static int16_t timedInput(unsigned device, unsigned index, unsigned id) {
     auto clamp16 = [](float v) { return int16_t(v > 32767 ? 32767 : v < -32767 ? -32767 : v); };
-    if (device == RETRO_DEVICE_ANALOG) {
+    if (device == RETRO_DEVICE_ANALOG && index == RETRO_DEVICE_INDEX_ANALOG_BUTTON) {
+        for (const Timed& t : timed)
+            if ((t.kind == "l2a" || t.kind == "r2a") && t.id == id && t.active()) return clamp16(t.xy[0].first * 32767);
+    } else if (device == RETRO_DEVICE_ANALOG) {
         const char* kind = index == RETRO_DEVICE_INDEX_ANALOG_LEFT ? "lstick" : "rstick";
         for (const Timed& t : timed)
             if (t.kind == kind && t.active())

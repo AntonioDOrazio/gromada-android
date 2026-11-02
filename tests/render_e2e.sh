@@ -1,10 +1,11 @@
 #!/bin/sh
 # Rendering pipeline (issue #20, docs/rendering.md): with internal resolution 1x, zoom 1 and smooth
-# motion off the core's output is the one it had before the pipeline (main at bedb79d), frame by
+# motion off the core's output is the one it had before the pipeline (main at 144d5d3), frame by
 # frame (picture and sound): the flow of core_e2e.sh (logo, movies, menus, new player, mission
 # map, briefing, level 1) played with the virtual cursor and with the direct scheme, at 4:3/60 fps
-# and 16:9/120 fps. The reference is the MD5 of the harness's per-frame hash list ("hashes="),
-# recorded with the core of bedb79d. A change of the game's behaviour merged later (another
+# and 16:9/120 fps (in the level: L2 move, R2 fire, no zoom buttons). The reference is the MD5
+# of the harness's per-frame hash list ("hashes="), recorded with the core of main at 144d5d3
+# (issue #19 merged, before the pipeline). A change of the game's behaviour merged later (another
 # issue) changes these too: then regenerate them with the core of the new main and say so.
 # usage: render_e2e.sh <harness> <core.so> <out_dir>
 # Exit code 77 (skipped) without GROMADA_DATA.
@@ -24,7 +25,7 @@ run() { # name scheme fps aspect expected-md5
           btn=down@$(r 480 482) btn=a@$(r 500 502) btn=start@$(r 540 545) btn=x@$(r 600 602) btn=x@$(r 800 803)
           btn=x@$(r 1300 1303)"
     if [ "$scheme" = cursor ]; then
-        input="$base btn=a@$(r 1320 1330) lstick=0.5,0.2@$(r 1310 1340) btn=b@$(r 1350 1380) btn=r@$(r 1390 1391)
+        input="$base btn=l2@$(r 1320 1330) lstick=0.5,0.2@$(r 1310 1340) btn=r2@$(r 1350 1380) btn=r@$(r 1390 1391)
                lstick=-1,0@$(r 1400 1500) lstick=1,1@$(r 1500 1600)"
         extra=""
     else
@@ -46,8 +47,8 @@ run() { # name scheme fps aspect expected-md5
     fi
 }
 run cursor_43_60 cursor 60 4:3 3a03454777b23954cc1fb5ea70fdd7c0
-run direct_43_60 direct 60 4:3 3f34a8da00c74f4f419297335fffce2f
+run direct_43_60 direct 60 4:3 a3e24f4baa9a0f1ce51887eaa6c5a262
 run cursor_169_120 cursor 120 16:9 a2cf47e8b41cb62af96d54685a98b663
-run direct_169_120 direct 120 16:9 158475bd97230e12db78d3c234b3fc1c
+run direct_169_120 direct 120 16:9 9a69c90cb9a86f8e9d36599c61302d1e
 if [ $fail -ne 0 ]; then echo "FAILED"; exit 1; fi
 echo "OK"

@@ -109,6 +109,7 @@ void declareOptions() {
         gromada::input::coreOptions[0], gromada::input::coreOptions[1], gromada::input::coreOptions[2],
         gromada::input::coreOptions[3], gromada::input::coreOptions[4], gromada::input::coreOptions[5],
         gromada::input::coreOptions[6], gromada::input::coreOptions[7], // camera, aim assist (issue #16)
+        gromada::input::coreOptions[8], gromada::input::coreOptions[9], // reticle, lock corridor (issue #19)
         {"gromada_movie", "Riproduci filmato (Start/A/B per saltare); nessuno|0|1|2|3"},
         // presentation (issue #20)
         {"gromada_render_scale", "Risoluzione interna; 1x|2x|3x|4x"},
@@ -117,7 +118,7 @@ void declareOptions() {
         {"gromada_render_threads", "Thread di disegno; automatico|1|2|3|4"},
         {nullptr, nullptr},
     };
-    static_assert(std::size(gromada::input::coreOptions) == 8, "list every input option above");
+    static_assert(std::size(gromada::input::coreOptions) == 10, "list every input option above");
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
 }
 
@@ -569,6 +570,9 @@ void runSession(float dt) {
     f.weaponMask = controls.weaponMask;
     f.currentWeapon = controls.currentWeapon;
     f.aimDistance = controls.weaponRange;
+    f.weaponKind = controls.weaponKind;
+    f.aimLift = controls.aimLift;
+    f.zoom = static_cast<float>(s.mapping().zoom);   // screen px per world px of the last picture (issue #20)
     f.targets = controls.targets;
     const Settings& set = core->input.settings();
     const PcState& pc = core->input.update(pollRaw(input_state_cb, set), f);
@@ -578,17 +582,24 @@ void runSession(float dt) {
     static long frame = 0;
     if (const int every = traceEvery(); every > 0 && frame++ % every == 0) {
         const auto& cam = s.engine().camera();
-        Vec2 nearest{-9999, -9999}; // closest target, ground point relative to the player
+        Vec2 nearest{-9999, -9999}; // closest target, ground point relative to the player, and its hp
+        int nearestHp = -1;
         if (controls.player)
-            for (const auto& t : controls.targets)
-                if ((t.ground - *controls.player).length() < (nearest).length())
-                    nearest = t.ground - *controls.player;
+            for (std::size_t i = 0; i < controls.targets.size(); ++i)
+                if ((controls.targets[i].ground - *controls.player).length() < (nearest).length()) {
+                    nearest = controls.targets[i].ground - *controls.player;
+                    nearestHp = i < controls.targetHps.size() ? controls.targetHps[i] : -1;
+                }
+        const auto& rec = s.lastInput(); // this frame's input record (mouse point in the world, buttons)
         log(RETRO_LOG_INFO, "trace map=%s ctx=%d flagman=%d,%d cam=%d,%d cursor=%d,%d weapon=%d mask=%u pending=%d "
-            "targets=%d hp=%d order=%d locked=%d nearest=%d,%d", s.currentMap().c_str(), static_cast<int>(f.context),
+            "targets=%d hp=%d order=%d locked=%d nearest=%d,%d nhp=%d mouse=%d,%d bits=%u kind=%d range=%d zoom=%d hidden=%d",
+            s.currentMap().c_str(), static_cast<int>(f.context),
             controls.player ? controls.flagmanX : -1, controls.player ? controls.flagmanY : -1, cam.x, cam.y,
             pc.cursorX(), pc.cursorY(), controls.currentWeapon, static_cast<unsigned>(controls.weaponMask),
             pc.weaponPending ? pc.weaponSlot : -1, controls.targetCount, controls.targetHp, pc.moveOrder ? 1 : 0,
-            pc.aimLocked ? 1 : 0, static_cast<int>(nearest.x), static_cast<int>(nearest.y));
+            pc.aimLocked ? 1 : 0, static_cast<int>(nearest.x), static_cast<int>(nearest.y), nearestHp, rec.mouseWorldX,
+            rec.mouseWorldY, static_cast<unsigned>(rec.bits), static_cast<int>(controls.weaponKind),
+            static_cast<int>(controls.weaponRange), static_cast<int>(std::lround(pc.zoomRate * 100)), pc.cursorHidden ? 1 : 0);
     }
     if (s.exitRequested()) {
         // Exit() from the scripts (credits): close the content; without that, start over.

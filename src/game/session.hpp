@@ -189,7 +189,7 @@ public:
             const auto& cam = m_engine->camera();
             return {static_cast<double>(m_viewX), static_cast<double>(cam.x), static_cast<double>(cam.y), 1.0};
         }
-        return {static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom};
+        return {static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom, 1e-3};
     }
     // Hook of the graphics enhancements (issue #21): called after the world is drawn.
     void setWorldPass(std::function<void(const WorldPass&)> pass) { m_worldPass = std::move(pass); }
@@ -320,10 +320,13 @@ public:
             c.player = toScreen(aim.flagmanX, aim.flagmanY);
             c.flagmanX = aim.flagmanX;
             c.flagmanY = aim.flagmanY;
-            c.weaponRange = static_cast<float>(aim.weaponRange * m.zoom);   // on the output
+            c.weaponRange = static_cast<float>(aim.weaponRange);   // world px: the mapper scales it by FrameInfo::zoom
+            c.weaponKind = weaponKind(aim.fire);
+            c.aimLift = (aim.fire.targetCategory & 0x08) ? 80.0f : 0.0f; // cat::Avia (act_coor_attack 0x411c41)
             for (const auto& t : aim.targets) {
                 c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
                 c.targetHp += t.hp;
+                c.targetHps.push_back(t.hp);
             }
             c.targetCount = static_cast<int>(aim.targets.size());
         } else {
@@ -1311,6 +1314,8 @@ private:
     void drawCursor() {
         if (!m_cursors || m_cursorType < 0)
             return;
+        if (m_pc.cursorHidden && !m_demo && !m_ui.hasMenu() && !m_movieActive)
+            return; // direct scheme without the reticle (issue #19)
         int x = m_pc.cursorX(), y = m_pc.cursorY();
         input::CursorShape shape = input::CursorShape::Arrow;
         if (m_demo) {
@@ -1320,9 +1325,9 @@ private:
             // the world point under the cursor, as a screen point of the engine's camera
             const ScreenMapping m = identityView() ? ScreenMapping{static_cast<double>(m_viewX), static_cast<double>(m_engine->camera().x),
                                                                    static_cast<double>(m_engine->camera().y), 1.0}
-                                                   : ScreenMapping{static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom};
-            const int sx = static_cast<int>(std::floor(m.worldX(m_pc.cursor.x))) - m_engine->camera().x;
-            const int sy = static_cast<int>(std::floor(m.worldY(m_pc.cursor.y))) - m_engine->camera().y;
+                                                   : ScreenMapping{static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom, 1e-3};
+            const int sx = static_cast<int>(std::floor(m.worldX(m_pc.cursor.x) + m.snap)) - m_engine->camera().x;
+            const int sy = static_cast<int>(std::floor(m.worldY(m_pc.cursor.y) + m.snap)) - m_engine->camera().y;
             switch (m_engine->cursorAt(sx, sy)) {
             case CursorKind::Arrow: shape = input::CursorShape::Arrow; break;
             case CursorKind::Move: shape = input::CursorShape::Move; break;

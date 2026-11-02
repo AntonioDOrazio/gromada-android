@@ -387,10 +387,12 @@ void testMapping() {
     InputRecordBuilder a, b;
     input::PcState pc;
     for (const auto cursor : {input::Vec2{0, 0}, input::Vec2{17.6f, 300.2f}, input::Vec2{639.9f, 479.9f}, input::Vec2{120.5f, 3.5f}})
-        for (const bool order : {false, true})
+        for (const int order : {0, 1, 2})   // cursor, move order, aim point (issue #19)
             for (const bool edge : {true, false}) {
                 pc.cursor = cursor;
-                pc.moveOrder = order;
+                pc.moveOrder = order == 1;
+                pc.hasAimTarget = order == 2;
+                pc.aimTarget = {cursor.x - 300.4f, cursor.y + 700.9f};   // off screen
                 pc.moveTarget = {cursor.x + 40.7f, cursor.y - 900.2f};
                 pc.edgeScroll = edge;
                 pc.left = {true, true, false};
@@ -427,6 +429,17 @@ void testMapping() {
     r = c.build(pc, ScreenMapping{0, 0, 0, 0.5}, 0.016f, {1280, 960});
     CHECK_EQ(r.mouseScreenX, 1280 - 1 - InputRecordBuilder::EdgeBand);
     CHECK_EQ(r.mouseWorldX, 1278);
+    // the aim point of the direct scheme (off screen) is the mouse point, through the zoom; the
+    // buttons are the pad's (fire)
+    pc = {};
+    pc.cursor = {10, 10};
+    pc.hasAimTarget = true;
+    pc.aimTarget = {900, -50};
+    pc.right = {true, true, false};
+    r = c.build(pc, z2, 0.016f, {320, 240});
+    CHECK_EQ(r.mouseWorldX, 550);   // 100.5 + 900 / 2
+    CHECK_EQ(r.mouseWorldY, 25);    // 50.25 - 50 / 2
+    CHECK_EQ(r.bits & (OriginalInput::RClick | OriginalInput::RDown), OriginalInput::RClick | OriginalInput::RDown);
     // a move order (direct scheme) is a left click at its target, through the zoom
     pc = {};
     pc.cursor = {10, 10};

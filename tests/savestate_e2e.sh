@@ -2,8 +2,8 @@
 # Save states end to end through the core and the headless frontend (issue #14), on the original
 # data: the flow of core_e2e.sh (logo, movies, menus, new player, mission map, level 1 played
 # with the pad) with
-#   1. save in level 1, play on, load, replay the same input: every frame (picture and sound)
-#      identical, music and sound effects included;
+#   1. save in level 1, play on (L2 move, R2 fire, A zoom: issue #19), load, replay the same
+#      input: every frame (picture and sound) identical, music and sound effects included;
 #   2. the same across a map change (save on the mission map, load after level 1 started);
 #   3. the same inside a menu (player choice, name entry);
 #   4. a state saved during a movie, loaded by another process at its start: identical frames;
@@ -25,7 +25,8 @@ f() { echo $(( $1 * scale )); }
 r() { echo "$(f $1)-$(f $2)"; }
 input="btn=a@$(r 10 12) btn=a@$(r 40 42) btn=x@$(r 80 82) btn=a@$(r 160 162) btn=x@$(r 420 422) btn=a@$(r 460 462)
        btn=down@$(r 480 482) btn=a@$(r 500 502) btn=start@$(r 540 545) btn=x@$(r 600 602) btn=x@$(r 800 803)
-       btn=x@$(r 1300 1303) btn=a@$(r 1320 1330) lstick=0.5,0.2@$(r 1310 1340) btn=b@$(r 1350 1380) btn=r@$(r 1390 1391)"
+       btn=x@$(r 1300 1303) btn=l2@$(r 1320 1330) lstick=0.5,0.2@$(r 1310 1340) btn=r2@$(r 1350 1380) btn=r@$(r 1390 1391)
+       btn=a@$(r 1395 1410)"
 fail=0
 run() { # name frames options...
     name=$1; frames=$2; shift 2

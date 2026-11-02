@@ -4,14 +4,20 @@
 //
 // Schemes (core option):
 //  - VirtualCursor: left stick moves the cursor (response curve + acceleration), right stick
-//    moves it slowly for precision; A = left click, B = right click.
+//    moves it slowly for precision; L2 = left click (move), R2 = right click (attack). In a
+//    level with the player (issue #19) A/B held = zoom in/out (PcState::zoomRate +1/-1);
+//    in menus, name entry, screens without the player (and in the direct scheme) A = left
+//    click, B = right click.
 //  - Direct (twin stick): the left stick drives the Kassandra with move orders the original
 //    understands, a left click at a point ahead of it in the stick direction (renewed while
 //    the stick is held; a short order at its feet when released stops it). The arrows of the
 //    original are tank controls (forward/back/turn while moving) and stay on the d-pad. The
-//    right stick aims: the cursor is the aim point, on the best target in the stick direction
-//    (aim assist) or at weapon range; pushing past fireThreshold holds the right button
-//    (attack). With the right stick idle the aim follows the movement (the turret looks ahead).
+//    right stick aims: the aim point (PcState::aimTarget) is the nearest target inside a
+//    corridor around the stick direction within the weapon's range (invisible lock: the
+//    original's right click on a unit), else the weapon's maximum range along the stick;
+//    pushing past fireThreshold holds the right button (attack). With the right stick idle
+//    the aim follows the movement (the turret looks ahead). The reticle can be hidden
+//    (Geometry Wars style). L2/R2 = analog zoom out/in (trigger pressure = rate).
 // Common: L1/R1 = previous/next available weapon (keys 1-4, repeated until the game reports
 // the switch: the original refuses a change while the turret is still loading), Start = Esc,
 // Select = TAB, X = Enter, d-pad = arrows. Touchscreen: tap = left click, long press or two
@@ -40,6 +46,27 @@ enum class Context : std::uint8_t { Gameplay, Menu, TextEntry };
 // where the cursor cannot scroll at the screen edges.
 enum class CameraFollow : std::uint8_t { Auto, Always, Off };
 
+// What the current weapon fires, for the invisible lock of the direct scheme (issue #19).
+// The game classifies it from the data (game::weaponKind, session_controls.hpp).
+//  Direct: laser, cannon, machine gun, flamethrower (fast, straight to the point);
+//  Ballistic: high arc (HAIL); Missile: launchers that fire without turning (ZEPHYR, HARPY,
+//  HYDRA); MineLayer: the shot leaves a mine (PLUTO); FixedMineLayer: fixed head, the mine is
+//  laid where the vehicle is (CHAOS, as in the original).
+enum class WeaponKind : std::uint8_t { Unknown, Direct, Ballistic, Missile, MineLayer, FixedMineLayer };
+// Slow or inaccurate weapons get the wide ("magnetic") corridor.
+constexpr bool magneticWeapon(WeaponKind k) {
+    return k == WeaponKind::Ballistic || k == WeaponKind::Missile || k == WeaponKind::MineLayer ||
+           k == WeaponKind::FixedMineLayer;
+}
+
+// Lock corridor around the aim line: a target counts when its distance from the line is at
+// most halfWidth px, and near the player at most `cone` radians off the line (the corridor
+// starts as a cone, so that a unit beside the player is not taken for one ahead).
+struct Corridor {
+    float halfWidth = 40;
+    float cone = 0.6f;
+};
+
 struct Settings {
     Scheme scheme = Scheme::VirtualCursor;
     // Cursor (virtual cursor scheme, menus)
@@ -60,8 +87,17 @@ struct Settings {
     float aimThreshold = 0.15f;  // right stick: aim (cursor moves, no attack)
     float fireThreshold = 0.7f;  // right stick: aim and hold the right button
     float aimDistance = 160;     // aim point distance when the engine gives no weapon range
-    bool aimAssist = true;       // the aim point snaps to the best target in the aim direction
-    float assistCone = 0.45f;    // rad (26 degrees) each side of the aim direction
+    bool aimAssist = true;       // invisible lock: the nearest target in the corridor
+    bool reticle = true;         // draw the aim cursor (false: no reticle, Geometry Wars style)
+    // Lock corridors (issue #19), world px at zoom 1: laser/cannon/machine gun/flamethrower,
+    // and the wide "magnetic" one for ballistic cannon, mine layers, missile launchers.
+    Corridor corridorDirect{40, 0.6f};    // 80 px wide, 34 degrees near the player
+    Corridor corridorMagnetic{80, 0.8f};  // 160 px wide, 46 degrees near the player
+    float corridorScale = 1;     // core option: both widths times this
+    float lockMargin = 4;        // px: a target this close to the range limit is not locked
+    // Triggers (L2/R2): analog dead zone, and the pressure that clicks in the cursor scheme
+    float triggerDeadzone = 0.08f;
+    float triggerClick = 0.5f;
     // Weapons: a request is repeated until the game reports the switch (FrameInfo::currentWeapon)
     float weaponRetry = 0.12f, weaponTimeout = 1.5f;
     CameraFollow camera = CameraFollow::Auto;
@@ -95,9 +131,19 @@ struct FrameInfo {
     const PlayerPosition* player = nullptr; // nullptr or nullopt: screen center
     std::uint8_t weaponMask = 0x0F;         // bit i: weapon i+1 available
     int currentWeapon = -1;                 // 0..3: weapon the game has selected; -1 unknown
-    // > 0 overrides Settings::aimDistance: weapon range in the game's metric max(|dx|, 1.5|dy|)
+    // > 0 overrides Settings::aimDistance: weapon range, world px, Euclidean (the flagman's
+    // shots are pulled back to this distance along their direction: game::PlayerAim)
     float aimDistance = 0;
-    std::span<const AimTarget> targets;     // attackable units (direct scheme aim assist)
+    WeaponKind weaponKind = WeaponKind::Unknown; // current weapon (lock corridor)
+    // World px the original adds below the mouse point for this weapon when no unit is under
+    // it: anti-aircraft weapons take the point as an aircraft 80 px up (act_coor_attack,
+    // 0x411c41). The full-range aim point is lifted by as much, so the shot lands at full
+    // range along the stick.
+    float aimLift = 0;
+    // Screen px per world px (the view zoom): scales the range and the corridors. Positions
+    // (player, targets) are already in screen px.
+    float zoom = 1;
+    std::span<const AimTarget> targets;     // attackable units (direct scheme invisible lock)
 };
 
 inline constexpr std::string_view TextEntryCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -";
@@ -128,33 +174,44 @@ inline float rayToBorder(Vec2 p, Vec2 d, float w, float h, float m) {
     return std::max(0.0f, t);
 }
 
-// Aim assist: index of the target closest to the aim direction `dir` (unit) from `from`,
-// within `cone` radians and `range` (game metric, 0 = any), on screen; -1 if none. Small
-// angles win, distance breaks near-ties (a quarter of the range costs as much as 0.1 rad).
-inline int pickTarget(std::span<const AimTarget> targets, Vec2 from, Vec2 dir, float cone, float range, Vec2 screen) {
+// Invisible lock (issue #19): index of the nearest target (ground distance from `from`)
+// inside the corridor around the aim line from `from` along `dir` (unit), within `range`
+// (Euclidean, same units as the positions; 0 = any distance), on or off screen; -1 if none.
+inline int pickInCorridor(std::span<const AimTarget> targets, Vec2 from, Vec2 dir, Corridor corridor, float range) {
     int best = -1;
-    float bestScore = 1e9f;
+    float bestDist = 1e30f;
+    const float tanCone = std::tan(std::clamp(corridor.cone, 0.0f, 1.5f));
     for (std::size_t i = 0; i < targets.size(); ++i) {
-        const AimTarget& t = targets[i];
-        if (t.point.x < 0 || t.point.y < 0 || t.point.x >= screen.x || t.point.y >= screen.y)
+        const Vec2 v = targets[i].ground - from;
+        const float dist = v.length();
+        if (dist < 1 || (range > 0 && dist > range))
             continue;
-        const Vec2 v = t.ground - from;
-        const float len = v.length();
-        if (len < 1)
+        const float along = v.x * dir.x + v.y * dir.y;
+        if (along <= 0)
             continue;
-        if (range > 0 && gameDistance(v) > range + 8)
+        const float off = std::abs(v.x * dir.y - v.y * dir.x);
+        if (off > std::min(corridor.halfWidth, along * tanCone))
             continue;
-        const float c = std::clamp((v.x * dir.x + v.y * dir.y) / len, -1.0f, 1.0f);
-        const float angle = std::acos(c);
-        if (angle > cone)
-            continue;
-        const float score = angle + 0.4f * (range > 0 ? gameDistance(v) / range : len / 640);
-        if (score < bestScore) {
-            bestScore = score;
+        if (dist < bestDist) {
+            bestDist = dist;
             best = static_cast<int>(i);
         }
     }
     return best;
+}
+
+// Where the reticle of an aim point is drawn: the point itself on screen, else where the line
+// from the player to it leaves the screen (`margin` px inside).
+inline Vec2 reticleOnScreen(Vec2 player, Vec2 point, Vec2 screen, float margin = 2) {
+    auto inside = [&](Vec2 p) { return p.x >= 0 && p.y >= 0 && p.x <= screen.x - 1 && p.y <= screen.y - 1; };
+    if (inside(point))
+        return point;
+    const Vec2 v = point - player;
+    const float len = v.length();
+    if (len < 1e-3f || !inside(player))
+        return {std::clamp(point.x, 0.0f, screen.x - 1), std::clamp(point.y, 0.0f, screen.y - 1)};
+    const Vec2 d = v * (1 / len);
+    return player + d * std::min(len, rayToBorder(player, d, screen.x, screen.y, margin));
 }
 
 // RTS-style edge scrolling helper: -1..1 per axis when the cursor is within `zone` px of
@@ -180,6 +237,7 @@ public:
             m_aimFree = false;
             m_driving = false;
             m_accelHold = 0;
+            m_zoomArmed = 0;
         }
         m_settings = s;
     }
@@ -231,12 +289,26 @@ public:
         m_state.aiming = false;
         m_state.aimLocked = false;
         m_state.moveOrder = false;
+        m_state.hasAimTarget = false;
+        m_state.cursorHidden = false;
+        m_state.zoomRate = 0;
         if (!direct)
             m_driving = false;
 
         followWeapon(f, dt);
 
         // --- RetroPad -----------------------------------------------------------
+        // Zoom only in a level with the player (gameplay context and a player position): on
+        // screens without the player (logos, splash maps between menus) A/B keep clicking.
+        // Cursor scheme in a level: A/B zoom (held after a press there, so that a button
+        // still held from a menu does not zoom); L2/R2 click everywhere.
+        const bool inLevel = f.context == Context::Gameplay && f.player && f.player->screenPosition();
+        const bool cursorScheme = s.scheme == Scheme::VirtualCursor;
+        const bool cursorGameplay = cursorScheme && inLevel;
+        if (cursorGameplay && edge(pad::A)) m_zoomArmed |= 1;
+        if (cursorGameplay && edge(pad::B)) m_zoomArmed |= 2;
+        if (!in.has(pad::A)) m_zoomArmed &= ~1u;
+        if (!in.has(pad::B)) m_zoomArmed &= ~2u;
         hold(Key::Escape, in.has(textEntry ? pad::Select : pad::Start));
         if (textEntry) {
             updateTextEntry(in, dt);
@@ -244,8 +316,18 @@ public:
             if (edge(pad::B) || edge(pad::Left)) pulse(Key::Backspace);
             hold(Key::Enter, in.has(pad::Start));
         } else {
-            leftDown |= in.has(pad::A);
-            rightDown |= in.has(pad::B);
+            if (cursorGameplay) {
+                m_state.zoomRate = static_cast<float>((m_zoomArmed & 1) != 0) - static_cast<float>((m_zoomArmed & 2) != 0);
+            } else {
+                leftDown |= in.has(pad::A);
+                rightDown |= in.has(pad::B);
+            }
+            if (cursorScheme) {
+                leftDown |= trigger(in.l2, in.has(pad::L2)) >= s.triggerClick;
+                rightDown |= trigger(in.r2, in.has(pad::R2)) >= s.triggerClick;
+            } else if (direct && inLevel) {
+                m_state.zoomRate = trigger(in.r2, in.has(pad::R2)) - trigger(in.l2, in.has(pad::L2));
+            }
             hold(Key::Tab, in.has(pad::Select));
             hold(Key::Enter, in.has(pad::X));
             hold(Key::Left, in.has(pad::Left));
@@ -294,7 +376,9 @@ public:
                 m_aimDir = ls.dir;
                 m_aimFree = false;
             }
-            m_state.cursor = aimPoint(player, f, screen);
+            m_state.aimTarget = aimPoint(player, f);
+            m_state.hasAimTarget = true;
+            m_state.cursor = reticleOnScreen(player, m_state.aimTarget, screen);
         } else {
             if (!textEntry && dpad != Vec2{})
                 m_state.move = dpad * (1.0f / dpad.length());
@@ -352,8 +436,11 @@ public:
             // touch/mouse re-aim: keep that exact point (relative to the player)
             m_aimOffset = m_state.cursor - player;
             m_aimFree = true;
+            m_state.aimTarget = m_state.cursor;
+            m_state.aimLocked = false;
         }
         m_state.edgeScroll = !direct && m_state.source != PointerSource::Touch;
+        m_state.cursorHidden = direct && !s.reticle && m_state.source == PointerSource::Pad;
 
         const bool leftPressed = (leftDown || m_leftPulse) && !m_state.left.down;
         const bool rightPressed = (rightDown || m_rightPulse) && !m_state.right.down;
@@ -400,24 +487,44 @@ private:
         return {f.width * 0.5f, f.height * 0.5f};
     }
 
-    // Direct scheme: the aim point. Aim assist on a target near the aim direction, else the
-    // weapon range along it (kept on screen along the same line, so the turret direction is
-    // exact). Touch/mouse aim keeps the point they chose.
-    [[nodiscard]] Vec2 aimPoint(Vec2 player, const FrameInfo& f, Vec2 screen) {
+public:
+    // Lock corridor for a weapon, in screen px (Settings widths x corridorScale x zoom).
+    [[nodiscard]] Corridor corridorFor(WeaponKind kind, float zoom = 1) const {
+        Corridor c = magneticWeapon(kind) ? m_settings.corridorMagnetic : m_settings.corridorDirect;
+        c.halfWidth *= m_settings.corridorScale * (zoom > 0 ? zoom : 1);
+        return c;
+    }
+    // Trigger pressure 0..1: the analog value past the dead zone, rescaled; a pad without
+    // analog triggers (analog 0) counts the digital button as full pressure.
+    [[nodiscard]] float trigger(float analog, bool digital) const {
+        const float dz = std::clamp(m_settings.triggerDeadzone, 0.0f, 0.9f);
+        if (analog > 0)
+            return analog > dz ? std::min(1.0f, (analog - dz) / (1 - dz)) : 0.0f;
+        return digital ? 1.0f : 0.0f;
+    }
+
+private:
+    // Direct scheme: the aim point (the record's mouse point, possibly off screen). The
+    // invisible lock takes the nearest target inside the weapon's corridor within range: the
+    // point that puts it under the cursor, so the original attacks that unit (same shot as a
+    // right click on it). Otherwise the weapon's maximum range along the aim direction: the
+    // flagman's Aim pulls any farther point back to that distance, so this is the farthest
+    // shot the original can make that way. Touch/mouse aim keeps the point they chose.
+    [[nodiscard]] Vec2 aimPoint(Vec2 player, const FrameInfo& f) {
         const Settings& s = m_settings;
         if (m_aimFree)
             return player + m_aimOffset;
-        const float range = f.aimDistance > 0 ? f.aimDistance : s.aimDistance;
+        const float zoom = f.zoom > 0 ? f.zoom : 1;
+        const float range = (f.aimDistance > 0 ? f.aimDistance : s.aimDistance) * zoom;
         if (s.aimAssist && !f.targets.empty()) {
-            const int t = pickTarget(f.targets, player, m_aimDir, s.assistCone, f.aimDistance, screen);
+            const float lockRange = f.aimDistance > 0 ? std::max(1.0f, range - s.lockMargin * zoom) : 0.0f;
+            const int t = pickInCorridor(f.targets, player, m_aimDir, corridorFor(f.weaponKind, zoom), lockRange);
             if (t >= 0) {
                 m_state.aimLocked = true;
                 return f.targets[static_cast<std::size_t>(t)].point;
             }
         }
-        const float along = range / std::max(1e-3f, gameDistance(m_aimDir));
-        const float t = std::min(along, rayToBorder(player, m_aimDir, screen.x, screen.y, 2));
-        return player + m_aimDir * t;
+        return player + m_aimDir * range - Vec2{0, f.aimLift * zoom};
     }
 
     // The weapon the game reports: requests are repeated until it has switched (the original
@@ -585,6 +692,7 @@ private:
     float m_touchGrace = 0;
     int m_repeatDir = 0;
     float m_repeatHeld = 0;
+    std::uint8_t m_zoomArmed = 0; // cursor scheme: bit 0 A, bit 1 B pressed in gameplay and held
 };
 
 } // namespace gromada::input
