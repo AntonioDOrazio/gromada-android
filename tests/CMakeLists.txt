@@ -35,3 +35,12 @@ gromada_add_test(music_test music_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+
+# Simulation engine (src/game, issue #8): synthetic tests, data-backed level runs and the
+# desktop driver tools/engine_run (screenshots + trace).
+gromada_add_test(engine_test engine_test.cpp)
+gromada_add_test(engine_data_test engine_data_test.cpp)
+set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
+add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
+target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)

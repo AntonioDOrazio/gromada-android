@@ -81,6 +81,11 @@ public:
 
     // Shared MSVC CRT rand(): scripts' Random() and the engine draw from the same state.
     virtual int rand() = 0;
+
+    // ScrollLock(flag) (builtin 73, owned by the session) stops the edge scroll, the
+    // auto-scroll and the leash around the flagman, which live in updateCamera().
+    // Added by issue #8 with a default no-op so other implementations keep compiling.
+    virtual void setScrollLock(bool /*locked*/) {}
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.
