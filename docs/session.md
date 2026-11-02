@@ -197,6 +197,18 @@ annullerebbe la conferma.
 Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 `Engine::cursorAt()`; in demo è disegnato nella posizione registrata.
 
+Comandi sul gioco vero (issue #16, `src/game/session_controls.hpp`, dettagli in `docs/controls.md`):
+- `controlsFrame()` dà al core, prima di ogni frame, giocatore e bersagli in coordinate
+  dell'immagine (`Engine::playerAim()`), gittata dell'arma, armi selezionabili (`weapon[k]` dello
+  script + munizioni) e arma in uso (`nweapon`).
+- Il record di input porta gli **ordini di movimento** dello schema diretto (`PcState::moveOrder`:
+  click sinistro nel punto dell'ordine, senza tasto destro in quel frame) e tiene fuori dalla
+  fascia di scorrimento ai bordi (6 px) il mouse "schermo" dei tocchi e del punto mirato
+  (`PcState::edgeScroll`), lasciando esatto il punto nel mondo; nei menu non tocca nulla.
+- `setCameraFollow(bool)`: prima di `updateCamera()` la vista segue il giocatore (zona morta,
+  anticipo nella direzione di marcia); non in demo, nei menu e con `ScrollLock(1)`.
+- Indicatore dell'arma (barra di stato nascosta): 2 s dopo un cambio o una pressione di `1`-`4`.
+
 ## Salvataggi
 
 - Cartella: `<cartella di salvataggio di libretro>/gromada` (`RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY`).
@@ -296,6 +308,7 @@ I test della sessione usano un motore finto (`session_test`) o `ViewerEngine`
 (`session_data_test`); al merge basta costruire lì il motore vero.
 
 Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
+- `playerAim()` (issue #16): flagman, gittata dell'arma in uso e unità colpibili, per i comandi;
 - `setScrollLock(bool)`: lo stato di `ScrollLock()` ferma lo scorrimento ai bordi, il guinzaglio
   e i tasti `+`/`-`, che sono del motore;
 - `drawScreenEffects(FramebufferRef)`: gli effetti di `Effect()` valgono per tutta l'immagine,

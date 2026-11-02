@@ -31,6 +31,8 @@ endif()
 gromada_add_test(ui_text_test ui_text_test.cpp)
 gromada_add_test(ui_data_test ui_data_test.cpp)
 gromada_add_test(input_mapper_test input_mapper_test.cpp)
+# Controls on the gameplay (issue #16): move orders, follow camera, weapons (synthetic).
+gromada_add_test(controls_test controls_test.cpp)
 gromada_add_test(cursor_file_test cursor_file_test.cpp)
 # Movies: synthetic tests (CI) and the full decode of the game's movies compared with ffmpeg.
 gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
@@ -94,3 +96,17 @@ set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_C
 # vectors from the original exe (tests/data/oracle/hicolor_*.json; no game data needed).
 gromada_add_test(hicolor_test hicolor_test.cpp)
 target_compile_definitions(hicolor_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# Controls on the real gameplay (issue #16): direct scheme drives to a point and hits a target,
+# menus by pad only and by touch only; 60/120 fps x 4:3/16:9 (needs the game data).
+foreach(mode pad touch)
+    foreach(cfg "60;4:3" "120;4:3" "60;16:9" "120;16:9")
+        list(GET cfg 0 fps)
+        list(GET cfg 1 aspect)
+        string(REPLACE ":" "" tag "${aspect}")
+        set(name controls_e2e_${mode}_${fps}fps_${tag})
+        add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/controls_e2e.sh $<TARGET_FILE:harness>
+                 $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/${name}_out ${mode}
+                 gromada_fps=${fps} gromada_aspect=${aspect})
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+endforeach()

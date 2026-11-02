@@ -57,6 +57,21 @@ struct Camera {
     int width = 640, height = 480;
 };
 
+// What the local player can shoot at (issue #16: aim assist of the direct control scheme,
+// weapon range for the aim point, automated tests). World coordinates.
+struct PlayerAim {
+    struct Target {
+        UnitId id = 0;
+        int x = 0, y = 0;             // a point that puts the unit under the cursor (cursorAt → Fight)
+        int groundX = 0, groundY = 0; // the unit on the ground (distances, ranges)
+        int hp = 0;
+    };
+    bool valid = false;          // false: no local flagman (menus, cutscenes)
+    int flagmanX = 0, flagmanY = 0;
+    int weaponRange = 0;         // current weapon, game metric max(|dx|, 1.5·|dy|); 0 = unknown
+    std::vector<Target> targets; // hostile units the current weapon can hit, anywhere on the map
+};
+
 class Engine {
 public:
     virtual ~Engine() = default;
@@ -113,6 +128,9 @@ public:
     // (inside Player::Tact, right after tactPlayers()). nullopt when the original would not
     // run it: no flagman, paused, or an engine that does not provide it.
     [[nodiscard]] virtual std::optional<StateBarInfo> stateBarInfo() { return std::nullopt; }
+    // Local player's flagman, weapon range and attackable units (issue #16, read-only query
+    // for the controls: aim assist and the aim point at weapon range). Default: nothing known.
+    [[nodiscard]] virtual PlayerAim playerAim() const { return {}; }
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.
