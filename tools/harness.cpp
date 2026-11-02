@@ -7,6 +7,7 @@
 //   timed input (repeatable; "@from-to" or "@frame", default = whole run):
 //             btn=<a|b|x|y|l|r|l2|r2|l3|r3|start|select|up|down|left|right>@10-20
 //             lstick=<x>,<y>@...  rstick=<x>,<y>@...   (-1..1, y down)
+//             l2a=<p>@...  r2a=<p>@...                 (analog trigger pressure 0..1)
 //             touch=<px>,<py>[;<px>,<py>]@...         (fingers, in game-image pixels)
 //             mouse=<dx>,<dy>@...  mouse_btn=<left|right>@...
 //   savedir=<dir>   libretro save directory (default <out_prefix>_save; "none" = no save dir)
@@ -22,6 +23,7 @@
 //                                     plus "ahead <frame> <video fnv>" for run-ahead frames
 //             statefuzz=<n>           after the run: n corrupted/truncated copies of a fresh state
 //                                     must be rejected by retro_unserialize without crashing
+//   timing=<from>-<to>        retro_run time of those frames: mean, median, p95, p99, max (ms)
 //   Exit() from the game (RETRO_ENVIRONMENT_SHUTDOWN) stops the run.
 #include <dlfcn.h>
 #include <chrono>
@@ -29,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -70,7 +73,9 @@ static bool parseTimed(const std::string& k, const std::string& v) {
         {"x", RETRO_DEVICE_ID_JOYPAD_X}, {"l", RETRO_DEVICE_ID_JOYPAD_L}, {"r", RETRO_DEVICE_ID_JOYPAD_R},
         {"l2", RETRO_DEVICE_ID_JOYPAD_L2}, {"r2", RETRO_DEVICE_ID_JOYPAD_R2}, {"l3", RETRO_DEVICE_ID_JOYPAD_L3},
         {"r3", RETRO_DEVICE_ID_JOYPAD_R3}};
-    if (k != "btn" && k != "lstick" && k != "rstick" && k != "touch" && k != "mouse" && k != "mouse_btn") return false;
+    if (k != "btn" && k != "lstick" && k != "rstick" && k != "touch" && k != "mouse" && k != "mouse_btn" && k != "l2a" &&
+        k != "r2a")
+        return false;
     Timed t;
     t.kind = k;
     const auto at = v.find('@');
@@ -87,6 +92,9 @@ static bool parseTimed(const std::string& k, const std::string& v) {
         t.id = it->second;
     } else if (k == "mouse_btn") {
         t.id = what == "right" ? RETRO_DEVICE_ID_MOUSE_RIGHT : RETRO_DEVICE_ID_MOUSE_LEFT;
+    } else if (k == "l2a" || k == "r2a") {
+        t.id = k == "l2a" ? RETRO_DEVICE_ID_JOYPAD_L2 : RETRO_DEVICE_ID_JOYPAD_R2;
+        t.xy.emplace_back(std::atof(what.c_str()), 0.0f);
     } else {
         for (size_t p = 0; p < what.size();) {
             size_t q = what.find(';', p); if (q == std::string::npos) q = what.size();
@@ -157,7 +165,10 @@ static size_t audio(const int16_t* d, size_t frames) {
 static void poll() {}
 static int16_t timedInput(unsigned device, unsigned index, unsigned id) {
     auto clamp16 = [](float v) { return int16_t(v > 32767 ? 32767 : v < -32767 ? -32767 : v); };
-    if (device == RETRO_DEVICE_ANALOG) {
+    if (device == RETRO_DEVICE_ANALOG && index == RETRO_DEVICE_INDEX_ANALOG_BUTTON) {
+        for (const Timed& t : timed)
+            if ((t.kind == "l2a" || t.kind == "r2a") && t.id == id && t.active()) return clamp16(t.xy[0].first * 32767);
+    } else if (device == RETRO_DEVICE_ANALOG) {
         const char* kind = index == RETRO_DEVICE_INDEX_ANALOG_LEFT ? "lstick" : "rstick";
         for (const Timed& t : timed)
             if (t.kind == kind && t.active())
@@ -204,7 +215,7 @@ static int16_t input(unsigned port, unsigned device, unsigned index, unsigned id
 
 #define SYM(name) auto name = reinterpret_cast<decltype(&::name)>(dlsym(lib, #name)); if (!name) { std::fprintf(stderr, "missing %s\n", #name); return 1; }
 
-static int saveAt = -1, loadAt = -1, runAhead = 0, stateFuzz = 0;
+static int saveAt = -1, loadAt = -1, runAhead = 0, stateFuzz = 0, timingFrom = -1, timingTo = -1;
 static std::string stateFile, hashFile;
 
 int main(int argc, char** argv) {
@@ -227,6 +238,7 @@ int main(int argc, char** argv) {
         else if (k == "runahead") runAhead = std::atoi(v.c_str());
         else if (k == "hashes") hashFile = v;
         else if (k == "statefuzz") stateFuzz = std::atoi(v.c_str());
+        else if (k == "timing") { timingFrom = std::atoi(v.c_str()); timingTo = std::atoi(v.c_str() + v.find('-') + 1); }
         else if (k == "shots") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) shots.insert(std::atoi(t)); }
         else opts[k] = v;
     }
@@ -285,6 +297,7 @@ int main(int argc, char** argv) {
         if (state.size() >= 56) { uint64_t fr; std::memcpy(&fr, state.data() + 48, 8); savedFrame = int(fr); } // header: session frames
     }
 
+    std::vector<double> runMs;
     auto t0 = std::chrono::steady_clock::now();
     for (int run = 0; run < frames && !shutdownRequested; ++run) {
         if (frame == saveAt && !saved) {
@@ -305,7 +318,10 @@ int main(int argc, char** argv) {
             }
         }
         videoHash = audioHash = 0xcbf29ce484222325ull;
+        const auto r0 = std::chrono::steady_clock::now();
         retro_run();
+        if (frame >= timingFrom && frame <= timingTo)
+            runMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count());
         if (hashes) std::fprintf(hashes, "%d %016llx %016llx\n", frame, (unsigned long long)videoHash, (unsigned long long)audioHash);
         if (runAhead > 0 && !shutdownRequested) {
             if (!doSave(scratch)) { std::fprintf(stderr, "[f%d] run-ahead: retro_serialize failed\n", frame); ++failures; }
@@ -326,6 +342,15 @@ int main(int argc, char** argv) {
         ++frame;
     }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!runMs.empty()) {
+        std::vector<double> v = runMs;
+        std::sort(v.begin(), v.end());
+        double sum = 0;
+        for (double x : v) sum += x;
+        auto q = [&](double p) { return v[std::min(v.size() - 1, size_t(p * double(v.size())))]; };
+        std::fprintf(stderr, "timing frames %d-%d: %zu frames, mean %.3f ms, median %.3f, p95 %.3f, p99 %.3f, max %.3f\n",
+                     timingFrom, timingTo, v.size(), sum / double(v.size()), q(0.5), q(0.95), q(0.99), v.back());
+    }
     if (hashes) std::fclose(hashes);
     if (serializeCount)
         std::fprintf(stderr, "savestates: size %zu (max used %zu), serialize %ld x avg %.3f ms max %.3f ms, "

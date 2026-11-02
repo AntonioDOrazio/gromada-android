@@ -20,13 +20,16 @@
 // per cell, so the grid size does not depend on the internal resolution) and are applied with
 // bilinear upsampling only on the rows/columns the grid touches: no sources, no cost.
 //
-// The hook (called by GameEngine::draw, see the Enhancer comment): the framebuffer, a View
-// (world -> framebuffer transform) and the drawn sprites as DrawItem (world position,
-// interpolated when the pipeline has it). Nothing here reads or writes simulation state; the
-// caches are derived data and are not part of save states.
+// The hooks (GameEngine::draw and GameEngine::drawView, see the Enhancer comment): the
+// framebuffer, a View (world -> framebuffer transform) and the drawn sprites as DrawItem (world
+// position: the drawn, sub-pixel and extrapolated one in drawView). In drawView each pass is
+// prepared on one thread and applied by view::BandPass commands on the rasterizer's bands.
+// Nothing here reads or writes simulation state; the caches are derived data and are not part
+// of save states.
 //
 // Header-only; depends on core/, libgromada/ (formats, framebuffer) and analysis.hpp.
 
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cstring>
@@ -100,9 +103,10 @@ struct DrawItem {
     bool zeroZ = false;
 };
 
-// Per-frame cost and counts (tools, tests).
+// Per-frame cost and counts (tools, tests). The apply times are CPU time summed over the bands
+// (they may run on several threads).
 struct Stats {
-    double groundMs = 0, lightMs = 0;             // whole passes
+    double groundMs = 0, lightMs = 0;             // whole passes (preparation + apply)
     double groundApplyMs = 0, lightApplyMs = 0;   // of which: upsampling onto the framebuffer
     int occluders = 0, lights = 0;
     long groundPixels = 0, lightPixels = 0;       // framebuffer pixels visited by the upsampling
@@ -133,12 +137,12 @@ inline constexpr float MinLightPower = 6.0f;      // emitted px below which a fr
 inline constexpr float LightCell = 4.0f;          // world px per light-grid cell
 inline constexpr float ShadowBoost = 1.7f;        // kernel coverage -> occlusion (edge ~ full strength)
 inline constexpr float ShadowFadeZ = 24.0f;       // occluders this high above ground cast no contact shadow
-inline constexpr float LightKnee = 0.35f;
+inline constexpr float LightKnee = 0.35f;         // accumulated light l -> l / (1 + knee*l): many lights do not burn out
 // Contact-shadow kernels are built on first sight (~50 us each on desktop): at most this many
 // per frame, so the first frame of a level does not stall (the rest appear over the next
 // frames); the cache is dropped beyond MaxKernelBytes (all the occluders of level 19: ~7 MB).
 inline constexpr int MaxKernelBuildsPerFrame = 24;
-inline constexpr std::size_t MaxKernelBytes = 32u << 20;         // accumulated light l -> l / (1 + knee*l): many lights do not burn out
+inline constexpr std::size_t MaxKernelBytes = 32u << 20;
 
 // Light radius (world px) and intensity (0..1) from the emitted power of a frame and the
 // spread of its emitting pixels (a large light sprite of the original keeps its extent).
@@ -147,13 +151,19 @@ inline constexpr std::size_t MaxKernelBytes = 32u << 20;         // accumulated 
 }
 [[nodiscard]] inline float lightIntensity(float power) noexcept { return std::clamp(0.2f + std::sqrt(power) / 45.0f, 0.0f, 1.0f); }
 
+// Scratch of one upsampling (one per band: bands may run on different threads).
+struct UpsampleScratch {
+    std::vector<std::int32_t> row, px;
+};
+
 // ---------------------------------------------------------------------------- grid
 // A low-resolution accumulation grid aligned with the framebuffer: cell (i, j) covers
 // framebuffer pixels [i*cell, (i+1)*cell) x [j*cell, (j+1)*cell); values are sampled at cell
 // centres and upsampled bilinearly. Sources accumulate in float (at, touch); finalize() turns
 // the touched cells into 8.8 fixed-point values (with a tone curve) that forEachRun upsamples.
 // Touched cells are flagged, so the upsampling visits only the pixels next to them and the
-// next reset clears only those.
+// next reset clears only those. After finalize() the grid is only read: forEachRun may run on
+// several threads at once (different rows, different scratch).
 template <int Channels>
 class Grid {
 public:
@@ -180,8 +190,8 @@ public:
                 const auto r = static_cast<std::size_t>(j);
                 if (m_max[r] >= m_min[r]) {
                     const auto a = idx(m_min[r], j), b = idx(m_max[r], j) + Channels;
-                    std::fill(m_v.begin() + a, m_v.begin() + b, 0.0f);
-                    std::fill(m_iv.begin() + a, m_iv.begin() + b, neutral);
+                    std::fill(m_v.begin() + static_cast<std::ptrdiff_t>(a), m_v.begin() + static_cast<std::ptrdiff_t>(b), 0.0f);
+                    std::fill(m_iv.begin() + static_cast<std::ptrdiff_t>(a), m_iv.begin() + static_cast<std::ptrdiff_t>(b), neutral);
                     std::fill(&m_act[r * static_cast<std::size_t>(w) + static_cast<std::size_t>(m_min[r])],
                               &m_act[r * static_cast<std::size_t>(w) + static_cast<std::size_t>(m_max[r])] + 1, std::uint8_t{0});
                 }
@@ -205,62 +215,67 @@ public:
         m_any = true;
     }
 
-    // Fixed-point values of the touched rows: iv = f(v) (8.8), f(0) must be the neutral value.
+    // Fixed-point values of the touched rows: iv = f(v) (8.8), f(0) must be the neutral value;
+    // also builds the column table for a framebuffer `fbW` wide. Call before forEachRun.
     template <class F>
-    void finalize(F&& f) {
+    void finalize(int fbW, F&& f) {
         for (int j = 0; j < m_h; ++j) {
             const auto r = static_cast<std::size_t>(j);
             if (m_max[r] < m_min[r]) continue;
             for (std::size_t k = idx(m_min[r], j), e = idx(m_max[r], j) + Channels; k < e; ++k) m_iv[k] = f(m_v[k]);
         }
+        if (m_tableW != fbW) buildTable(fbW);
     }
 
-    // Upsamples the finalized grid bilinearly onto the framebuffer: calls f(y, xa, xb, v) for
-    // every run of pixels [xa, xb) of row y whose sample involves a touched cell, with
-    // v[x * Channels + c] the 8.8 value at pixel x (indexed by the absolute x).
+    // Upsamples the finalized grid bilinearly onto framebuffer rows [y0, y1): calls
+    // f(y, xa, xb, v) for every run of pixels [xa, xb) of row y whose sample involves a
+    // touched cell, with v[x * Channels + c] the 8.8 value at pixel x (indexed by the absolute
+    // x). Every pixel's value depends only on its own position (not on y0/y1).
     template <class F>
-    void forEachRun(int fbW, int fbH, F&& f) {
-        if (!m_any) return;
-        if (m_tableW != fbW) buildTable(fbW);
-        m_row.resize(static_cast<std::size_t>(m_w * Channels));
-        m_px.resize(static_cast<std::size_t>(fbW * Channels));
-        for (int y = 0; y < fbH; ++y) {
+    void forEachRun(int fbW, int y0, int y1, UpsampleScratch& scratch, F&& f) const {
+        if (!m_any || m_tableW != fbW) return;
+        auto& rowBuf = scratch.row;
+        auto& px = scratch.px;
+        rowBuf.resize(static_cast<std::size_t>(m_w * Channels));
+        px.resize(static_cast<std::size_t>(fbW * Channels));
+        for (int y = y0; y < y1; ++y) {
             const float gy = (static_cast<float>(y) + 0.5f) / m_cell - 0.5f;
             int j0 = static_cast<int>(std::floor(gy));
             std::int32_t t = static_cast<std::int32_t>((gy - static_cast<float>(j0)) * 256.0f);
             if (j0 < 0) { j0 = 0; t = 0; }
+            if (j0 > m_h - 1) j0 = m_h - 1;
             const int j1 = std::min(j0 + 1, m_h - 1);
             const auto r0 = static_cast<std::size_t>(j0), r1 = static_cast<std::size_t>(j1);
             const int lo = std::min(m_min[r0], m_min[r1]), hi = std::max(m_max[r0], m_max[r1]);
             if (hi < lo) continue;
-            // pixel spans of cells [c0, c1] sample cells c and c+1 (clamped to c1)
+            // pixel spans of cells [c0, c1] sample cells c and c+1 (clamped to the grid)
             const int c0 = std::max(lo - 1, 0), c1 = std::min(hi, m_w - 1);
             const std::uint8_t* act0 = &m_act[r0 * static_cast<std::size_t>(m_w)];
             const std::uint8_t* act1 = &m_act[r1 * static_cast<std::size_t>(m_w)];
             const std::int32_t* top = &m_iv[idx(0, j0)];
             const std::int32_t* bot = &m_iv[idx(0, j1)];
+            const auto active = [&](int k) {
+                const int kn = std::min(k + 1, m_w - 1);
+                return (act0[k] | act0[kn] | act1[k] | act1[kn]) != 0;
+            };
             for (int i = c0; i <= c1;) {
-                const auto active = [&](int k) {
-                    const int kn = std::min(k + 1, m_w - 1);
-                    return (act0[k] | act0[kn] | act1[k] | act1[kn]) != 0;
-                };
                 if (!active(i)) { ++i; continue; }
                 const int first = i;
                 while (i <= c1 && active(i)) ++i;   // run of pixel spans of cells [first, i)
                 const int last = std::min(i, m_w - 1);
                 for (int k = first * Channels, e = (last + 1) * Channels; k < e; ++k)
-                    m_row[static_cast<std::size_t>(k)] = top[k] + (((bot[k] - top[k]) * t) >> 8);
+                    rowBuf[static_cast<std::size_t>(k)] = top[k] + (((bot[k] - top[k]) * t) >> 8);
                 const int xa = m_start[static_cast<std::size_t>(first)], xb = m_start[static_cast<std::size_t>(i)];
                 for (int k = first; k < i; ++k) {
-                    const std::int32_t* ra = &m_row[static_cast<std::size_t>(k * Channels)];
-                    const std::int32_t* rb = &m_row[static_cast<std::size_t>(std::min(k + 1, m_w - 1) * Channels)];
+                    const std::int32_t* ra = &rowBuf[static_cast<std::size_t>(k * Channels)];
+                    const std::int32_t* rb = &rowBuf[static_cast<std::size_t>(std::min(k + 1, m_w - 1) * Channels)];
                     for (int x = m_start[static_cast<std::size_t>(k)], xe = m_start[static_cast<std::size_t>(k) + 1]; x < xe; ++x) {
                         const std::int32_t s = m_xs[static_cast<std::size_t>(x)];
                         for (int c = 0; c < Channels; ++c)
-                            m_px[static_cast<std::size_t>(x * Channels + c)] = ra[c] + (((rb[c] - ra[c]) * s) >> 8);
+                            px[static_cast<std::size_t>(x * Channels + c)] = ra[c] + (((rb[c] - ra[c]) * s) >> 8);
                     }
                 }
-                if (xa < xb) f(y, xa, xb, m_px.data());
+                if (xa < xb) f(y, xa, xb, px.data());
             }
         }
     }
@@ -290,23 +305,42 @@ private:
     std::vector<std::int32_t> m_iv;
     std::vector<std::uint8_t> m_act;
     std::vector<int> m_min, m_max, m_start;
-    std::vector<std::int32_t> m_xs, m_row, m_px;
+    std::vector<std::int32_t> m_xs;
 };
 
 // ---------------------------------------------------------------------------- enhancer
-// Owned by the engine (built on first use, only when an effect is on). GameEngine::draw:
+// Owned by the engine (built on first use, only when an effect is on). Each pass is split in
+// a preparation (accumulation on its grid, one thread) and an application on rows [y0, y1)
+// of the framebuffer (any number of bands, possibly on several threads; a pixel gets the same
+// value whatever the split).
+//
+// GameEngine::draw (the original 1x path):
 //   enh->begin()                         before the first layer (clears the item lists)
 //   enh->drawn.push_back(item)           for every sprite it draws (chains included)
 //   enh->ground(fb, view, occluders)     after layer 4, with the layer-5 sprites about to be
 //                                        drawn (the sorted unit layer: buildings, units, trees)
 //   enh->finish(fb, view)                after the last layer, before menus/texts/cursor
+// GameEngine::drawView (issue #20: a draw list rasterized by bands on worker threads): the
+// same items with their drawn (extrapolated, sub-pixel) positions; prepareGround() when the
+// list reaches layer 5 and prepareLights() at its end, each followed by a view::BandPass
+// command (groundBand, lightBand) that applies the pass to the band's rows at its place in
+// the painter order.
 class Enhancer {
 public:
     explicit Enhancer(std::span<const Vid* const> vids) : m_emitter(classifyEmitters(vids)) {}
 
     void setSettings(const Settings& s) noexcept { m_settings = s; }
     [[nodiscard]] const Settings& settings() const noexcept { return m_settings; }
-    [[nodiscard]] const Stats& stats() const noexcept { return m_stats; }
+    [[nodiscard]] Stats stats() const noexcept {
+        Stats s = m_stats;
+        s.groundPixels = m_groundPx.load(std::memory_order_relaxed);
+        s.lightPixels = m_lightPx.load(std::memory_order_relaxed);
+        s.groundApplyMs = static_cast<double>(m_groundNs.load(std::memory_order_relaxed)) / 1e6;
+        s.lightApplyMs = static_cast<double>(m_lightNs.load(std::memory_order_relaxed)) / 1e6;
+        s.groundMs += s.groundApplyMs;
+        s.lightMs += s.lightApplyMs;
+        return s;
+    }
     [[nodiscard]] bool isEmitter(int nvid) const noexcept {
         return nvid >= 0 && static_cast<std::size_t>(nvid) < m_emitter.size() && m_emitter[static_cast<std::size_t>(nvid)];
     }
@@ -318,21 +352,27 @@ public:
         drawn.clear();
         occluders.clear();
         m_stats = {};
+        m_groundPx = 0;
+        m_lightPx = 0;
+        m_groundNs = 0;
+        m_lightNs = 0;
+    }
+    // Number of bands the passes will be applied in (one scratch each).
+    void setBands(int bands) {
+        if (static_cast<int>(m_scratch.size()) < bands) m_scratch.resize(static_cast<std::size_t>(bands));
     }
 
     // Tools only (engine_run --fx-scale): called with the ground picture before the shadows.
     std::function<void(FramebufferRef)> groundObserver;
 
-    // Contact shadows on the ground layers (hook 1).
-    void ground(FramebufferRef fb, const View& view, std::span<const DrawItem> occluders) {
-        if (groundObserver) groundObserver(fb);
+    // ---- contact shadows (hook 1) ----
+    // Accumulates the occluders; true if there is something to apply.
+    bool prepareGround(int fbW, int fbH, const View& view, std::span<const DrawItem> occluders) {
+        m_groundOn = false;
         const float strength = ShadowLevels[std::clamp(m_settings.contactShadows, 0, 3)];
-        if (strength <= 0) return;
+        if (strength <= 0) return false;
         const auto t0 = std::chrono::steady_clock::now();
-        m_stats.groundPixels = 0;
-        const int fbW = fb.extent(1), fbH = fb.extent(0);
-        const float cell = OcclusionKernel::Cell * view.scale;
-        m_shadow.reset(fbW, fbH, cell, 256);
+        m_shadow.reset(fbW, fbH, OcclusionKernel::Cell * view.scale, 256);
         int count = 0, builds = 0;
         for (const DrawItem& it : occluders) {
             if (!it.frame || !(it.category & (vcat::Object | vcat::Vehicle)) || it.sizeZ < 4) continue;
@@ -343,40 +383,56 @@ public:
             splat(*k, it, view, wz);
             ++count;
         }
-        const auto ta = std::chrono::steady_clock::now();
         if (m_shadow.any()) {
             // finalized value = the multiplier kept by the pixel, 256 = untouched
-            m_shadow.finalize([&](float occ) {
+            m_shadow.finalize(fbW, [&](float occ) {
                 return static_cast<std::int32_t>(256.0f - std::min(1.0f, occ * ShadowBoost) * strength * 256.0f + 0.5f);
             });
-            m_shadow.forEachRun(fbW, fbH, [&](int y, int xa, int xb, const std::int32_t* keep) {
-                m_stats.groundPixels += xb - xa;
-                RGBA8* row = &fb[y, 0];
-                for (int x = xa; x < xb; ++x) {
-                    // the three channels in two multiplies (r and b share one, alpha kept)
-                    const auto p = std::bit_cast<std::uint32_t>(row[x]);
-                    const auto k = static_cast<std::uint32_t>(keep[x]);
-                    const std::uint32_t rb = (((p & 0x00ff00ffu) * k) >> 8) & 0x00ff00ffu;
-                    const std::uint32_t g = (((p & 0x0000ff00u) * k) >> 8) & 0x0000ff00u;
-                    row[x] = std::bit_cast<RGBA8>(rb | g | (p & 0xff000000u));
-                }
-            });
+            m_groundOn = true;
         }
         m_stats.occluders = count;
-        const auto t1 = std::chrono::steady_clock::now();
-        m_stats.groundMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        m_stats.groundApplyMs = std::chrono::duration<double, std::milli>(t1 - ta).count();
+        m_stats.groundMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return m_groundOn;
+    }
+    // Darkens rows [y0, y1) of the ground (band `band`).
+    void applyGround(FramebufferRef fb, int band, int y0, int y1) {
+        if (!m_groundOn) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        long pixels = 0;
+        m_shadow.forEachRun(fb.extent(1), y0, y1, m_scratch[static_cast<std::size_t>(band)], [&](int y, int xa, int xb, const std::int32_t* keep) {
+            pixels += xb - xa;
+            RGBA8* row = &fb[y, 0];
+            for (int x = xa; x < xb; ++x) {
+                // the three channels in two multiplies (r and b share one, alpha kept)
+                const auto p = std::bit_cast<std::uint32_t>(row[x]);
+                const auto k = static_cast<std::uint32_t>(keep[x]);
+                const std::uint32_t rb = (((p & 0x00ff00ffu) * k) >> 8) & 0x00ff00ffu;
+                const std::uint32_t g = (((p & 0x0000ff00u) * k) >> 8) & 0x0000ff00u;
+                row[x] = std::bit_cast<RGBA8>(rb | g | (p & 0xff000000u));
+            }
+        });
+        m_groundPx += pixels;
+        m_groundNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    }
+    static void groundBand(void* self, FramebufferRef fb, int band, int y0, int y1) {
+        static_cast<Enhancer*>(self)->applyGround(fb, band, y0, y1);
+    }
+    // The whole pass on one framebuffer (draw(), tools, tests).
+    void ground(FramebufferRef fb, const View& view, std::span<const DrawItem> occluders) {
+        if (groundObserver) groundObserver(fb);
+        m_groundPx = 0;
+        m_groundNs = 0;
+        setBands(1);
+        if (prepareGround(fb.extent(1), fb.extent(0), view, occluders)) applyGround(fb, 0, 0, fb.extent(0));
     }
 
-    // Dynamic light from the drawn items (hook 2).
-    void finish(FramebufferRef fb, const View& view) { lights(fb, view, drawn); }
-
-    void lights(FramebufferRef fb, const View& view, std::span<const DrawItem> items) {
+    // ---- dynamic light (hook 2) ----
+    // Accumulates the lights of the emitting items; true if there is something to apply.
+    bool prepareLights(int fbW, int fbH, const View& view, std::span<const DrawItem> items) {
+        m_lightOn = false;
         const LightLevel lv = LightLevels[std::clamp(m_settings.lights, 0, 3)];
-        if (lv.gain <= 0) return;
+        if (lv.gain <= 0) return false;
         const auto t0 = std::chrono::steady_clock::now();
-        m_stats.lightPixels = 0;
-        const int fbW = fb.extent(1), fbH = fb.extent(0);
         bool started = false;
         int count = 0;
         for (const DrawItem& it : items) {
@@ -393,33 +449,54 @@ public:
             count += addLight((wx - view.originX) * view.scale, (wy - view.originY) * view.scale,
                               lightRadius(e.power, e.spread) * view.scale, lightIntensity(e.power) * lv.gain, e);
         }
-        const auto ta = std::chrono::steady_clock::now();
         if (started && m_light.any()) {
-            m_light.finalize([](float l) { return static_cast<std::int32_t>(std::min(4.0f, l / (1.0f + LightKnee * l)) * 256.0f + 0.5f); });
-            const auto mul = static_cast<std::int32_t>(lv.mul * 256.0f), add = static_cast<std::int32_t>(lv.add * 256.0f);
-            const auto& lut = exposureLut();
-            m_light.forEachRun(fbW, fbH, [&](int y, int xa, int xb, const std::int32_t* v) {
-                m_stats.lightPixels += xb - xa;
-                RGBA8* row = &fb[y, 0];
-                const auto ch = [&](std::int32_t d, std::int32_t l) {
-                    // e = (d*mul + 255*add) * l in 8-bit units; one LUT step = 255*4/1024 ~ 1 unit
-                    const std::int32_t e = std::min<std::int32_t>(ExposureSteps - 1, ((d * mul + 255 * add) * l) >> 16);
-                    return static_cast<std::uint8_t>(d + (((255 - d) * lut[static_cast<std::size_t>(e)]) >> 8));
-                };
-                for (int x = xa; x < xb; ++x) {
-                    RGBA8& p = row[x];
-                    const std::int32_t* l = &v[x * 3];
-                    p.r = ch(p.r, l[0]);
-                    p.g = ch(p.g, l[1]);
-                    p.b = ch(p.b, l[2]);
-                }
-            });
+            m_light.finalize(fbW, [](float l) { return static_cast<std::int32_t>(std::min(4.0f, l / (1.0f + LightKnee * l)) * 256.0f + 0.5f); });
+            m_mul = static_cast<std::int32_t>(lv.mul * 256.0f);
+            m_add = static_cast<std::int32_t>(lv.add * 256.0f);
+            (void)exposureLut();   // built here, not on a worker thread
+            m_lightOn = true;
         }
         m_stats.lights = count;
-        const auto t1 = std::chrono::steady_clock::now();
-        m_stats.lightMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        m_stats.lightApplyMs = std::chrono::duration<double, std::milli>(t1 - ta).count();
+        m_stats.lightMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return m_lightOn;
     }
+    // Lights rows [y0, y1) (band `band`).
+    void applyLights(FramebufferRef fb, int band, int y0, int y1) {
+        if (!m_lightOn) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto& lut = exposureLut();
+        const std::int32_t mul = m_mul, add = m_add;
+        long pixels = 0;
+        m_light.forEachRun(fb.extent(1), y0, y1, m_scratch[static_cast<std::size_t>(band)], [&](int y, int xa, int xb, const std::int32_t* v) {
+            pixels += xb - xa;
+            RGBA8* row = &fb[y, 0];
+            const auto ch = [&](std::int32_t d, std::int32_t l) {
+                // e = (d*mul + 255*add) * l in 8-bit units; one LUT step = 255*4/1024 ~ 1 unit
+                const std::int32_t e = std::min<std::int32_t>(ExposureSteps - 1, ((d * mul + 255 * add) * l) >> 16);
+                return static_cast<std::uint8_t>(d + (((255 - d) * lut[static_cast<std::size_t>(e)]) >> 8));
+            };
+            for (int x = xa; x < xb; ++x) {
+                RGBA8& p = row[x];
+                const std::int32_t* l = &v[x * 3];
+                p.r = ch(p.r, l[0]);
+                p.g = ch(p.g, l[1]);
+                p.b = ch(p.b, l[2]);
+            }
+        });
+        m_lightPx += pixels;
+        m_lightNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    }
+    static void lightBand(void* self, FramebufferRef fb, int band, int y0, int y1) {
+        static_cast<Enhancer*>(self)->applyLights(fb, band, y0, y1);
+    }
+    // The whole pass on one framebuffer (draw(), tools, tests).
+    void lights(FramebufferRef fb, const View& view, std::span<const DrawItem> items) {
+        m_lightPx = 0;
+        m_lightNs = 0;
+        setBands(1);
+        if (prepareLights(fb.extent(1), fb.extent(0), view, items)) applyLights(fb, 0, 0, fb.extent(0));
+    }
+    void finish(FramebufferRef fb, const View& view) { lights(fb, view, drawn); }
 
 private:
     const Emission& emission(const DrawItem& it) {
@@ -507,6 +584,12 @@ private:
     std::size_t m_kernelBytes = 0;
     Grid<1> m_shadow;
     Grid<3> m_light;
+    bool m_groundOn = false, m_lightOn = false;
+    std::int32_t m_mul = 0, m_add = 0;
+    std::vector<UpsampleScratch> m_scratch;
+    // counters written by the bands (possibly several threads)
+    std::atomic<long> m_groundPx{0}, m_lightPx{0};
+    std::atomic<long long> m_groundNs{0}, m_lightNs{0};
 };
 
 } // namespace gromada::game::enhance

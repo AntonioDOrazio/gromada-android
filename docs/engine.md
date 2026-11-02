@@ -161,7 +161,9 @@ a 0 differenze salvo le divergenze di §5.
   (`0x42da0c..0x42da18`), quindi la camera arriva a `mapW − width` (verificato sulle camere
   registrate nelle demo, issue #13). Il guinzaglio (586×440 =
   vista 640×480 meno 54×40) su viste più larghe (16:9) mantiene lo stesso margine dal bordo
-  (`larghezza − 54`, `altezza − 40`): identico in 640×480 (issue #16).
+  (`larghezza − 54`, `altezza − 40`): identico in 640×480 (issue #16); lo stesso vale per le viste
+  più piccole dello zoom (issue #20: `larghezza − 54` sempre, non più `max(586, …)`; identico per
+  ogni vista ≥ 640×480).
 - **D9 Torretta del giocatore.** `Player::Tact` ruota la testa di un passo di direzione per
   chiamata (`0x40b220`), cioè per frame dell'originale. Qui i passi sono cadenzati sullo stesso
   frame di riferimento di D6: uno ogni 37 ms di orologio di gioco (al più 2 per frame), così la
@@ -221,6 +223,12 @@ a 0 differenze salvo le divergenze di §5.
 
 Prestazioni misurate (desktop condiviso, build Release): livello 19 (15.300 sprite) tick del
 mondo p99 ≈ 0,6 ms, massimo < 1 ms, disegno 640×480 ≈ 1 ms.
+
+Presentazione (issue #20, `docs/rendering.md`): `drawView()` disegna come `draw()` (stessi strati,
+ordine, ordinamento dello strato 5, catene, ombre, palette) attraverso una trasformazione di vista
+(zoom, risoluzione interna, posizioni sub-pixel ed estrapolate con `motion()`), `viewOrigin()`
+decide l'origine della vista. Leggono soltanto lo stato: la simulazione non cambia. `draw()`
+resta il percorso dell'immagine originale (1×, zoom 1, senza movimento fluido).
 
 ## 7. Per l'oracolo differenziale (issue #11)
 

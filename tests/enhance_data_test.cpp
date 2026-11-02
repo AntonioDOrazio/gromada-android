@@ -7,12 +7,16 @@
 //    is identical after the run, and the pictures do change (lights and contact shadows found);
 //  - the light sources come from the data: they include the shots of the flagman's laser and
 //    their explosions (classes and act_fight/act_death chains), not smoke or wrecks;
-//  - cost per frame of the two passes at 1x (printed; generous bound against regressions).
+//  - cost per frame of the two passes at 1x (printed; generous bound against regressions);
+//  - the pipeline of issue #20 (drawView: internal resolution, zoom, smooth motion, bands on
+//    threads): effects off = the picture without settings; effects on = the same picture for
+//    1 band, 4 bands on 4 threads and 3 bands run in reverse order; simulation untouched.
 #include "game/engine.hpp"
 #include "game/savestate.hpp"
 #include "test.hpp"
 
 #include <chrono>
+#include <thread>
 
 using namespace gromada;
 using namespace gromada::game;
@@ -52,6 +56,47 @@ struct Run {
         std::vector<script::Value> v(a);
         return e->callBuiltin(id, v).value_or(script::Value{0}).toInt();
     }
+    // drawView instead of draw() (issue #20): internal resolution k, zoom, bands.
+    struct ViewMode {
+        int k = 1;
+        double zoom = 1;
+        int bands = 1;
+        bool threaded = false, reversed = false;
+    };
+    std::optional<ViewMode> view;
+    void setView(ViewMode m) {
+        view = m;
+        px.assign(static_cast<std::size_t>(640 * m.k) * static_cast<std::size_t>(480 * m.k), RGBA8{});
+    }
+    void drawViewFrame(int n) {
+        const ViewMode& m = *view;
+        ViewRequest r;
+        r.width = 640 / m.zoom;
+        r.height = 480 / m.zoom;
+        r.centerX = e->camera().x + 320;
+        r.centerY = e->camera().y + 240;
+        r.scale = m.k * m.zoom;
+        r.screenScale = m.k;
+        r.renderClock = e->clock() + (n % 4) * 2.0;   // between the ticks: extrapolated positions
+        r.extrapolate = true;
+        r.fitMap = true;
+        r.threads = m.bands;
+        if (m.bands > 1)
+            r.parallel = [&](int count, const std::function<void(int)>& fn) {
+                if (m.threaded) {
+                    std::vector<std::thread> th;
+                    for (int i = 0; i < count; ++i) th.emplace_back(fn, i);
+                    for (auto& t : th) t.join();
+                } else if (m.reversed) {
+                    for (int i = count - 1; i >= 0; --i) fn(i);
+                } else {
+                    for (int i = 0; i < count; ++i) fn(i);
+                }
+            };
+        const auto o = e->viewOrigin(r);
+        e->drawView(FramebufferRef{px.data(), 480 * m.k, 640 * m.k}, r, o.value_or(ViewOrigin{static_cast<double>(e->camera().x),
+                                                                                               static_cast<double>(e->camera().y)}));
+    }
     // One frame: fire at a point 300 px to the right of the flagman from frame 10.
     std::uint64_t frame(int n) {
         OriginalInput in;
@@ -65,7 +110,8 @@ struct Run {
         e->beginFrame(n % 3 ? 17 : 16);
         e->setInput(in);
         e->tactWorld();
-        e->draw(FramebufferRef{px.data(), 480, 640});
+        if (view) drawViewFrame(n);
+        else e->draw(FramebufferRef{px.data(), 480, 640});
         e->tactPlayers();
         e->tactGroupAi();
         e->updateCamera();
@@ -116,6 +162,38 @@ void scene(const GameResources& res, int level, int x, int y, int frames, bool e
     CHECK(p50 < 8.0);   // the 120 fps frame; the measured cost is ~0.5-1 ms on a desktop (docs/enhancements.md)
 }
 
+// The same through drawView (issue #20 pipeline) at internal resolution k and zoom.
+void viewScene(const GameResources& res, int k, double zoom, int frames) {
+    std::fprintf(stderr, "drawView: level 19 battle, %dx, zoom %.1f, %d frames\n", k, zoom, frames);
+    const int x = 4520, y = 1720;
+    Run plain(res, 19, x, y, false), off(res, 19, x, y, true), on1(res, 19, x, y, true), on4(res, 19, x, y, true), on3(res, 19, x, y, true);
+    plain.setView({k, zoom, 1});
+    off.setView({k, zoom, 4, true});
+    on1.setView({k, zoom, 1});
+    on4.setView({k, zoom, 4, true});
+    on3.setView({k, zoom, 3, false, true});
+    on1.fx = on4.fx = on3.fx = {2, 2};
+    int sameOff = 0, sameBands = 0, changed = 0, maxLights = 0, maxOccluders = 0;
+    for (int n = 0; n < frames; ++n) {
+        const auto h = plain.frame(n);
+        sameOff += off.frame(n) == h;
+        const auto h1 = on1.frame(n);
+        sameBands += on4.frame(n) == h1 && on3.frame(n) == h1;
+        changed += h1 != h;
+        const auto st = on1.e->enhancements()->stats();
+        maxLights = std::max(maxLights, st.lights);
+        maxOccluders = std::max(maxOccluders, st.occluders);
+    }
+    CHECK_EQ(sameOff, frames);     // off: bit-identical
+    CHECK_EQ(sameBands, frames);   // the same picture for any band split and thread
+    CHECK(changed > frames / 2);
+    CHECK(maxOccluders > 10 && maxLights > 0);
+    CHECK(on1.state() == plain.state());
+    CHECK(on4.state() == plain.state());
+    std::fprintf(stderr, "  off identical %d/%d, bands identical %d/%d, changed %d (max %d occluders, %d lights)\n", sameOff, frames,
+                 sameBands, frames, changed, maxOccluders, maxLights);
+}
+
 // The emitter classification from the data includes the laser chain of the flagman's head
 // (HEPHEST: act_fight -> muzzle light -> laser ray -> laser blast), and per-frame emission
 // keeps smoke dark.
@@ -149,5 +227,8 @@ int main() {
     emitters(res);
     scene(res, 19, 4520, 1720, 240, true);   // battle: laser tanks, turrets, explosions
     scene(res, 8, 1400, 1450, 90, false);    // base with buildings
+    viewScene(res, 1, 1.0, 90);
+    viewScene(res, 2, 1.5, 90);
+    viewScene(res, 2, 0.5, 60);
     return gromada_test::finish();
 }

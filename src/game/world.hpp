@@ -99,6 +99,8 @@ public:
     std::vector<Group>& groups() noexcept { return m_groups; }
     [[nodiscard]] const std::vector<Sprite*>& gridUnits() const noexcept { return m_gridUnits; }
     std::vector<SoundRequest>& sounds() noexcept { return m_sounds; }
+    [[nodiscard]] int windStrength() const noexcept { return m_windStrength; }
+    [[nodiscard]] int windDir() const noexcept { return m_windDir; }
     void setWind(int strength, int dir) noexcept { m_windStrength = static_cast<std::int16_t>(strength); m_windDir = static_cast<std::uint8_t>(dir); }
     void setCamera(int x, int y, int w, int h) noexcept { m_camX = x; m_camY = y; m_viewW = w; m_viewH = h; }
     InputRecord& localInput() noexcept { return m_localInput; }
@@ -879,6 +881,32 @@ public:
         return found;
     }
     Sprite* askPlace(Sprite& s, int x, int y, int z) { return checkMove(s, x, y, z, false); }
+    // What physics() would decide for a move to (x, y, z): refused at the map limits
+    // (path_limit) or by checkMove (path_block; crushable objects do not stop it), without any
+    // side effect. For the drawing (issue #20: no extrapolation of a move that will not happen).
+    bool moveWouldBlock(const Sprite& s, int x, int y, int z) {
+        if (x < 0 || y < 0 || x > m_mapW || y > m_mapH) return true;
+        const VidInfo& v = vidOf(s);
+        if (v.category != cat::Vehicle && v.category != cat::Avia && v.category != cat::Cannon) return false;
+        if (z < 0) return true;
+        if (v.flags & vf::NoCollision) return false;
+        bool blocked = false;
+        forEachInRect(x - v.halfX, y - v.halfY, x + v.halfX, y + v.halfY, [&](Sprite* o) {
+            const VidInfo& ov = vidOf(*o);
+            if ((ov.flags & vf::NoCollision) || o->action == act::death) return true;
+            if (std::abs(x - o->x) >= ov.halfX + v.halfX || std::abs(y - o->y) >= ov.halfY + v.halfY) return true;
+            if ((ov.category & cat::Terrain) && z == 0) {
+                if (!(ov.collisionMask & v.collisionMask)) { blocked = true; return false; }
+            } else if (o != &s) {
+                if (std::abs(2 * (z - o->z) - ov.sizeZ + v.sizeZ) < ov.absSizeZ + v.absSizeZ && !(ov.flags & vf::CrushOnCollision)) {
+                    blocked = true;
+                    return false;
+                }
+            }
+            return true;
+        });
+        return blocked;
+    }
 
     // 0x40e7b0: AskPlace that reports the sprite itself outside the map.
     Sprite* askPlaceBounded(Sprite& s, int x, int y) {

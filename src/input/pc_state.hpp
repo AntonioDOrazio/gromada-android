@@ -51,6 +51,16 @@ struct PcState {
     // frame carries the order. `moveTarget` may lie outside the screen.
     bool moveOrder = false;
     Vec2 moveTarget;
+    // Direct scheme (issue #19): the point the turret aims at and the right button attacks,
+    // i.e. the mouse point of the input record. It may lie outside the screen (weapon range
+    // beyond the border, a locked target off screen); `cursor` is then where the reticle is
+    // drawn, on the border along the same line. A move order still wins for its frame.
+    // Recomputed every frame (not save-state data).
+    bool hasAimTarget = false;
+    Vec2 aimTarget;
+    // Direct scheme with the reticle turned off (core option): the session draws no cursor
+    // while the pad aims. Presentation only, recomputed every frame.
+    bool cursorHidden = false;
     // False when the cursor must not scroll the view at the screen edges: touch (a tap near
     // the border is not a request to scroll) and the aim point of the direct scheme.
     bool edgeScroll = true;
@@ -80,6 +90,10 @@ struct RawInput {
 
     std::uint16_t buttons = 0;          // bit = pad::*
     Vec2 leftStick, rightStick;         // -1..1, y grows downwards
+    // Analog pressure of L2/R2, 0..1 (RETRO_DEVICE_INDEX_ANALOG_BUTTON); 0 on pads without
+    // analog triggers, where the digital bits pad::L2/R2 count as full pressure. Read only
+    // for the current frame (never through the previous input): not save-state data.
+    float l2 = 0, r2 = 0;
     std::array<Touch, 4> touches{};     // fingers on the screen, first one down first
     int touchCount = 0;
     Vec2 mouseDelta;                    // relative motion in screen pixels

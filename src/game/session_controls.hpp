@@ -23,13 +23,41 @@ namespace gromada::game {
 struct ControlsFrame {
     std::optional<input::Vec2> player;       // flagman on the output (ground point)
     std::vector<input::AimTarget> targets;   // attackable units, on the output
-    float weaponRange = 0;                   // game metric; 0 = unknown
+    float weaponRange = 0;                   // world px, Euclidean (PlayerAim); 0 = unknown
+    input::WeaponKind weaponKind = input::WeaponKind::Unknown; // lock corridor (issue #19)
+    float aimLift = 0;                       // 80 for anti-aircraft weapons (input::FrameInfo)
     std::uint8_t weaponMask = 0x0F;          // bit k: weapon k+1 selectable
     int currentWeapon = -1;                  // 0..3, -1 = no flagman / not a level
     // for logs and tests
     int flagmanX = 0, flagmanY = 0;          // world
     int targetCount = 0, targetHp = 0;       // all hostile units of the map
+    std::vector<int> targetHps;              // hp of each target (same order as `targets`)
 };
+
+// The weapon's kind for the invisible lock (issue #19), from the data of what its head fires
+// (PlayerAim::FireChain), never from names. Player heads (vid: fire chain) and their kind:
+//   HEPHEST 88 / HELIOS 202 laser, PHOEBUS 89 / THUNDER 203 cannon, VULCAN 208 machine gun,
+//   PHOENIX 207 flamethrower: a projectile, flat (speedY < speedX) or instantaneous -> Direct
+//   HAIL 91: projectile with speedY 400 >= speedX 200 (high arc)                     -> Ballistic
+//   ZEPHYR 90 (CannonMissile), HARPY 204 (AviaMissile, homing), HYDRA 209: flags 1   -> Missile
+//   PLUTO 210: ballistic projectile whose impact (act_death) leaves a Mine           -> MineLayer
+//   CHAOS 205: a Mine straight from the head, flags 4 (fixed head)                   -> FixedMineLayer
+inline input::WeaponKind weaponKind(const PlayerAim::FireChain& c) {
+    using K = input::WeaponKind;
+    constexpr int Projectile = 5, CannonMissile = 6, Mine = 13, AviaMissile = 15; // cls::* (game/sprite.hpp)
+    constexpr int Instant = 9999;                                                  // vid speed "instantaneous"
+    if (c.headNvid < 0)
+        return K::Unknown;
+    if (c.classes & (1u << Mine))
+        return (c.flags & 4) ? K::FixedMineLayer : K::MineLayer;
+    if ((c.flags & 1) || (c.classes & ((1u << CannonMissile) | (1u << AviaMissile))))
+        return K::Missile;
+    if (c.projectileClass < 0)
+        return K::Unknown;
+    if (c.projectileClass == Projectile && c.projectileSpeedX < Instant && c.projectileSpeedY >= c.projectileSpeedX)
+        return K::Ballistic;
+    return K::Direct;
+}
 
 struct WeaponSlots {
     std::uint8_t mask = 0;   // bit k: weapon[k] set and (k == 0 or ammunition left)
@@ -78,10 +106,17 @@ public:
     void reset() { m_valid = false; m_hold = false; }
     void setParams(const Params& p) { m_params = p; }
     [[nodiscard]] bool holding() const noexcept { return m_hold; }
+    // The view's corner with sub-pixel precision while `cam` is still where update() put it
+    // (issue #20: smooth scrolling); nullopt when another rule moved it since.
+    [[nodiscard]] std::optional<std::pair<float, float>> position(const Camera& cam) const noexcept {
+        if (!m_valid || cam.x != m_lastX || cam.y != m_lastY) return std::nullopt;
+        return std::pair{m_fx, m_fy};
+    }
 
     // `userScroll`: the player is scrolling with the cursor at the screen edge; following
     // pauses until the player's vehicle moves again.
-    void update(Camera& cam, int px, int py, float dt, bool userScroll) {
+    // (px, py): the player, world pixels (sub-pixel where it is drawn with smooth motion).
+    void update(Camera& cam, float px, float py, float dt, bool userScroll) {
         const Params& p = m_params;
         if (!m_valid || cam.x != m_lastX || cam.y != m_lastY) {
             m_fx = static_cast<float>(cam.x);
@@ -112,8 +147,8 @@ public:
                 const float excess = e > dz ? e - dz : e < -dz ? e + dz : 0.0f;
                 pos += excess * k;
             };
-            axis(m_fx, w, static_cast<float>(px) + leadX);
-            axis(m_fy, h, static_cast<float>(py) + leadY);
+            axis(m_fx, w, px + leadX);
+            axis(m_fy, h, py + leadY);
         }
         cam.x = static_cast<int>(std::lround(m_fx));
         cam.y = static_cast<int>(std::lround(m_fy));
@@ -125,7 +160,8 @@ private:
     Params m_params;
     bool m_valid = false, m_hold = false;
     float m_fx = 0, m_fy = 0, m_vx = 0, m_vy = 0;
-    int m_px = 0, m_py = 0, m_lastX = 0, m_lastY = 0;
+    float m_px = 0, m_py = 0;   // the player at the last update
+    int m_lastX = 0, m_lastY = 0;
 };
 
 // Selected weapon, shown for `duration` seconds after it changes (or is requested) when the

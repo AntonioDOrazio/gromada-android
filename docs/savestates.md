@@ -21,14 +21,14 @@ lo stesso audio (musica ed effetti compresi) dell'esecuzione originale, byte per
 Ogni classe serializzata dichiara `friend struct SaveStateAccess;` (una riga): il codice dello
 stato vive nei file sopra, non dentro le classi.
 
-## Formato (versione 3)
+## Formato (versione 5)
 
 Intestazione di 64 byte, poi i chunk:
 
 | offset | campo |
 |---|---|
 | 0 | magic `GRMDSTAT` |
-| 8 | versione (`SaveStateVersion` = 3; la 2 non aveva la macchina da scrivere a tempo di gioco della issue #13, la 1 lo scheduler dei suoni e gli effetti prima delle issue #15–#18: non si caricano più) |
+| 8 | versione (`SaveStateVersion` = 5; la 4 non aveva lo zoom della vista della issue #20, la 3 i tasti dello zoom del mapper della issue #19, la 2 la macchina da scrivere a tempo di gioco della issue #13, la 1 lo scheduler dei suoni e gli effetti prima delle issue #15–#18: non si caricano più) |
 | 12 | dimensione dell'intestazione (64) |
 | 16 | dimensione del payload (u64) |
 | 24 | checksum a 64 bit di intestazione (con questo campo a zero) e payload |
@@ -40,7 +40,7 @@ Intestazione di 64 byte, poi i chunk:
 | chunk | contenuto |
 |---|---|
 | `CORE` | resto dei campioni audio del core (`audioDebt`, conta quanti campioni escono a ogni frame), chunk `INP2` del mapper dell'input (anche schema diretto: direzione di mira, ordini di movimento, richiesta d'arma in attesa) |
-| `SESS` | sessione: mappa e storia, operazioni in coda (`Load`/`PlayAVI`/...), record di input, contesto e tasti "stantii", schermo degli script, orologi reali (`m_realMs` dà i semi di `Load`), contatori di frame e tick, demo in riproduzione (nome, posizione) e in registrazione (dati), filmato in corso (nome, orologio), scheduler degli effetti (`SoundChannels`: 32 richieste, 8 canali con buffer caricato, suono e tempo, file dell'ultimo `PlayWAV`) e i buffer DirectSound del `MixerSink` (suono, voce del mixer, pan, volume), file `PlayWAV` e slot N caricato, orologio del `Message()` della barra di stato, telecamera che segue il giocatore e indicatore dell'arma (issue #16), playlist CD e volumi degli script, `ScrollLock`, barra di stato, cursore, celle portate tra le mappe (`m_carry`), costruttore del record (coda dei tasti, ripetizione), file aperti dagli script (nome, contenuto, posizione), oggetti di menu (con `lastTact` e `SoundDone`: animano sull'orologio del gioco) e orologi dell'UI, lista menu, stato del menu, testi, identità dello script, immagine in uscita (solo durante una demo) |
+| `SESS` | sessione: mappa e storia, operazioni in coda (`Load`/`PlayAVI`/...), record di input, contesto e tasti "stantii", schermo degli script, orologi reali (`m_realMs` dà i semi di `Load`), contatori di frame e tick, demo in riproduzione (nome, posizione) e in registrazione (dati), filmato in corso (nome, orologio), scheduler degli effetti (`SoundChannels`: 32 richieste, 8 canali con buffer caricato, suono e tempo, file dell'ultimo `PlayWAV`) e i buffer DirectSound del `MixerSink` (suono, voce del mixer, pan, volume), file `PlayWAV` e slot N caricato, orologio del `Message()` della barra di stato, telecamera che segue il giocatore (posizioni sub-pixel) e indicatore dell'arma (issue #16), zoom del giocatore e zoom applicato, ancora dello zoom e mappa schermo ↔ mondo dell'ultima immagine (issue #20), playlist CD e volumi degli script, `ScrollLock`, barra di stato, cursore, celle portate tra le mappe (`m_carry`), costruttore del record (coda dei tasti, ripetizione), file aperti dagli script (nome, contenuto, posizione), oggetti di menu (con `lastTact` e `SoundDone`: animano sull'orologio del gioco) e orologi dell'UI, lista menu, stato del menu, testi, identità dello script, immagine in uscita (solo durante una demo, alla dimensione logica: un pixel per blocco k × k della risoluzione interna) |
 | `SVM1` | interprete (se la mappa ha uno script): identità (hash del codice compilato, numero di celle e di `iff`), 2048 celle, blocchi della memoria emulata (codice patchato, buffer dei globali stringa, buffer statici di concatenazione e `_itoa`, risultati delle builtin), buffer di ogni cella stringa, contatori `iff`, stringhe internate, registri |
 | `ENGN` | motore: **tutto il pool degli sprite** (anche gli slot morti) con i collegamenti come indici di slot (liste per strato, catene dei sotto-oggetti, `next`/`prev`), pile dei comandi (anche oltre `count`, l'originale ci rientra con `act_cyclecommand`), oggetti, liste libere nell'ordine, numero di id assegnati, celle della griglia **nel loro ordine** (l'ordine decide quale bersaglio si trova per primo), `gridUnits`, giocatori, squadre, suoni in attesa, orologio, pausa, RNG, vento, puntatore "orfano" degli Effect2, `m_lastDist`; i vid modificati a run time (`SetVid`, `MaxUnit`, conteggi, arma del flagman, palette alternative condivise), le armi (`VID_WEAPONRANGE`); intestazione della mappa, camera, scroll, `ScreenEffects` (effetto, livello, ultimo passo, rettangolo della finestra; le due immagini solo mentre è attivo `eff_openwindow`), gamma, cadenza della torretta (`m_turretClock`, `m_turretSteps`), `m_frameLocked`, `m_effectsDone`, luci, iteratori di `FirstUnit`/`NextUnit`, cache delle palette |
 | `MIX1` | mixer: playlist, traccia corrente, posizione esatta (frame sorgente con la parte frazionaria), voci degli effetti (suono, posizione, guadagni, id, loop, pausa), prossimo id, posizione della colonna sonora del filmato |
@@ -192,6 +192,31 @@ Procedura (anche per chi fonde un branch e vede fallire la compilazione):
 - I file su disco non tornano indietro con lo stato.
 - Uno stato salvato a 16:9 si carica anche a 4:3 (e viceversa): la vista prende la dimensione
   attuale dal frame successivo; il determinismo vale a parità di opzioni.
+
+## Campi della issue #20 (versione 5)
+
+- Sessione: `m_zoom` (zoom del giocatore, `ViewZoom`), `m_viewZoom` (zoom applicato: transizione
+  verso 1 sotto i menu), `m_anchor` (centro sub-pixel della vista mentre lo zoom cambia, con la
+  camera a cui vale), `m_mapX/m_mapY/m_mapZoom` (mappa schermo ↔ mondo dell'ultima immagine: il
+  record del frame successivo mappa il cursore attraverso di essa, quindi decide la simulazione).
+  Lo zoom è del giocatore, ma muove la camera del motore e quindi il punto di mondo del cursore:
+  per il determinismo (rewind, run-ahead) va nello stato.
+- `FollowCamera::m_px/m_py` ora `float` (posizione disegnata del giocatore, sub-pixel).
+- Non sono stato (configurazione o per frame): risoluzione interna, movimento fluido, thread,
+  immagine a risoluzione interna e istantanee della composizione, lista degli sprite disegnati,
+  gancio `WorldPass`; nel motore `m_effectView` (uscita di `drawScreenEffects`), lista di disegno
+  e memoria di lavoro delle bande. Il movimento fluido è una funzione pura dello stato e
+  dell'orologio: non ha storia da salvare.
+- L'immagine salvata durante le demo è alla dimensione logica qualunque sia k, quindi la
+  dimensione massima dello stato non cambia.
+
+## Campi della issue #19 (versione 4)
+
+- Salvato: `Mapper::m_zoomArmed` (schema a puntamento: A/B premuti nel livello e ancora tenuti,
+  cioè quelli che fanno zoom; un tasto tenuto dal menu non zooma).
+- Non salvati, perché ricalcolati a ogni frame: `PcState::aimTarget`, `hasAimTarget`,
+  `cursorHidden` (come `zoomRate`), i grilletti analogici `RawInput::l2/r2` (letti solo nel
+  frame corrente, mai dall'input precedente), le nuove impostazioni del mapper (opzioni core).
 
 ## Campi della issue #13 (versione 3)
 

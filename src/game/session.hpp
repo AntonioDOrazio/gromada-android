@@ -25,6 +25,12 @@
 // 640 x 480 centred while a demo plays, like the original). Menus and texts are laid out by
 // the scripts for their screen (640x480, or 800x600 after SetGraphMode(2)) and drawn centred
 // in the view; the status bar is anchored to the bottom of the view.
+// Presentation (issue #20, docs/rendering.md): on the levels the view can be zoomed (the
+// engine's camera then covers output / zoom world pixels), the world can be drawn at k times
+// the logical size (internal resolution: the output is k x 640 x 480 or k x 854 x 480) and
+// with positions extrapolated between the ticks (smooth motion). Menus, texts, the status bar
+// and the cursor are never zoomed: they are drawn on the logical picture and scaled by k.
+// With k = 1, zoom 1 and smooth motion off the picture is the one of the original renderer.
 //
 // Header-only. Depends on the engine contract (not on any engine implementation), script/,
 // ui/, input/, demo/, engine/audio.hpp (Mixer).
@@ -38,6 +44,8 @@
 #include "game/session_controls.hpp"
 #include "game/session_input.hpp"
 #include "game/session_ui.hpp"
+#include "game/render_view.hpp"
+#include "game/view_zoom.hpp"
 #include "input/cursor_file.hpp"
 #include "input/mapper.hpp"
 #include "script/script.hpp"
@@ -70,11 +78,30 @@ struct SessionConfig {
     std::filesystem::path saveDir;   // writable: save1..5, fw.ini, demos (empty: memory only)
     int outputWidth = 640, outputHeight = 480;
     bool render = true;              // false: no drawing (tests, fast demo checks)
+    int renderScale = 1;             // internal resolution 1..4 (issue #20)
+    bool smoothMotion = false;       // positions extrapolated between ticks (issue #20)
+    int renderThreads = 0;           // threads drawing the picture (0 = automatic)
     // Declare every known builtin before compiling. Only for synthetic scripts that do not
     // include maps\header.ini: the game's scripts declare their builtins themselves, and
     // declaring them twice exceeds the original compiler's 128-function limit.
     bool predeclareBuiltins = false;
     std::function<void(LogLevel, std::string_view)> log;
+};
+
+// The world as drawn this frame, before menus, texts, the status bar and Effect() (issue #20):
+// the hook of the graphics enhancement passes (lights, ambient occlusion...). `world` may be
+// modified in place. Framebuffer pixel = (world point - origin) * scale; screen sprites at
+// screen point * screenScale. Not called while a movie plays or on frames that are not drawn.
+struct WorldPass {
+    FramebufferRef world;               // internal resolution: k x view size
+    ViewOrigin origin;                  // world point at the framebuffer's (0, 0)
+    double scale = 1;                   // framebuffer pixels per world pixel (zoom x k)
+    double screenScale = 1;             // framebuffer pixels per logical screen pixel (k)
+    double zoom = 1;
+    int renderScale = 1;
+    double renderClock = 0;             // game clock (ms) of the picture
+    bool extrapolated = false;          // positions are extrapolated to renderClock
+    std::span<const DrawnSprite> sprites;   // in drawing order
 };
 
 class Session final : public script::ScriptHost {
@@ -90,7 +117,10 @@ public:
           m_loader{m_config.gameDir} {
         if (const int n = m_files.seed())
             log(LogLevel::Info, std::format("save directory {}: copied {} original file(s)", m_config.saveDir.string(), n));
+        m_renderScale = std::clamp(m_config.renderScale, 1, MaxRenderScale);
+        m_smooth = m_config.smoothMotion;
         setOutputSize(m_config.outputWidth, m_config.outputHeight);
+        m_viewSupported = m_engine && m_engine->viewOrigin(ViewRequest{}).has_value();
         m_builtins = script::knownBuiltinRegistry();
         m_sfxSink.mixer = m_mixer;
         m_sfxSink.session = this;
@@ -115,13 +145,54 @@ public:
     // Loads the first map (maps\logo.map, or a level like the original's command line).
     void start(std::string_view map = DefaultStartMap) { loadMap(std::string{map}); }
 
+    // Logical size of the output (640 x 480 or 854 x 480): the space of the cursor, touch,
+    // menus and texts. The picture is renderScale() times larger.
     void setOutputSize(int width, int height) {
         m_outW = std::clamp(width, 320, 1024);
         m_outH = std::clamp(height, 240, 768);
         m_view.assign(static_cast<std::size_t>(m_outW) * m_outH, RGBA8{{0, 0, 0}, 255});
-        m_xrgb.assign(static_cast<std::size_t>(m_outW) * m_outH, 0);
+        m_xrgb.assign(static_cast<std::size_t>(m_outW) * m_outH * m_renderScale * m_renderScale, 0);
         updateView();
     }
+    // ---- presentation (issue #20, docs/rendering.md) ----------------------------------------
+    static constexpr int MaxRenderScale = 4;
+    // Internal resolution: the picture is k x the logical size (world drawn at that size with
+    // sub-pixel positions, menus/texts/cursor scaled with nearest neighbour).
+    void setRenderScale(int k) {
+        k = std::clamp(k, 1, MaxRenderScale);
+        if (k == m_renderScale) return;
+        m_renderScale = k;
+        setOutputSize(m_outW, m_outH);
+    }
+    [[nodiscard]] int renderScale() const noexcept { return m_renderScale; }
+    // Smooth motion: sprites, projectiles and the camera drawn where they are at the moment of
+    // the picture, between the ticks of the simulation (Engine::drawView, extrapolation).
+    void setSmoothMotion(bool on) { m_smooth = on; }
+    // Threads that draw the picture in bands (0 = automatic: the cores minus one, at most 4).
+    // The picture does not depend on it.
+    void setRenderThreads(int n) {
+        if (n != m_config.renderThreads) m_pool.reset();
+        m_config.renderThreads = n;
+    }
+    [[nodiscard]] bool smoothMotion() const noexcept { return m_smooth; }
+    // The player's zoom (0.5..2): applied on the levels, integrated from PcState::zoomRate.
+    void setZoom(float zoom) { m_zoom.zoom = std::clamp(zoom, ViewZoom::Min, ViewZoom::Max); }
+    [[nodiscard]] float zoom() const noexcept { return m_zoom.zoom; }
+    // The zoom the view has now: the player's zoom on the levels, eased to 1 while a menu or
+    // a briefing is shown over the level; 1 on the menu maps, in demos and with engines
+    // without drawView().
+    [[nodiscard]] double effectiveZoom() const { return zoomable() ? m_viewZoom : 1.0; }
+    // Output (logical) <-> world mapping of the last picture: the cursor points at
+    // mapping().worldX/Y(cursor).
+    [[nodiscard]] ScreenMapping mapping() const {
+        if (identityView() && m_mapLoaded) {
+            const auto& cam = m_engine->camera();
+            return {static_cast<double>(m_viewX), static_cast<double>(cam.x), static_cast<double>(cam.y), 1.0};
+        }
+        return {static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom, 1e-3};
+    }
+    // Hook of the graphics enhancements (issue #21): called after the world is drawn.
+    void setWorldPass(std::function<void(const WorldPass&)> pass) { m_worldPass = std::move(pass); }
     // Core option volumes (0..1), multiplied by the script's SetMusic/SetSound.
     void setVolumes(float music, float sfx) {
         m_coreMusic = std::clamp(music, 0.0f, 1.0f);
@@ -156,7 +227,7 @@ public:
                 std::ranges::fill(m_xrgb, 0u);
                 return; // the skipping press does not reach the game
             }
-            m_movies->blit(m_xrgb.data(), m_outW, m_outH, static_cast<std::size_t>(m_outW));
+            m_movies->blit(m_xrgb.data(), width(), height(), static_cast<std::size_t>(width()));
             return;
         }
 
@@ -184,20 +255,27 @@ public:
             m_msDebt += dtMs;
             const int elapsed = static_cast<int>(m_msDebt + 1e-6);
             m_msDebt -= elapsed;
-            const auto vp = viewPointer(pc);
+            // The record maps the cursor through the picture the player is looking at.
             const auto& cam = m_engine->camera();
-            const OriginalInput rec = m_inputBuilder.build(pc, vp.first, vp.second, cam.x, cam.y, static_cast<float>(dtSeconds),
-                                                           m_ui.hasMenu() ? InputRecordBuilder::View{} : InputRecordBuilder::View{m_viewW, m_outH});
+            const OriginalInput rec = m_inputBuilder.build(pc, mapping(), static_cast<float>(dtSeconds),
+                                                           m_ui.hasMenu() ? InputRecordBuilder::View{} : InputRecordBuilder::View{cam.width, cam.height});
+            // Menus are never zoomed: they get the cursor on the output.
+            m_menuPointer = identityView() ? std::pair<int, int>{rec.mouseScreenX, rec.mouseScreenY} : viewPointer(pc);
+            if (zoomable())
+                m_zoom.integrate(pc.zoomRate, static_cast<float>(dtSeconds));
             tick(rec, elapsed, dtSeconds);
         }
         runOps();
     }
 
     // ---- output ---------------------------------------------------------------------------------
+    // The picture: logical size x renderScale().
     [[nodiscard]] const std::uint32_t* xrgb() const noexcept { return m_xrgb.data(); }
-    [[nodiscard]] int width() const noexcept { return m_outW; }
-    [[nodiscard]] int height() const noexcept { return m_outH; }
-    [[nodiscard]] std::size_t pitch() const noexcept { return static_cast<std::size_t>(m_outW) * 4; }
+    [[nodiscard]] int width() const noexcept { return m_outW * m_renderScale; }
+    [[nodiscard]] int height() const noexcept { return m_outH * m_renderScale; }
+    [[nodiscard]] std::size_t pitch() const noexcept { return static_cast<std::size_t>(width()) * 4; }
+    [[nodiscard]] int logicalWidth() const noexcept { return m_outW; }
+    [[nodiscard]] int logicalHeight() const noexcept { return m_outH; }
     [[nodiscard]] bool exitRequested() const noexcept { return m_exit; }
     void clearExit() { m_exit = false; }
 
@@ -222,8 +300,8 @@ public:
         const auto x = m_engine->callBuiltin(109, unit), y = m_engine->callBuiltin(110, unit);
         if (!x || !y)
             return std::nullopt;
-        const auto& cam = m_engine->camera();
-        return input::Vec2{static_cast<float>(x->toInt() - cam.x + m_viewX), static_cast<float>(y->toInt() - cam.y)};
+        const ScreenMapping m = mapping();
+        return input::Vec2{static_cast<float>(m.outputX(x->toInt())), static_cast<float>(m.outputY(y->toInt()))};
     }
 
     // Everything the input mapper needs about the game this frame (issue #16): player and
@@ -234,18 +312,21 @@ public:
         if (!m_engine || !m_mapLoaded || m_demo)
             return c;
         const PlayerAim aim = m_engine->playerAim();
-        const auto& cam = m_engine->camera();
+        const ScreenMapping m = mapping();
         const auto toScreen = [&](int x, int y) {
-            return input::Vec2{static_cast<float>(x - cam.x + m_viewX), static_cast<float>(y - cam.y)};
+            return input::Vec2{static_cast<float>(m.outputX(x)), static_cast<float>(m.outputY(y))};
         };
         if (aim.valid) {
             c.player = toScreen(aim.flagmanX, aim.flagmanY);
             c.flagmanX = aim.flagmanX;
             c.flagmanY = aim.flagmanY;
-            c.weaponRange = static_cast<float>(aim.weaponRange);
+            c.weaponRange = static_cast<float>(aim.weaponRange);   // world px: the mapper scales it by FrameInfo::zoom
+            c.weaponKind = weaponKind(aim.fire);
+            c.aimLift = (aim.fire.targetCategory & 0x08) ? 80.0f : 0.0f; // cat::Avia (act_coor_attack 0x411c41)
             for (const auto& t : aim.targets) {
                 c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
                 c.targetHp += t.hp;
+                c.targetHps.push_back(t.hp);
             }
             c.targetCount = static_cast<int>(aim.targets.size());
         } else {
@@ -473,9 +554,8 @@ private:
         if (!m_mapLoaded)
             return;
         ++m_ticks;
-        auto& cam = m_engine->camera();
-        cam.width = m_viewW;
-        cam.height = m_outH;
+        updateViewZoom(dtSeconds);
+        applyViewSize();
 
         m_engine->beginFrame(elapsedMs);
         m_engine->setInput(rec);
@@ -487,8 +567,9 @@ private:
         runScript();
 
         FramebufferRef fb{m_view.data(), m_outH, m_viewW};
+        const ViewRequest req = presentView();   // also when not drawing: the cursor mapping
         if (m_config.render) {
-            m_engine->draw(fb);
+            drawWorld(req, fb);
             drawUi(fb);
         }
         // Positional sounds are computed while the sprites tick (0x409a20, inside World::Tact):
@@ -503,8 +584,8 @@ private:
 
         // Menu update: screen coordinates of the script's screen.
         const auto [ox, oy] = menuOrigin();
-        const int mx = m_demo ? rec.mouseScreenX : rec.mouseScreenX - ox;
-        const int my = m_demo ? rec.mouseScreenY : rec.mouseScreenY - oy;
+        const int mx = m_demo ? rec.mouseScreenX : m_menuPointer.first - ox;
+        const int my = m_demo ? rec.mouseScreenY : m_menuPointer.second - oy;
         std::uint16_t bits = rec.bits;
         if (m_ui.updateMenu(mx, my, bits)) {
             rec.bits = bits;
@@ -518,7 +599,9 @@ private:
         playSounds();
 
         if (m_config.render) {
+            if (m_hiRes) m_composite.beforeEffects(fb);
             m_engine->drawScreenEffects(fb);
+            if (m_hiRes) m_composite.afterEffects(fb, m_engine->screenEffectView());
             drawTextEntryCandidate(fb);
             drawWeaponHud(fb, dtSeconds);
             present();
@@ -614,6 +697,11 @@ private:
         auto& cam = m_engine->camera();
         cam.width = m_viewW;
         cam.height = m_outH;
+        m_anchor = {};
+        m_viewZoom = 1;
+        m_mapX = cam.x;
+        m_mapY = cam.y;
+        m_mapZoom = 1;
         m_map = name;
         m_history.push_back(name);
         m_inputBuilder.clear();
@@ -1141,10 +1229,19 @@ private:
         const auto x = m_engine->callBuiltin(109, unit), y = m_engine->callBuiltin(110, unit);
         if (!x || !y)
             return;
+        // With smooth motion the camera aims at the player where it is drawn: its target then
+        // moves continuously instead of in the steps of the player's ticks.
+        float px = static_cast<float>(x->toInt()), py = static_cast<float>(y->toInt());
+        if (m_smooth)
+            if (const auto d = m_engine->drawnPosition(f->toInt(), m_engine->clock() + m_msDebt)) {
+                px = static_cast<float>((*d)[0]);
+                py = static_cast<float>((*d)[1]);
+            }
         constexpr int band = 5; // the engine's edge scroll (0x415e8d)
-        const bool edge = rec.mouseScreenX <= band || rec.mouseScreenY <= band || rec.mouseScreenX >= m_viewW - 1 - band ||
-                          rec.mouseScreenY >= m_outH - 1 - band;
-        m_follow.update(m_engine->camera(), x->toInt(), y->toInt(), static_cast<float>(dt), edge);
+        const auto& cam = m_engine->camera();   // the engine's view: zoomed on the levels
+        const bool edge = rec.mouseScreenX <= band || rec.mouseScreenY <= band || rec.mouseScreenX >= cam.width - 1 - band ||
+                          rec.mouseScreenY >= cam.height - 1 - band;
+        m_follow.update(m_engine->camera(), px, py, static_cast<float>(dt), edge);
     }
 
     // The selected weapon for a moment after a change, when the status bar is hidden.
@@ -1194,12 +1291,22 @@ private:
     }
 
     void present() {
-        std::ranges::fill(m_xrgb, 0u);
-        for (int y = 0; y < m_outH; ++y) {
-            const RGBA8* src = m_view.data() + static_cast<std::size_t>(y) * m_viewW;
-            std::uint32_t* dst = m_xrgb.data() + static_cast<std::size_t>(y) * m_outW + m_viewX;
-            for (int x = 0; x < m_viewW; ++x)
-                dst[x] = (std::uint32_t{src[x].r} << 16) | (std::uint32_t{src[x].g} << 8) | src[x].b;
+        if (!m_hiRes) {
+            std::ranges::fill(m_xrgb, 0u);
+            for (int y = 0; y < m_outH; ++y)
+                view::toXrgb(m_view.data() + static_cast<std::size_t>(y) * m_viewW,
+                             m_xrgb.data() + static_cast<std::size_t>(y) * m_outW + m_viewX, m_viewW);
+        } else {
+            const int k = m_renderScale, w = m_viewW * k, h = m_outH * k;
+            if (m_viewX > 0)   // pillarbox (demos in 16:9)
+                for (int y = 0; y < h; ++y) {
+                    std::uint32_t* row = m_xrgb.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(width());
+                    std::fill(row, row + m_viewX * k, 0u);
+                    std::fill(row + m_viewX * k + w, row + width(), 0u);
+                }
+            m_composite.compose(FramebufferRef{m_world.data(), h, w}, FramebufferRef{m_view.data(), m_outH, m_viewW},
+                                m_xrgb.data() + static_cast<std::size_t>(m_viewX) * k, static_cast<std::size_t>(width()),
+                                m_pool ? m_pool->threads() : 1, parallel());
         }
         drawCursor();
     }
@@ -1207,13 +1314,21 @@ private:
     void drawCursor() {
         if (!m_cursors || m_cursorType < 0)
             return;
+        if (m_pc.cursorHidden && !m_demo && !m_ui.hasMenu() && !m_movieActive)
+            return; // direct scheme without the reticle (issue #19)
         int x = m_pc.cursorX(), y = m_pc.cursorY();
         input::CursorShape shape = input::CursorShape::Arrow;
         if (m_demo) {
             x = m_input.mouseScreenX + m_viewX;
             y = m_input.mouseScreenY;
         } else if (!m_ui.hasMenu() && m_mapLoaded) {
-            switch (m_engine->cursorAt(x - m_viewX, y)) {
+            // the world point under the cursor, as a screen point of the engine's camera
+            const ScreenMapping m = identityView() ? ScreenMapping{static_cast<double>(m_viewX), static_cast<double>(m_engine->camera().x),
+                                                                   static_cast<double>(m_engine->camera().y), 1.0}
+                                                   : ScreenMapping{static_cast<double>(m_viewX), m_mapX, m_mapY, m_mapZoom, 1e-3};
+            const int sx = static_cast<int>(std::floor(m.worldX(m_pc.cursor.x) + m.snap)) - m_engine->camera().x;
+            const int sy = static_cast<int>(std::floor(m.worldY(m_pc.cursor.y) + m.snap)) - m_engine->camera().y;
+            switch (m_engine->cursorAt(sx, sy)) {
             case CursorKind::Arrow: shape = input::CursorShape::Arrow; break;
             case CursorKind::Move: shape = input::CursorShape::Move; break;
             case CursorKind::Fight: shape = input::CursorShape::Fight; break;
@@ -1221,7 +1336,146 @@ private:
             case CursorKind::Cycle: shape = input::CursorShape::Cycle; break;
             }
         }
-        input::drawCursor(m_cursors->get(shape), x, y, m_xrgb.data(), m_outW, m_outH, pitch());
+        view::drawCursorScaled(m_cursors->get(shape), x, y, m_renderScale, m_xrgb.data(), width(), height(), pitch());
+    }
+
+    // ---- presentation (issue #20) -------------------------------------------------------------
+    [[nodiscard]] static bool isLevelMap(std::string_view map) {
+        for (std::size_t i = 0; i + 7 <= map.size(); ++i) {
+            std::string_view part = map.substr(i, 7);
+            if (std::ranges::equal(part, std::string_view{"levels\\"}, [](char a, char b) {
+                    return std::tolower(static_cast<unsigned char>(a)) == b || (a == '/' && b == '\\');
+                }))
+                return true;
+        }
+        return false;
+    }
+    // The zoom applies to the levels' world (menus and briefings drawn over it are not zoomed),
+    // not to the menu maps, demos or engines without drawView().
+    [[nodiscard]] bool zoomable() const { return m_viewSupported && m_mapLoaded && !m_demo && isLevelMap(m_map); }
+    // The original picture: no zoom, no internal resolution, no smooth motion, no enhancement.
+    [[nodiscard]] bool identityView() const {
+        return m_renderScale == 1 && !m_smooth && !m_worldPass && effectiveZoom() == 1.0;
+    }
+
+    // Applied zoom: towards the player's zoom, or 1 while a menu is shown (exponential in the
+    // zoom's log, time constant ZoomEaseSeconds).
+    static constexpr double ZoomEaseSeconds = 0.12;
+    void updateViewZoom(double dt) {
+        const double target = zoomable() && !m_ui.hasMenu() ? m_zoom.zoom : 1.0;
+        if (!zoomable() || dt <= 0) {
+            if (!zoomable()) m_viewZoom = 1;
+            return;
+        }
+        const double l = std::log(m_viewZoom / target) * std::exp(-dt / ZoomEaseSeconds);
+        m_viewZoom = std::abs(l) < 2e-3 ? target : target * std::exp(l);
+    }
+
+    // The engine's view in world pixels: output / zoom on the levels, kept centred where it
+    // was when the zoom changes (a sub-pixel anchor, so a continuous zoom does not drift).
+    void applyViewSize() {
+        auto& cam = m_engine->camera();
+        if (!zoomable()) {
+            cam.width = m_viewW;
+            cam.height = m_outH;
+            return;
+        }
+        const double z = m_viewZoom;
+        const int w = std::max(16, static_cast<int>(std::lround(m_viewW / z)));
+        const int h = std::max(16, static_cast<int>(std::lround(m_outH / z)));
+        if (cam.width == w && cam.height == h)
+            return;
+        if (!(m_anchor.valid && cam.x == m_anchor.camX && cam.y == m_anchor.camY)) {
+            m_anchor.x = cam.x + cam.width / 2.0;
+            m_anchor.y = cam.y + cam.height / 2.0;
+        }
+        cam.width = w;
+        cam.height = h;
+        cam.x = static_cast<int>(std::lround(m_anchor.x - w / 2.0));
+        cam.y = static_cast<int>(std::lround(m_anchor.y - h / 2.0));
+        m_anchor.camX = cam.x;
+        m_anchor.camY = cam.y;
+        m_anchor.valid = true;
+    }
+
+    // The view of this frame: what is drawn, and the mapping of the cursor until the next one.
+    ViewRequest presentView() {
+        const auto& cam = m_engine->camera();
+        ViewRequest r;
+        const double z = effectiveZoom();
+        const int k = m_renderScale;
+        r.width = m_viewW / z;
+        r.height = m_outH / z;
+        r.scale = z * k;
+        r.screenScale = k;
+        r.renderClock = m_engine->clock() + (m_demo ? 0.0 : m_msDebt);
+        r.extrapolate = m_smooth;
+        r.fitMap = zoomable();
+        // centre: the follow camera's sub-pixel position, the zoom anchor, or the camera
+        std::optional<std::pair<float, float>> follow;
+        if (m_followOn && !m_demo && m_smooth)
+            follow = m_follow.position(cam);
+        if (follow) {
+            r.centerX = follow->first + cam.width / 2.0;
+            r.centerY = follow->second + cam.height / 2.0;
+        } else if (m_anchor.valid && cam.x == m_anchor.camX && cam.y == m_anchor.camY && zoomable()) {
+            r.centerX = m_anchor.x;
+            r.centerY = m_anchor.y;
+        } else {
+            r.centerX = cam.x + cam.width / 2.0;
+            r.centerY = cam.y + cam.height / 2.0;
+        }
+        std::optional<ViewOrigin> o;
+        if (!identityView() && m_viewSupported)
+            o = m_engine->viewOrigin(r);
+        if (!o)
+            o = ViewOrigin{static_cast<double>(cam.x), static_cast<double>(cam.y)};
+        m_mapX = o->x;
+        m_mapY = o->y;
+        m_mapZoom = z;
+        return r;
+    }
+
+    [[nodiscard]] std::function<void(int, const std::function<void(int)>&)> parallel() {
+        return [this](int n, const std::function<void(int)>& fn) {
+            if (m_pool) m_pool->run(n, fn);
+            else for (int i = 0; i < n; ++i) fn(i);
+        };
+    }
+
+    // The world of this frame into the logical picture `fb` (and, k > 1, into m_world).
+    void drawWorld(ViewRequest req, FramebufferRef fb) {
+        m_hiRes = false;
+        if (identityView()) {
+            m_engine->draw(fb);
+            return;
+        }
+        const int k = m_renderScale;
+        FramebufferRef target = fb;
+        if (k > 1) {
+            m_world.resize(static_cast<std::size_t>(m_viewW) * k * static_cast<std::size_t>(m_outH) * k);
+            target = FramebufferRef{m_world.data(), m_outH * k, m_viewW * k};
+            m_hiRes = true;
+        }
+        if (m_worldPass) req.drawn = &m_drawn;
+        if (!m_pool) m_pool = std::make_unique<view::WorkerPool>(view::WorkerPool::autoThreads(m_config.renderThreads));
+        req.threads = m_pool->threads();
+        req.parallel = parallel();
+        bool drawn = m_viewSupported && m_engine->drawView(target, req, ViewOrigin{m_mapX, m_mapY});
+        if (!drawn) {   // engines without drawView: the original picture, scaled
+            m_engine->draw(fb);
+            m_drawn.clear();
+            if (k > 1)
+                for (int y = 0; y < m_outH * k; ++y)
+                    for (int x = 0; x < m_viewW * k; ++x) target[y, x] = fb[y / k, x / k];
+        }
+        if (m_worldPass) {
+            WorldPass pass{target, ViewOrigin{m_mapX, m_mapY}, req.scale, req.screenScale, m_mapZoom, k, req.renderClock,
+                           req.extrapolate && drawn, m_drawn};
+            m_worldPass(pass);
+        }
+        if (k > 1)
+            m_composite.beginLogical(target, fb, k);
     }
 
     // ---- state ----------------------------------------------------------------------------------------
@@ -1254,7 +1508,7 @@ private:
     bool m_staleLeft = false, m_staleRight = false, m_prevAnyDown = false;
 
     std::vector<RGBA8> m_view;      // m_viewW x m_outH, what the engine and the menus draw on
-    std::vector<std::uint32_t> m_xrgb;
+    std::vector<std::uint32_t> m_xrgb; // the picture: (m_outW x m_outH) x m_renderScale
     int m_outW = 640, m_outH = 480, m_viewW = 640, m_viewX = 0;
     int m_screenW = 640, m_screenH = 480; // script screen (SetGraphMode)
     bool m_demoView = false;
@@ -1288,6 +1542,23 @@ private:
     bool m_scrollLock = false, m_stateBar = false, m_detail = true, m_exit = false;
     int m_cursorType = 0, m_net = 0;
     std::size_t m_scriptErrors = 0, m_warnings = 0, m_unknown = 0;
+
+    // ---- presentation (issue #20, docs/rendering.md) ----
+    // State (save states): the zoom, its anchor and the cursor mapping of the last picture
+    // (the record of the next frame maps the cursor through it).
+    ViewZoom m_zoom;
+    double m_viewZoom = 1;   // applied zoom (eases to 1 under menus)
+    struct ZoomAnchor { double x = 0, y = 0; int camX = 0, camY = 0; bool valid = false; } m_anchor;
+    double m_mapX = 0, m_mapY = 0, m_mapZoom = 1;
+    // Configuration (core options) and per-frame scratch, not state.
+    int m_renderScale = 1;
+    bool m_smooth = false, m_viewSupported = false, m_hiRes = false;
+    std::pair<int, int> m_menuPointer{0, 0};   // cursor of this frame for the menus (logical)
+    std::vector<RGBA8> m_world;                // k > 1: the world at internal resolution
+    view::HiResComposite m_composite;
+    std::vector<DrawnSprite> m_drawn;
+    std::function<void(const WorldPass&)> m_worldPass;
+    std::unique_ptr<view::WorkerPool> m_pool;   // threads drawing the picture (created on first use)
 };
 
 } // namespace gromada::game

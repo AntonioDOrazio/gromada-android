@@ -97,39 +97,75 @@ Limiti noti: le piattaforme dello strato 3 (es. il centro servizi) sono terreno 
 degli edifici vicini; gli sprite con l'ombra già disegnata la sommano all'alone (voluto, è più
 scuro solo al piede).
 
-## 4. Costi misurati
+## 4. Dove si agganciano (le due vie di disegno)
 
-Desktop (Xeon virtuale condiviso, build Release, `engine_run --fx L,S --fx-scale 2`, miglior
-tempo su 15 ripetizioni dello stesso frame; un ciclo minimo che scurisce 640×480 pixel costa qui
-0,31 ms = 1,0 ns/pixel). La 2× è il mondo disegnato a 1× e ingrandito, con gli effetti calcolati
-a 2× (quello che riceverà l'aggancio con la risoluzione interna di #20).
+- **Via originale** (`GameEngine::draw`, usata dalla sessione solo con vista identica: 1×, zoom 1,
+  movimento fluido spento): `ground()` prima dello strato 5 e `finish()` dopo l'ultimo, sul
+  framebuffer 640/854×480.
+- **Pipeline della #20** (`GameEngine::drawView`: risoluzione interna k, zoom, movimento fluido;
+  lista di disegno rasterizzata a bande orizzontali su più thread). Gli oggetti entrano negli
+  effetti con la posizione **disegnata** (sub-pixel ed estrapolata a `renderClock`, la stessa del
+  rasterizzatore) e la trasformazione dell'immagine (`origine`, scala = zoom × k). Ogni passaggio
+  è diviso in due: la **preparazione** (accumulo sulla griglia, un thread) avviene mentre si
+  costruisce la lista, e nella lista entra un comando `view::BandPass` che **applica** il
+  passaggio alle righe di ogni banda al suo posto nell'ordine del pittore: l'ombra di contatto
+  tra i comandi degli strati 0–4 e quelli dello strato 5, le luci dopo l'ultimo. Un pixel riceve
+  lo stesso valore qualunque sia la divisione in bande: immagine identica per ogni numero di
+  thread (`enhance_data_test`: 1 banda, 4 bande su 4 thread, 3 bande in ordine inverso). Il gancio
+  `WorldPass` della sessione resta libero (lo usa la diagnostica `GROMADA_TRACE_VIEW`): gli
+  effetti non ne hanno bisogno, e così l'ombra va sotto gli oggetti e le luci girano sui thread
+  del rasterizzatore.
 
-| scena | occlusori / luci | ombre 1× | luci 1× | **totale 1×** | ombre 2× | luci 2× | **totale 2×** |
-|---|---|---|---|---|---|---|---|
-| battaglia, livello 19 (laser, esplosioni) | 268 / 79 | 0,35 ms | 0,51 ms | **0,86 ms** | 0,89 ms | 1,42 ms | **2,31 ms** |
-| stessa battaglia, 2 s dopo | 270 / 38 | 0,36 | 0,30 | **0,66** | 0,90 | 0,87 | **1,77** |
-| base con edifici, livello 8 | 117 / 0 | 0,29 | 0 | **0,29** | 0,80 | 0 | **0,80** |
-| foresta, livello 5 | 202 / 12 | 0,37 | 0,05 | **0,42** | 0,93 | 0,15 | **1,09** |
+## 5. Costi misurati
 
-Su tutta la battaglia (279 frame a 1×, livelli intense/marcate): media 0,80 ms, p99 1,15 ms,
-massimo 1,84 ms; il disegno del mondo nello stesso frame costa 1,5 ms. I costi non dipendono dal
-livello scelto (cambiano solo le costanti). Quasi tutto è l'applicazione per pixel (ombre
-~2,4 ns/px a 1× e 1,7 a 2×, luci ~4,7 e 3,9 ns/px): scala con i pixel toccati, non con il numero
-di sorgenti.
+Desktop: Xeon virtuale condiviso (lo stesso core di `docs/rendering.md` §8), build Release.
 
-**Stima sul Nova** (QCS8550, Cortex-X3 3,2 GHz sul thread di RetroArch): codice intero scalare,
-prestazioni per core paragonabili a questo desktop; con margine termico ×1,0–1,5:
+**Nel gioco** (`render_bench --level 19 --fx 2,2`: sessione completa a 120 fps, movimento fluido,
+il giocatore che si muove e spara; 400 frame dopo 300 di riscaldamento; ~240 oggetti a terra
+visibili (435 a zoom 0,5) e ~50 sorgenti di luce; tempo CPU di un thread). "Effetti" = il costo
+dei due passaggi misurato da loro stessi (preparazione + bande); "frame" = `Session::runFrame`
+senza → con gli effetti. Il livello scelto (tenui…intense) non cambia il costo.
 
-- 1×, 120 Hz (8,33 ms per frame): **≤ 1,3 ms** nel caso peggiore misurato (16% del frame);
-  ampiamente nel budget insieme al disegno del mondo (~1,5–2,3 ms) e alla simulazione (≤ 0,5 ms).
-- 2×: **≤ 3,5 ms** nel caso peggiore, da sommare al disegno del mondo a 2× di #20: a 120 Hz è
-  stretto, a 60 Hz (16,7 ms) non è un problema.
-- Flip 2 (SD865, Cortex-A77 2,84 GHz, 60 Hz): ×1,6–2,2 rispetto al desktop, ≤ 1,9 ms a 1×.
+| | zoom 0,5 | zoom 1 | zoom 2 |
+|---|---|---|---|
+| 1× (640×480): effetti | 0,91 ms | 0,67 ms | 0,63 ms |
+| 1×: frame senza → con | 3,28 → 4,29 ms | 2,11 → 2,87 ms | 2,23 → 2,87 ms |
+| 2× (1280×960): effetti | 1,74 ms | 1,73 ms | 2,05 ms |
+| 2×: frame senza → con | 5,32 → 7,09 ms | 5,75 → 7,55 ms | 6,70 → 8,67 ms |
+| 2×, 2 thread (tempo reale): frame senza → con | | 4,00 → 5,17 ms | 4,24 → 5,47 ms |
 
-Memoria: griglie ~1,2 MB (indipendenti dalla risoluzione), cache dei nuclei ≤ 32 MB (tipico
-2–8 MB), cache dell'emissione trascurabile.
+Le bande (la parte che va sui thread) sono l'80% del costo degli effetti a 1× e il 92% a 2×; il
+resto (accumulo sulle griglie, cache) è su un thread. Zoom indietro = più oggetti a terra (più
+ombre); zoom avanti = luci più grandi in pixel (più luci). Le griglie hanno celle in pixel di
+mondo × scala: la loro dimensione non cresce con k, il costo per pixel sì.
 
-## 5. Effetti valutati: software o GPU
+**Su un frame fisso** (`engine_run --fx L,S --fx-scale 2`, miglior tempo su 15 ripetizioni; la 2×
+qui è il mondo a 1× ingrandito con gli effetti a 2×, cioè quello che riceve il passaggio):
+
+| scena | occlusori / luci | 1× | 2× |
+|---|---|---|---|
+| battaglia, livello 19 (laser, esplosioni) | 268 / 79 | 0,86 ms (ombre 0,35, luci 0,51) | 2,31 ms (0,89 + 1,42) |
+| stessa battaglia, 2 s dopo | 270 / 38 | 0,66 ms | 1,77 ms |
+| base con edifici, livello 8 | 117 / 0 | 0,29 ms | 0,80 ms |
+| foresta, livello 5 | 202 / 12 | 0,42 ms | 1,09 ms |
+
+Costo per pixel visitato: ombre ~2,4 ns a 1× e 1,7 a 2×, luci ~4,7 e 3,9 ns (un ciclo minimo che
+scurisce un pixel costa qui 1,0 ns). Il primo frame di un livello costruisce al più 24 nuclei
+d'ombra (~0,5 ms in più nei primi 2–3 frame).
+
+**Stima sul Nova** (QCS8550; con i fattori di `docs/rendering.md` §8: un Cortex-X3 è 1,4–1,7 volte
+più lento di questo core, con 4 thread la parte parallela va su ~3 "X3 equivalenti"):
+
+| Nova, livello 19, effetti normali | 1 thread | 4 thread (automatico) | con l'immagine della #20 (4 thread) | 120 Hz (8,3 ms) |
+|---|---|---|---|---|
+| 1× | 0,9–1,7 ms | ~0,5–0,8 ms | ~2–2,8 ms | sì |
+| 2× (consigliato) | 2,4–3,4 ms | ~1,1–1,3 ms | ~5,1–5,8 ms | **sì** |
+| 3× | ~5–7 ms | ~2–2,5 ms | ~8–9 ms | no sui livelli pesanti: 60 Hz, o effetti spenti |
+
+Flip 2 (SD865, 60 Hz, 16,7 ms): stanno nel budget a 1× e 2×. Memoria: griglie ~1,2 MB
+(indipendenti da k), cache dei nuclei ≤ 32 MB (tipico 2–8 MB).
+
+## 6. Effetti valutati: software o GPU
 
 | effetto | software (CPU) | GPU (Vulkan `hw_render`) | scelta |
 |---|---|---|---|
@@ -142,7 +178,7 @@ Memoria: griglie ~1,2 MB (indipendenti dalla risoluzione), cache dei nuclei ≤ 
 | distorsione di calore (esplosioni, lava, lanciafiamme) | caro (rilettura sfalsata per pixel) | gratis | fase 3 GPU |
 | tinta giorno/notte, nebbia | economico | gratis | non richiesto: cambia l'arte; di notte le luci dinamiche renderebbero molto |
 
-## 6. Proposta GPU (libretro `hw_render` Vulkan), in fasi
+## 7. Proposta GPU (libretro `hw_render` Vulkan), in fasi
 
 Il core oggi produce un framebuffer XRGB8888 e RetroArch applica Vulkan e gli shader slang. Il
 passaggio al rendering nativo (`RETRO_ENVIRONMENT_SET_HW_RENDER` con
@@ -175,7 +211,7 @@ Raccomandazione: restare in fase 0; misurare #20 sul Nova a 2×–4× e passare 
 disegno a risoluzione interna non sta nel budget. La fase 2 ha senso solo se si vogliono 4× e zoom
 fluido a 120 Hz.
 
-## 7. Dati e verifiche
+## 8. Dati e verifiche
 
 - Dati usati: classi e categorie dei vid, `childNvid` di `act_fight`/`act_death`, `sizeX/Y/Z`,
   `z_layer` (lo strato 5), flag `ZeroZ`, formato e pixel dei frame (palette originale, non quella
@@ -188,15 +224,19 @@ fluido a 120 Hz.
   livello 8, motori con lo stesso input: impostazioni assenti / presenti ma spente / accese e poi
   spente → **hash dei frame identici** a quelli del motore senza effetti; con tutto acceso lo
   **stato del motore** (byte del save state) è identico; la catena del laser della Kassandra è tra
-  le sorgenti.
+  le sorgenti. Lo stesso con `drawView` a 1× zoom 1, 2× zoom 1,5 e 2× zoom 0,5 (movimento fluido,
+  posizioni estrapolate): spenti = identici; accesi = immagine identica con 1, 4 (su thread) e 3
+  bande (in ordine inverso); simulazione intatta.
 - `tests/enhance_e2e.sh` (con i dati, 60 e 120 fps): il core tramite `tools/harness` riproduce la
   demo 1 per 1500 frame; opzioni predefinite e opzioni esplicitamente "disattivate" danno gli
   stessi hash di video e audio frame per frame; con luci e ombre accese il video cambia
   (1496 frame su 1500) e l'audio resta identico in tutti i frame (stessa simulazione).
-- Screenshot prima/dopo verificati (a 1× e 2×): battaglia con laser ed esplosioni (livello 19),
+- Screenshot prima/dopo verificati (a 1× e 2×, e con la pipeline della #20 a 2× con zoom 0,5,
+  1,5 e 2): battaglia con laser ed esplosioni (livello 19),
   base con edifici (livello 8), foresta (livello 5), le armi della Kassandra (lanciafiamme,
   cannone, missili, mitragliatrice) sul livello 1:
 
       engine_run --level 19 --spawn 4520,1720 --input "300:fire:300,-100:8000" \
                  --shots 2500,4500 --fx 2,2 --fx-scale 2
       engine_run --level 8 --spawn 1400,1450 --shots 1000 --fx 2,2 --fx-scale 2
+      render_bench --level 19 --scale 2 --zoom 2 --threads 2 --fx 2,2 --shots 330,370   # con la #20

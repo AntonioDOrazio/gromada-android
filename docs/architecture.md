@@ -78,10 +78,40 @@ si usano invece i passi registrati nella demo.
   `ViewZoom`, lo integra col tempo reale del frame (0,5×–2×, esponenziale) e lo passa alla pipeline
   di rendering, che decide la vista (dimensione = uscita / zoom) e la conversione schermo ↔ mondo
   per cursore, touch e record di input.
+  Per i controlli (issue #19) la pipeline deve anche: convertire allo stesso modo
+  `PcState::aimTarget` (il punto mirato dello schema diretto, anche fuori schermo: è il punto del
+  mouse nel record, come `moveTarget`), dare a `input::FrameInfo::zoom` lo zoom corrente (pixel
+  di schermo per pixel di mondo: scala gittata e corridoi di aggancio) e posizionare giocatore e
+  bersagli di `ControlsFrame` in pixel di schermo dopo lo zoom. Con lo zoom a 1 tutto coincide.
+  Fatto nella #20: `aimTarget` passa per `ScreenMapping` nello stesso ramo di `moveTarget`
+  (`InputRecordBuilder::build(pc, mapping, …)`), `f.zoom = s.mapping().zoom` in `runSession`,
+  giocatore e bersagli convertiti con `mapping()`; `weaponRange`/`aimLift` in pixel di mondo.
 - **Risoluzione interna** e **interpolazione** delle posizioni: solo nel disegno. La simulazione,
   le demo, l'oracolo e i save state non cambiano.
 - Agenti: controlli (`zoomRate`, schemi), pipeline di rendering (`ViewZoom` → vista, risoluzione
   interna, interpolazione), miglioramenti grafici (passaggio separato sopra la pipeline).
+
+### Pipeline di rendering (issue #20, dettagli in `docs/rendering.md`)
+
+- Contratto: ganci opzionali di `Engine` con implementazione vuota (compatibili):
+  `viewOrigin(ViewRequest)`, `drawView(fb, ViewRequest, ViewOrigin)`, `screenEffectView()`,
+  `drawnPosition(unit, clock)`. Senza di essi la sessione usa `camera()` e `draw()` (zoom 1).
+- Spazi: **logico** (640/854 × 480: cursore, touch, input mapper, menu, testi, barra di stato),
+  **vista del motore** (`camera()`: uscita / zoom pixel di mondo sui livelli), **immagine**
+  (k × logico, `Session::width/height`; l'input mapper usa `logicalWidth/Height`).
+- Lo zoom si applica al mondo dei livelli (`maps\levels\…`), torna a 1 sotto i menu e i briefing,
+  mai nelle demo; i menu non sono mai zoomati. `ControlsFrame`: giocatore e bersagli in pixel
+  logici dell'uscita, convertiti con la mappa schermo ↔ mondo dell'ultima immagine; gittata in
+  pixel di mondo (il mapper la scala con `FrameInfo::zoom`).
+- Opzioni core: `gromada_render_scale` (1x–4x), `gromada_smooth` (movimento fluido, attivo),
+  `gromada_zoom` (zoom impostato), `gromada_render_threads` (automatico).
+- **Gancio per i miglioramenti grafici (#21)**: `Session::setWorldPass(fn)`; `fn(const WorldPass&)`
+  riceve a ogni frame disegnato, prima di menu/testi/barra/effetti, il mondo a risoluzione interna
+  (modificabile), la trasformazione (`origin`, `scale`, `screenScale`, `zoom`, `renderScale`),
+  `renderClock` e la lista `DrawnSprite` (id, vid, classe, categoria, posizione disegnata
+  sub-pixel/estrapolata nel mondo e nell'immagine, rettangolo del corpo) in ordine di disegno.
+  Va collegato in `startSession()` di `src/gromada_libretro.cpp` (un solo gancio: se serve più di
+  un passaggio, una funzione che li chiama in ordine). Vedi `docs/rendering.md` §6.
 
 ## Miglioramenti grafici (ondata 4, issue #21)
 
@@ -90,34 +120,27 @@ Effetti opzionali di sola presentazione, spenti di default: luci dinamiche e omb
 `src/game/enhance/` (`analysis.hpp`, `enhance.hpp`): dipende solo da `core/` e `libgromada/`;
 riceve gli sprite come `enhance::DrawItem`, non conosce `Sprite` né `World`.
 
-**Aggancio** (in `GameEngine::draw`, `src/game/engine.hpp`; attivo solo se un effetto è acceso,
-altrimenti `draw()` è identico bit per bit):
+**Agganci** (in `src/game/engine.hpp`; attivi solo se un effetto è acceso, altrimenti il disegno
+e la lista di disegno sono identici bit per bit):
 
-1. `enh = activeEnhancer()` all'inizio (nullptr se le impostazioni mancano o sono tutte spente),
-   `enh->begin()`;
-2. ogni sprite disegnato, catene comprese, passa da `put()`: `drawSprite` più
-   `enh->drawn.push_back(fxItem(s))`;
-3. **dopo gli strati 0–4, prima dello strato 5** (gli sprite visibili e ordinati di `m_sorted`):
-   `enh->ground(fb, fxView, occluders)` scurisce il terreno al piede degli oggetti, che poi gli si
-   disegnano sopra;
-4. **dopo l'ultimo strato**: `enh->finish(fb, fxView)` (luci). Poi la sessione disegna menu,
-   testi, barra di stato, `Effect()` e cursore: gli effetti non li toccano.
+- `GameEngine::draw` (via originale, vista identica): `enh = activeEnhancer()`, `enh->begin()`;
+  ogni sprite disegnato (catene comprese) passa da `put()` → `enh->drawn`; **dopo gli strati 0–4,
+  prima dello strato 5** `enh->ground(fb, fxView, occluders)` con gli sprite di `m_sorted`;
+  **dopo l'ultimo strato** `enh->finish(fb, fxView)` (luci).
+- `GameEngine::drawView` (pipeline della #20): gli stessi punti, ma nella **lista di disegno**:
+  `drawSpriteView` aggiunge l'oggetto a `enh->drawn` con la posizione disegnata (sub-pixel,
+  estrapolata); quando la lista arriva allo strato 5 `enh->prepareGround(...)` accumula le ombre e
+  la lista riceve un comando `view::BandPass` (`Enhancer::groundBand`); a fine lista
+  `prepareLights(...)` e il comando `Enhancer::lightBand`. `view::drawBand` esegue i comandi
+  `BandPass` al loro posto, sulle righe della banda: l'immagine è la stessa per ogni numero di
+  bande/thread. Trasformazione: `enhance::View{origine, scala = zoom × k}`.
+- Poi la sessione disegna menu, testi, barra di stato, `Effect()` e cursore: gli effetti non li
+  toccano. Il gancio `Session::setWorldPass` (#20) non è usato dagli effetti e resta libero.
 
-Dati dell'aggancio: il framebuffer del mondo (qualunque risoluzione), `enhance::View`
-{`originX`, `originY`, `scale`} con pixel = (mondo − origine) × scala (oggi la camera e 1), e per
-ogni sprite un `DrawItem` {frame disegnato, x, y, z di mondo, nvid, classe, categoria,
-`sizeX/Y/Z`, `ZeroZ`}. Le impostazioni (`enhance::Settings`) appartengono al chiamante:
-`GameEngine::setEnhancements(const Settings*)`, lette a ogni `draw()`; il core le legge dalle
+Le impostazioni (`enhance::Settings`) appartengono al chiamante:
+`GameEngine::setEnhancements(const Settings*)`, lette a ogni disegno; il core le legge dalle
 opzioni `gromada_fx_lights` e `gromada_fx_contact_shadows` e passa il puntatore in
 `makeGameEngine()`. Nessuna modifica al contratto `game::Engine` né alla sessione.
 
-**Al merge con la pipeline di rendering (#20)**: `fxView` diventa la camera interpolata e la
-scala (risoluzione interna × zoom); `fxItem()` deve usare le stesse posizioni (interpolate) di
-`drawSprite`; se il mondo si disegna su un framebuffer a risoluzione interna, `ground()` e
-`finish()` vanno chiamati su quel framebuffer (prima dello strato 5 e dopo l'ultimo), prima della
-riduzione all'uscita e della UI. Le griglie degli effetti hanno celle in pixel di mondo × scala,
-quindi la loro dimensione non cresce con la risoluzione; il costo per pixel sì (misure in
-`docs/enhancements.md` §4).
-
 Stato: le impostazioni e le cache (`m_fxSettings`, `m_fx`) non sono stato del gioco e non vanno
-nei save state (`GameEngine` 3184 → 3200 byte nel controllo di `savestate_session.hpp`).
+nei save state (`GameEngine` +16 byte nel controllo di `savestate_session.hpp`: 3264 → 3280).

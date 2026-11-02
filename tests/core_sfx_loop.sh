@@ -16,12 +16,12 @@ scale=1
 case " $* " in *gromada_fps=120*) scale=2 ;; esac
 f() { echo $(( $1 * scale )); }
 r() { echo "$(f $1)-$(f $2)"; }
-# Every 120 frames from the start of the level: cursor to one side for 20 frames, then A
-# (left click = move order).
+# Every 120 frames from the start of the level: cursor to one side for 20 frames, then L2
+# (left click = move order; A zooms in the level since issue #19).
 moves=""; i=0
 for start in 1320 1440 1560 1680 1800 1920 2040; do
     case $((i % 4)) in 0) st="1,0" ;; 1) st="0,1" ;; 2) st="-1,0" ;; 3) st="0,-1" ;; esac
-    moves="$moves lstick=$st@$(r $start $((start + 20))) btn=a@$(r $((start + 24)) $((start + 26)))"
+    moves="$moves lstick=$st@$(r $start $((start + 20))) btn=l2@$(r $((start + 24)) $((start + 26)))"
     i=$((i + 1))
 done
 "$harness" "$core" "$GROMADA_DATA/gromada.exe" $(f 2200) "$out/run" savedir="$out/save" \
