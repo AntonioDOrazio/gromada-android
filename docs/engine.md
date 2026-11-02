@@ -217,7 +217,9 @@ a 0 differenze salvo le divergenze di §5.
   della torretta);
   opzioni `--step 8.333`, `--input "500:move:300,60;4000:fire:150,140:1500;7000:up:0,0:2000"`
   (coordinate relative al flagman), `--weapon 90` (testa iniziale), `--spawn x,y`,
-  `--camera x,y --no-player`, `ENGINE_TRACE_DAMAGE=1` per stampare ogni `act_damage`.
+  `--camera x,y --no-player`, `ENGINE_TRACE_DAMAGE=1` per stampare ogni `act_damage`;
+  `--fx L,S [--fx-scale N]` screenshot prima/dopo e costo dei miglioramenti grafici (issue #21,
+  `docs/enhancements.md`).
 
 Prestazioni misurate (desktop condiviso, build Release): livello 19 (15.300 sprite) tick del
 mondo p99 ≈ 0,6 ms, massimo < 1 ms, disegno 640×480 ≈ 1 ms.

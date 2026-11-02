@@ -112,3 +112,35 @@ si usano invece i passi registrati nella demo.
   sub-pixel/estrapolata nel mondo e nell'immagine, rettangolo del corpo) in ordine di disegno.
   Va collegato in `startSession()` di `src/gromada_libretro.cpp` (un solo gancio: se serve più di
   un passaggio, una funzione che li chiama in ordine). Vedi `docs/rendering.md` §6.
+
+## Miglioramenti grafici (ondata 4, issue #21)
+
+Effetti opzionali di sola presentazione, spenti di default: luci dinamiche e ombre di contatto
+(progetto, costi e proposta GPU in `docs/enhancements.md`). Modulo header-only
+`src/game/enhance/` (`analysis.hpp`, `enhance.hpp`): dipende solo da `core/` e `libgromada/`;
+riceve gli sprite come `enhance::DrawItem`, non conosce `Sprite` né `World`.
+
+**Agganci** (in `src/game/engine.hpp`; attivi solo se un effetto è acceso, altrimenti il disegno
+e la lista di disegno sono identici bit per bit):
+
+- `GameEngine::draw` (via originale, vista identica): `enh = activeEnhancer()`, `enh->begin()`;
+  ogni sprite disegnato (catene comprese) passa da `put()` → `enh->drawn`; **dopo gli strati 0–4,
+  prima dello strato 5** `enh->ground(fb, fxView, occluders)` con gli sprite di `m_sorted`;
+  **dopo l'ultimo strato** `enh->finish(fb, fxView)` (luci).
+- `GameEngine::drawView` (pipeline della #20): gli stessi punti, ma nella **lista di disegno**:
+  `drawSpriteView` aggiunge l'oggetto a `enh->drawn` con la posizione disegnata (sub-pixel,
+  estrapolata); quando la lista arriva allo strato 5 `enh->prepareGround(...)` accumula le ombre e
+  la lista riceve un comando `view::BandPass` (`Enhancer::groundBand`); a fine lista
+  `prepareLights(...)` e il comando `Enhancer::lightBand`. `view::drawBand` esegue i comandi
+  `BandPass` al loro posto, sulle righe della banda: l'immagine è la stessa per ogni numero di
+  bande/thread. Trasformazione: `enhance::View{origine, scala = zoom × k}`.
+- Poi la sessione disegna menu, testi, barra di stato, `Effect()` e cursore: gli effetti non li
+  toccano. Il gancio `Session::setWorldPass` (#20) non è usato dagli effetti e resta libero.
+
+Le impostazioni (`enhance::Settings`) appartengono al chiamante:
+`GameEngine::setEnhancements(const Settings*)`, lette a ogni disegno; il core le legge dalle
+opzioni `gromada_fx_lights` e `gromada_fx_contact_shadows` e passa il puntatore in
+`makeGameEngine()`. Nessuna modifica al contratto `game::Engine` né alla sessione.
+
+Stato: le impostazioni e le cache (`m_fxSettings`, `m_fx`) non sono stato del gioco e non vanno
+nei save state (`GameEngine` +16 byte nel controllo di `savestate_session.hpp`: 3264 → 3280).

@@ -18,6 +18,8 @@ Il core **non contiene asset del gioco**: legge i file della tua copia originale
   di sprite, proiettili e camera tra un tick e l'altro, a 60/120 fps), **Zoom della vista** 0,5×–2×
   (analogico con i grilletti), **Thread di disegno**. La simulazione non cambia.
 - Opzioni audio: **Volume musica** e **Volume effetti**.
+- Miglioramenti grafici opzionali, spenti di default: **Luci dinamiche** e **Ombre di contatto**
+  ([`docs/enhancements.md`](docs/enhancements.md)).
 - Comandi (dettagli e motivazioni in `docs/controls.md`): cursore virtuale o schema diretto
   (twin-stick) da opzione core, touchscreen (tocco = click sinistro, pressione lunga o due dita =
   click destro), mouse, cursori originali `.CUR`. A = click sinistro, B = click destro,

@@ -169,6 +169,12 @@ sempre il percorso nuovo (anche a 1×). Un passaggio di luci dei proiettili può
 `cls == cls::Projectile/CannonMissile/AviaMissile` e usare `fbX, fbY − worldZ × scale`. Lo stato del
 gancio non è salvato.
 
+I miglioramenti della #21 (luci dinamiche, ombre di contatto) non usano questo gancio: l'ombra deve
+stare sotto gli oggetti dello strato 5, quindi entrano nella lista di disegno di `drawView` come
+comandi `view::BandPass` (una passata sulle righe di ogni banda al suo posto nell'ordine del
+pittore: tra gli strati 0–4 e 5, e dopo l'ultimo), che girano sui thread delle bande con
+un'immagine identica per ogni numero di thread. Vedi `docs/enhancements.md` §4.
+
 ## 7. Verifica
 
 - **Uscita invariata (hash)**: `tests/render_e2e.sh` (con `GROMADA_DATA`) gioca tutto il percorso

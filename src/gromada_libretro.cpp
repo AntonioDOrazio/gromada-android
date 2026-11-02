@@ -80,6 +80,8 @@ struct Core {
     // --- save states (issue #14, docs/savestates.md) ---
     gromada::game::SaveStateManager saveStates;
     std::vector<std::uint8_t> stateBuffer;
+    // --- graphics enhancements (issue #21): read by the engine at every draw ---
+    gromada::game::enhance::Settings enhance;
 };
 
 std::unique_ptr<Core> core;
@@ -116,9 +118,13 @@ void declareOptions() {
         {"gromada_smooth", "Movimento fluido (interpolazione); attivato|disattivato"},
         {"gromada_zoom", "Zoom della vista; 1x|0.5x|0.75x|1.5x|2x"},
         {"gromada_render_threads", "Thread di disegno; automatico|1|2|3|4"},
+        // graphics enhancements (issue #21), off by default
+        {gromada::game::enhance::coreOptions[0].key, gromada::game::enhance::coreOptions[0].value},
+        {gromada::game::enhance::coreOptions[1].key, gromada::game::enhance::coreOptions[1].value},
         {nullptr, nullptr},
     };
     static_assert(std::size(gromada::input::coreOptions) == 10, "list every input option above");
+    static_assert(std::size(gromada::game::enhance::coreOptions) == 2, "list every enhancement option above");
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
 }
 
@@ -256,6 +262,7 @@ void applyOptions(bool initial) {
     core->renderer.setWidth(next.widescreen ? gromada::Renderer::MaxWidth : 640);
     core->mixer.setMusicVolume(next.musicVolume / 100.0f);
     core->mixer.setSfxVolume(next.sfxVolume / 100.0f);
+    core->enhance = gromada::game::enhance::readSettings(getVar);
     applyInputOptions();
     if (next.viewer)
         checkMovieOption();
@@ -452,7 +459,9 @@ bool runMovie() {
 // THE construction point of the simulation engine (issue #8). The provisional ViewerEngine
 // (src/game/viewer_engine.hpp) stays available for tests and debugging.
 std::unique_ptr<gromada::game::Engine> makeGameEngine(const GameResources& resources) {
-    return std::make_unique<gromada::game::GameEngine>(resources);
+    auto engine = std::make_unique<gromada::game::GameEngine>(resources);
+    engine->setEnhancements(&core->enhance); // issue #21: presentation only, off by default
+    return engine;
 }
 
 // Save files (save1..5, fw.ini, recorded demos) live in <frontend save dir>/gromada.

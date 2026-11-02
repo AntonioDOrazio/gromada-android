@@ -9,6 +9,9 @@
 // usage: render_bench --data DIR [--level 19] [--frames 600] [--warmup 300] [--fps 120]
 //                     [--aspect 4:3|16:9] [--scale 1..4] [--zoom 1] [--smooth 1] [--repeat 1]
 //                     [--shots f1,f2,...] [--out prefix] [--no-baseline] [--threads N] [--wall]
+//                     [--fx LIGHTS,SHADOWS]
+// --fx: graphics enhancements (issue #21, levels 0..3); also prints their own cost per frame
+// (preparation + the band passes' time summed over the threads) and the sources.
 #include "core/std.hpp"
 #include "libgromada/libgromada_all.hpp"
 #include "game/engine.hpp"
@@ -39,6 +42,7 @@ struct Options {
     float zoom = 1;
     std::set<int> shots;
     std::string out = "render_bench";
+    enhance::Settings fx;
 };
 
 input::PcState inputAt(int f, int fps) {
@@ -58,6 +62,8 @@ input::PcState inputAt(int f, int fps) {
 
 struct Result {
     std::vector<double> ms;
+    std::vector<double> fxMs, fxGround, fxLight, fxApply;
+    int fxOccluders = 0, fxLights = 0;
     std::size_t sprites = 0;
 };
 
@@ -70,7 +76,10 @@ Result run(const GameResources& res, const Options& o, bool render) {
     cfg.renderScale = o.scale;
     cfg.smoothMotion = o.smooth;
     cfg.renderThreads = o.threads;
-    Session s{res.vids(), res.sounds(), std::make_unique<GameEngine>(res), nullptr, nullptr, cfg};
+    auto engine = std::make_unique<GameEngine>(res);
+    engine->setEnhancements(&o.fx);
+    GameEngine* eng = engine.get();
+    Session s{res.vids(), res.sounds(), std::move(engine), nullptr, nullptr, cfg};
     s.setZoom(o.zoom);
     s.start(std::format("maps\\levels\\{:02}.map", o.level));
     Result r;
@@ -80,6 +89,15 @@ Result run(const GameResources& res, const Options& o, bool render) {
         s.runFrame(inputAt(f, o.fps), dt);
         const double ms = cpuMs() - t0;
         if (f >= o.warmup) r.ms.push_back(ms);
+        if (f >= o.warmup && render && o.fx.any() && eng->enhancements()) {
+            const auto st = eng->enhancements()->stats();
+            r.fxMs.push_back(st.groundMs + st.lightMs);
+            r.fxGround.push_back(st.groundMs);
+            r.fxLight.push_back(st.lightMs);
+            r.fxApply.push_back(st.groundApplyMs + st.lightApplyMs);
+            r.fxOccluders = std::max(r.fxOccluders, st.occluders);
+            r.fxLights = std::max(r.fxLights, st.lights);
+        }
         if (render && o.shots.count(f)) {
             const std::string path = std::format("{}_{}.ppm", o.out, f);
             FILE* out = std::fopen(path.c_str(), "wb");
@@ -128,6 +146,11 @@ int main(int argc, char** argv) {
         else if (k == "--repeat") o.repeat = std::max(1, std::atoi(v.c_str()));
         else if (k == "--threads") o.threads = std::atoi(v.c_str());
         else if (k == "--out") o.out = v;
+        else if (k == "--fx") {
+            const auto c = v.find(',');
+            o.fx.lights = std::atoi(v.substr(0, c).c_str());
+            o.fx.contactShadows = c == std::string::npos ? 0 : std::atoi(v.substr(c + 1).c_str());
+        }
         else if (k == "--shots") {
             for (std::size_t p = 0; p < v.size();) {
                 const std::size_t q = std::min(v.find(',', p), v.size());
@@ -145,6 +168,12 @@ int main(int argc, char** argv) {
                     o.level, o.wide ? "16:9" : "4:3", o.fps, o.scale, o.zoom, o.smooth, o.threads, g_wall ? "wall" : "cpu", drawn.sprites,
                     static_cast<std::size_t>((o.wide ? 854 : 640) * o.scale), static_cast<std::size_t>(480 * o.scale), a.mean, a.median,
                     a.p95, a.max);
+        if (!drawn.fxMs.empty()) {
+            const Stats f = stats(drawn.fxMs), g = stats(drawn.fxGround), l = stats(drawn.fxLight), a = stats(drawn.fxApply);
+            std::printf(" | fx %d,%d: mean %.3f ms p95 %.3f max %.3f (shadows %.3f, lights %.3f; band passes %.0f%%; max %d occluders, %d lights)",
+                        o.fx.lights, o.fx.contactShadows, f.mean, f.p95, f.max, g.mean, l.mean, 100.0 * a.mean / std::max(f.mean, 1e-9),
+                        drawn.fxOccluders, drawn.fxLights);
+        }
         if (o.baseline) {
             const Stats b = stats(run(res, o, false).ms);
             std::printf(" | without picture mean %.3f ms | picture %.3f ms", b.mean, a.mean - b.mean);

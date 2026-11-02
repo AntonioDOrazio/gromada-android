@@ -231,7 +231,15 @@ struct FrameBounds {
     return {r.column(left), r.row(top), r.column(left + (std::int64_t{w} << SubBits)), r.row(top + (std::int64_t{h} << SubBits))};
 }
 
-// One frame to draw (a draw list is built once, then rasterized by bands, see drawList()).
+// A pass over the rows of a band instead of a frame (issue #21, docs/enhancements.md: the
+// contact shadows between layers 0..4 and 5, the lights after the last layer): called as
+// fn(ctx, framebuffer, band, first row, end row) at its place in the list. It must only touch
+// those rows and give each pixel the same value whatever the band split, so that the picture
+// stays the same for any number of bands.
+using BandPass = void (*)(void* ctx, FramebufferRef fb, int band, int y0, int y1);
+
+// One frame to draw (a draw list is built once, then rasterized by bands, see drawBand()), or a
+// band pass (bandPass set, frame unused).
 struct DrawCommand {
     const VidGraphics::Frame* frame;
     const std::array<ColorRgb8, 256>* palette;
@@ -239,6 +247,8 @@ struct DrawCommand {
     bool screen;                     // through the screen raster
     hicolor::FrameVisitor::Pass pass;
     bool skipShadowPixels;
+    BandPass bandPass = nullptr;
+    void* bandContext = nullptr;
 };
 
 // hicolor::drawFrame through a view transform: frame top-left at world (left, top), 1/256 px.
@@ -271,8 +281,13 @@ inline void drawBand(std::span<const DrawCommand> list, Raster world, Raster scr
     const int y1 = static_cast<int>(static_cast<std::int64_t>(H) * (band + 1) / bands);
     world.clipTop = screen.clipTop = y0;
     world.clipBottom = screen.clipBottom = y1;
-    for (const DrawCommand& c : list)
+    for (const DrawCommand& c : list) {
+        if (c.bandPass) {
+            c.bandPass(c.bandContext, world.fb, band, y0, y1);
+            continue;
+        }
         drawFrameScaled(*c.frame, c.left, c.top, *c.palette, c.screen ? screen : world, scratch, c.pass, c.skipShadowPixels);
+    }
 }
 
 } // namespace gromada::game::view

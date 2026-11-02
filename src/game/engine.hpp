@@ -9,6 +9,7 @@
 #include <cstring>
 #include <unordered_map>
 #include "game/engine_api.hpp"
+#include "game/enhance/enhance.hpp"
 #include "game/hicolor.hpp"
 #include "game/screen_effects.hpp"
 #include "game/view_raster.hpp"
@@ -177,6 +178,11 @@ public:
     // Largest extrapolated move (world px): beyond that the sprite is drawn where it is.
     static constexpr double MaxMotion = 48;
     [[nodiscard]] bool autoScroll() const noexcept { return m_autoScroll; }
+    // Optional graphics enhancements (issue #21, src/game/enhance, presentation only): the
+    // settings are owned by the caller (core options) and read at every draw(); nullptr or
+    // all off = draw() unchanged, bit for bit.
+    void setEnhancements(const enhance::Settings* settings) noexcept { m_fxSettings = settings; }
+    [[nodiscard]] enhance::Enhancer* enhancements() noexcept { return m_fx.get(); }
 
 private:
     static int argInt(std::span<const script::Value> a, std::size_t i) { return i < a.size() ? a[i].toInt() : 0; }
@@ -191,9 +197,12 @@ private:
     void scrollCamera();
     void clampCamera();
     void drawSprite(const Sprite& s, FramebufferRef fb);
-    struct ViewTargets { const view::Raster* world; const view::Raster* screen; const ViewRequest* request; ViewOrigin origin; };
+    struct ViewTargets { const view::Raster* world; const view::Raster* screen; const ViewRequest* request; ViewOrigin origin;
+                         enhance::Enhancer* fx = nullptr; };   // issue #21: collects the drawn items
     void drawSpriteView(const Sprite& s, const Motion& m, const ViewTargets& t, bool child);
     const std::array<ColorRgb8, 256>* paletteFor(const Sprite& s);
+    enhance::Enhancer* activeEnhancer();
+    [[nodiscard]] std::optional<enhance::DrawItem> fxItem(const Sprite& s) const;
     const VidInfo& graphicsOwner(int nvid) const;
     void setGlobalGamma(int g) {
         if (g == m_gamma) return;
@@ -229,6 +238,9 @@ private:
     ScreenEffectView m_effectView;
     std::vector<view::DrawCommand> m_drawList;
     std::vector<view::ScaleScratch> m_bandScratch;
+    // issue #21: enhancement settings (owned by the core) and caches; not state.
+    const enhance::Settings* m_fxSettings = nullptr;
+    std::unique_ptr<enhance::Enhancer> m_fx;
 };
 
 // ---------------------------------------------------------------------------- players
@@ -498,12 +510,43 @@ inline void GameEngine::drawSprite(const Sprite& s, FramebufferRef fb) {
     hicolor::drawFrame(frame, sx, sy - z, *pal, fb, hicolor::FrameVisitor::Pass::Normal, cast);
 }
 
+// Issue #21: the enhancer while an effect is on (built on first use), else nullptr.
+inline enhance::Enhancer* GameEngine::activeEnhancer() {
+    if (!m_fxSettings || !m_fxSettings->any()) return nullptr;
+    if (!m_fx) {
+        std::vector<const Vid*> src;
+        for (const VidInfo& v : m_world.vids()) src.push_back(v.src);
+        m_fx = std::make_unique<enhance::Enhancer>(src);
+    }
+    m_fx->setSettings(*m_fxSettings);
+    return m_fx.get();
+}
+
+// Issue #21: a drawn sprite as the enhancement passes see it (same frame and position as
+// drawSprite; screen sprites are not part of the world).
+inline std::optional<enhance::DrawItem> GameEngine::fxItem(const Sprite& s) const {
+    const VidInfo& v = m_world.vidOf(s);
+    if (!v.gfx || (s.state & st::Screen) || s.frame < 0 || static_cast<std::size_t>(s.frame) >= v.gfx->frames.size()) return std::nullopt;
+    return enhance::DrawItem{&v.gfx->frames[static_cast<std::size_t>(s.frame)], static_cast<float>(s.x), static_cast<float>(s.y),
+                             static_cast<float>(s.z), s.nvid, v.cls, v.category, v.sizeX, v.sizeY, v.sizeZ, (v.flags & vf::ZeroZ) != 0};
+}
+
 // 0x40b880 draw half: layers 0..15 in list order, culling at +-512 px from the view centre,
 // sub-objects with dz < 0 before the sprite and the others after it. Layer 5 (the unsorted
 // layer of the units, head 0x439d0c) is re-sorted every frame: its visible sprites are
 // inserted with InsertSorted (y, z, x; later insertions first on ties) into a temporary
 // list that is drawn and then discarded, the update order is untouched.
+// Issue #21 hooks (only while an enhancement is on): contact shadows on the ground before
+// layer 5, dynamic light after the last layer (src/game/enhance, docs/architecture.md).
 inline void GameEngine::draw(FramebufferRef fb) {
+    enhance::Enhancer* enh = activeEnhancer();
+    const enhance::View fxView{static_cast<float>(m_camera.x), static_cast<float>(m_camera.y), 1.0f};
+    if (enh) enh->begin();
+    const auto put = [&](const Sprite& s) {
+        drawSprite(s, fb);
+        if (enh)
+            if (auto it = fxItem(s)) enh->drawn.push_back(*it);
+    };
     for (int y = 0; y < fb.extent(0); ++y)
         for (int x = 0; x < fb.extent(1); ++x) fb[y, x] = RGBA8{{0, 0, 0}, 255};
     const int cx = m_camera.x + (m_camera.width >> 1), cy = m_camera.y + (m_camera.height >> 1);
@@ -515,11 +558,11 @@ inline void GameEngine::draw(FramebufferRef fb) {
             const Sprite* parent = s;
             for (const Sprite* c = s->child; c; parent = c, c = c->child) {
                 if (m_world.vidOf(*parent).flags & vf::InvisibleSubobjects) break;
-                drawSprite(*c, fb);
+                put(*c);
             }
         };
         if (s->dz < 0) chain();
-        drawSprite(*s, fb);
+        put(*s);
         if (s->dz >= 0) chain();
     };
     for (int layer = 0; layer < World::MaxLayers; ++layer) {
@@ -534,6 +577,12 @@ inline void GameEngine::draw(FramebufferRef fb) {
                 if (a.s->x != b.s->x) return a.s->x < b.s->x;
                 return a.index > b.index;
             });
+            if (enh) {
+                enh->occluders.clear();
+                for (const auto& it : m_sorted)
+                    if (auto item = fxItem(*it.s)) enh->occluders.push_back(*item);
+                enh->ground(fb, fxView, enh->occluders);
+            }
             for (const auto& it : m_sorted) drawWithChain(it.s);
             continue;
         }
@@ -546,6 +595,7 @@ inline void GameEngine::draw(FramebufferRef fb) {
             drawWithChain(s);
         }
     }
+    if (enh) enh->finish(fb, fxView);
 }
 
 // ---------------------------------------------------------------------------- presentation
@@ -664,6 +714,13 @@ inline void GameEngine::drawSpriteView(const Sprite& s, const Motion& m, const V
     if (v.flags & vf::ZeroZ) { z = 0; zf = 0; }
     const std::int64_t bodyTop = top - (std::int64_t{z} << view::SubBits) - sub(zf - z);
     m_drawList.push_back({&frame, pal, left, bodyTop, screen, hicolor::FrameVisitor::Pass::Normal, cast});
+    if (t.fx && !screen)
+        if (auto item = fxItem(s)) {   // issue #21: where it is drawn (sub-pixel, extrapolated)
+            item->x += static_cast<float>(mm.x);
+            item->y += static_cast<float>(mm.y);
+            item->z += static_cast<float>(mm.z);
+            t.fx->drawn.push_back(*item);
+        }
     if (t.request->drawn) {
         const double scale = screen ? t.request->screenScale : t.request->scale;
         const double ox = screen ? 0 : t.origin.x, oy = screen ? 0 : t.origin.y;
@@ -694,7 +751,11 @@ inline bool GameEngine::drawView(FramebufferRef fb, const ViewRequest& r, ViewOr
     m_drawList.clear();
     const view::Raster world{fb, view::toSub(o.x), view::toSub(o.y), view::toScale(r.scale)};
     const view::Raster screen{fb, 0, 0, view::toScale(r.screenScale)};
-    const ViewTargets targets{&world, &screen, &r, o};
+    // issue #21: enhancements (nullptr while all off: the list and the picture are unchanged)
+    enhance::Enhancer* enh = activeEnhancer();
+    const enhance::View fxView{static_cast<float>(o.x), static_cast<float>(o.y), static_cast<float>(r.scale)};
+    if (enh) enh->begin();
+    const ViewTargets targets{&world, &screen, &r, o, enh};
     const int cx = static_cast<int>(std::floor(o.x + r.width / 2)), cy = static_cast<int>(std::floor(o.y + r.height / 2));
     const int hx = 512 + std::max(0, static_cast<int>(std::ceil(r.width / 2)) - 320);
     const int hy = 512 + std::max(0, static_cast<int>(std::ceil(r.height / 2)) - 240);
@@ -727,6 +788,24 @@ inline bool GameEngine::drawView(FramebufferRef fb, const ViewRequest& r, ViewOr
                 if (a.s->x != b.s->x) return a.s->x < b.s->x;
                 return a.index > b.index;
             });
+            if (enh) {
+                // contact shadows: accumulated now from the drawn positions, applied by the
+                // bands between the ground layers' commands and layer 5's
+                enh->occluders.clear();
+                for (const auto& it : m_sorted)
+                    if (auto item = fxItem(*it.s)) {
+                        if (r.extrapolate) {
+                            const Motion m = motion(*it.s, r.renderClock);
+                            item->x += static_cast<float>(m.x);
+                            item->y += static_cast<float>(m.y);
+                            item->z += static_cast<float>(m.z);
+                        }
+                        enh->occluders.push_back(*item);
+                    }
+                if (enh->prepareGround(fb.extent(1), fb.extent(0), fxView, enh->occluders))
+                    m_drawList.push_back({nullptr, nullptr, 0, 0, false, hicolor::FrameVisitor::Pass::Normal, false,
+                                          &enhance::Enhancer::groundBand, enh});
+            }
             for (const auto& it : m_sorted) drawWithChain(it.s);
             continue;
         }
@@ -739,8 +818,11 @@ inline bool GameEngine::drawView(FramebufferRef fb, const ViewRequest& r, ViewOr
             drawWithChain(s);
         }
     }
+    if (enh && enh->prepareLights(fb.extent(1), fb.extent(0), fxView, enh->drawn))   // lights after the last layer
+        m_drawList.push_back({nullptr, nullptr, 0, 0, false, hicolor::FrameVisitor::Pass::Normal, false, &enhance::Enhancer::lightBand, enh});
     const int bands = r.parallel ? std::clamp(r.threads, 1, 16) : 1;
     m_bandScratch.resize(static_cast<std::size_t>(bands));
+    if (enh) enh->setBands(bands);
     const auto band = [&](int b) {
         const int H = fb.extent(0), W = fb.extent(1);
         const int y0 = static_cast<int>(static_cast<std::int64_t>(H) * b / bands), y1 = static_cast<int>(static_cast<std::int64_t>(H) * (b + 1) / bands);

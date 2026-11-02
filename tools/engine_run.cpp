@@ -6,6 +6,11 @@
 //   engine_run --data DIR (--level NN | --map FILE) [--seconds S] [--step MS] [--seed N]
 //              [--out DIR] [--shots T1,T2,...] [--trace MS] [--input EVENTS] [--no-player]
 //              [--size WxH] [--quiet] [--gamma G] [--effect ID@MS[,ID@MS...]]
+//              [--fx LIGHTS,SHADOWS] [--fx-scale N]
+//   --fx: graphics enhancements (issue #21, levels 0..3): every shot is written without
+//   (shot_T.ppm) and with them (shot_T_fx.ppm), and every frame is drawn both ways to measure
+//   their cost. --fx-scale N also writes the shots at N x (nearest upscale of the 1x world,
+//   the enhancements applied at N x: what an internal-resolution pipeline gives the hook).
 //   --gamma: SetGamma(G) after loading; --effect: Effect(ID) at MS of game time (screenshots
 //   then include drawScreenEffects(), like the session's frame).
 //
@@ -106,6 +111,8 @@ int main(int argc, char** argv) {
     bool player = true, quiet = false;
     int width = 640, height = 480;
     int spawnX = -1, spawnY = -1, camX = -1, camY = -1, weapon = 88;
+    enhance::Settings fx;
+    int fxScale = 1;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -123,6 +130,8 @@ int main(int argc, char** argv) {
         else if (a == "--camera") { const auto v = next(); const auto c = v.find(','); camX = std::stoi(v.substr(0, c)); camY = std::stoi(v.substr(c + 1)); }
         else if (a == "--spawn") { const auto v = next(); const auto c = v.find(','); spawnX = std::stoi(v.substr(0, c)); spawnY = std::stoi(v.substr(c + 1)); }
         else if (a == "--quiet") quiet = true;
+        else if (a == "--fx") { const auto v = next(); const auto c = v.find(','); fx.lights = std::stoi(v.substr(0, c)); fx.contactShadows = c == std::string::npos ? 0 : std::stoi(v.substr(c + 1)); }
+        else if (a == "--fx-scale") fxScale = std::max(1, std::stoi(next()));
         else if (a == "--gamma") gamma = std::stoi(next(), nullptr, 0);
         else if (a == "--effect") {
             std::stringstream ss{next()};
@@ -197,6 +206,85 @@ int main(int argc, char** argv) {
     std::vector<RGBA8> pixels(static_cast<std::size_t>(width) * height);
     FramebufferRef fb{pixels.data(), height, width};
 
+    // issue #21: the settings the engine reads at every draw (off unless --fx)
+    enhance::Settings fxLive;
+    engine.setEnhancements(&fxLive);
+    std::vector<double> fxCost, fxGround, fxLight, offDraw;
+    int fxMaxLights = 0, fxMaxOccluders = 0;
+    std::vector<RGBA8> fxPixels(pixels.size());
+    // Draws the frame without and with the enhancements; returns the cost of the enhanced draw
+    // minus the plain one (and the passes' own timings).
+    const auto drawBoth = [&] {
+        fxLive = {};
+        auto d0 = std::chrono::steady_clock::now();
+        engine.draw(fb);
+        const double off = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count();
+        fxLive = fx;
+        FramebufferRef fb2{fxPixels.data(), height, width};
+        d0 = std::chrono::steady_clock::now();
+        engine.draw(fb2);
+        const double on = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count();
+        fxLive = {};
+        const auto& st = engine.enhancements()->stats();
+        offDraw.push_back(off);
+        fxCost.push_back(on - off);
+        fxGround.push_back(st.groundMs);
+        fxLight.push_back(st.lightMs);
+        fxMaxLights = std::max(fxMaxLights, st.lights);
+        fxMaxOccluders = std::max(fxMaxOccluders, st.occluders);
+    };
+    // N x emulation of the hook: the world drawn at 1x and upscaled (nearest), the shadows on
+    // the upscaled ground, the 1x objects on top, the light at N x.
+    const auto writeScaled = [&](const std::filesystem::path& base) {
+        const int n = fxScale, W = width * n, H = height * n;
+        std::vector<RGBA8> ground(pixels.size()), plain(pixels.size()), big(static_cast<std::size_t>(W) * H);
+        fxLive = {};
+        engine.draw(fb);
+        plain = pixels;
+        fxLive = fx;
+        enhance::Enhancer* e = nullptr;
+        engine.draw(FramebufferRef{fxPixels.data(), height, width});   // builds the enhancer, items
+        e = engine.enhancements();
+        e->groundObserver = [&](FramebufferRef g) { for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) ground[static_cast<std::size_t>(y * width + x)] = g[y, x]; };
+        engine.draw(FramebufferRef{fxPixels.data(), height, width});
+        e->groundObserver = nullptr;
+        FramebufferRef bfb{big.data(), H, W};
+        const auto up = [&](const std::vector<RGBA8>& src, bool onlyObjects) {
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const std::size_t i = static_cast<std::size_t>((y / n) * width + x / n);
+                    if (onlyObjects && std::memcmp(&src[i], &ground[i], sizeof(RGBA8)) == 0) continue;
+                    bfb[y, x] = src[i];
+                }
+        };
+        up(plain, false);
+        writePpm(base.string() + std::format("_x{}.ppm", n), big, W, H);
+        const enhance::View v{static_cast<float>(engine.camera().x), static_cast<float>(engine.camera().y), static_cast<float>(n)};
+        // timings: best of 15 runs of each pass on the same input (the machine may be shared)
+        up(ground, false);
+        const auto groundBig = big;
+        double g = 1e9, ga = 1e9, l = 1e9, la = 1e9;
+        for (int r = 0; r < 15; ++r) {
+            big = groundBig;
+            e->ground(bfb, v, e->occluders);
+            g = std::min(g, e->stats().groundMs);
+            ga = std::min(ga, e->stats().groundApplyMs);
+        }
+        up(plain, true);
+        const auto litBig = big;
+        for (int r = 0; r < 15; ++r) {
+            big = litBig;
+            e->lights(bfb, v, e->drawn);
+            l = std::min(l, e->stats().lightMs);
+            la = std::min(la, e->stats().lightApplyMs);
+        }
+        writePpm(base.string() + std::format("_x{}_fx.ppm", n), big, W, H);
+        std::printf("  x%d: shadows %.3fms (apply %.3f, %ld px) lights %.3fms (apply %.3f, %ld px) (%d occluders, %d lights)\n", n, g,
+                    ga, e->stats().groundPixels, l, la, e->stats().lightPixels, e->stats().occluders, e->stats().lights);
+        fxLive = {};
+    };
+    const bool fxOn = fx.any();
+
     const int startClock = engine.clock();
     long frames = 0;
     std::vector<double> frameTimes;
@@ -264,6 +352,7 @@ int main(int argc, char** argv) {
         if (units < prevUnits) deaths += prevUnits - units;
         prevUnits = units;
 
+        if (fxOn) drawBoth();
         if (shotIdx < shots.size() && now >= shots[shotIdx]) {
             const auto d0 = std::chrono::steady_clock::now();
             engine.draw(fb);
@@ -273,6 +362,31 @@ int main(int argc, char** argv) {
             char name[64];
             std::snprintf(name, sizeof name, "shot_%06d.ppm", now);
             writePpm(outDir / name, pixels, width, height);
+            if (fxOn) {
+                drawBoth();
+                engine.drawScreenEffects(FramebufferRef{fxPixels.data(), height, width});
+                std::snprintf(name, sizeof name, "shot_%06d_fx.ppm", now);
+                writePpm(outDir / name, fxPixels, width, height);
+                // best of 15 draws of the same frame (the machine may be shared)
+                enhance::Stats st = engine.enhancements()->stats();
+                fxLive = fx;
+                for (int r = 0; r < 15; ++r) {
+                    engine.draw(FramebufferRef{fxPixels.data(), height, width});
+                    const auto& s2 = engine.enhancements()->stats();
+                    st.groundMs = std::min(st.groundMs, s2.groundMs);
+                    st.groundApplyMs = std::min(st.groundApplyMs, s2.groundApplyMs);
+                    st.lightMs = std::min(st.lightMs, s2.lightMs);
+                    st.lightApplyMs = std::min(st.lightApplyMs, s2.lightApplyMs);
+                }
+                fxLive = {};
+                std::printf("  shot %d fx: shadows %.3fms (apply %.3f, %d occluders, %ld px) lights %.3fms (apply %.3f, %d lights, %ld px)\n",
+                            now, st.groundMs, st.groundApplyMs, st.occluders, st.groundPixels, st.lightMs, st.lightApplyMs, st.lights,
+                            st.lightPixels);
+                if (fxScale > 1) {
+                    std::snprintf(name, sizeof name, "shot_%06d", now);
+                    writeScaled(outDir / name);
+                }
+            }
             ++shotIdx;
         }
         if (!quiet && now >= nextTrace) {
@@ -300,6 +414,14 @@ int main(int argc, char** argv) {
     std::printf("frames=%ld step=%.2fms sim avg=%.3fms max=%.3fms draw(last)=%.3fms sprites=%zu units=%zu unit-losses=%d sounds=%ld\n",
                 frames, step, simMs / std::max(1L, frames), simMax, lastDraw, w.liveCount(), w.gridUnits().size(), deaths, sounds);
     (void)drawMs;
+    if (!fxCost.empty()) {
+        const auto pct = [](std::vector<double> v, double p) { std::ranges::sort(v); return v[std::min(v.size() - 1, static_cast<std::size_t>(v.size() * p))]; };
+        const auto avg = [](const std::vector<double>& v) { double s = 0; for (double x : v) s += x; return s / static_cast<double>(v.size()); };
+        std::printf("fx %d,%d over %zu frames: world draw avg=%.3fms; enhancements avg=%.3fms p50=%.3fms p99=%.3fms max=%.3fms "
+                    "(shadows avg=%.3f p99=%.3f, lights avg=%.3f p99=%.3f; max %d occluders, %d lights)\n",
+                    fx.lights, fx.contactShadows, fxCost.size(), avg(offDraw), avg(fxCost), pct(fxCost, 0.5), pct(fxCost, 0.99),
+                    pct(fxCost, 1.0), avg(fxGround), pct(fxGround, 0.99), avg(fxLight), pct(fxLight, 0.99), fxMaxOccluders, fxMaxLights);
+    }
     if (!frameTimes.empty()) {
         auto sorted = frameTimes;
         std::ranges::sort(sorted);
