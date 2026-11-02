@@ -104,9 +104,14 @@ void recomputeCrc(std::vector<std::uint8_t>& st) {
 void level(const GameResources& res, const std::filesystem::path& game, int n, bool timings) {
     Rig r{res, game, "savestate_level"};
     r.s->start(std::format("maps\\levels\\{:02}.map", n));
-    r.run(600);
+    r.run(2);
+    // the game's fw.ini has the CD music off; levels started directly keep it off: switch it on
+    const std::array<script::Value, 1> volume{script::Value{80}};
+    r.s->dispatch(static_cast<int>(script::BuiltinId::SetMusic), volume);
+    r.run(598);
     const std::string mapAtSave = r.s->currentMap();
-    std::fprintf(stderr, "level %02d: %zu sprites, map %s, menu %d\n", n, sprites(*r.s), mapAtSave.c_str(), r.s->ui().hasMenu());
+    std::fprintf(stderr, "level %02d: %zu sprites, map %s, menu %d, CD track %d\n", n, sprites(*r.s), mapAtSave.c_str(),
+                 r.s->ui().hasMenu(), r.mixer.currentTrack());
 
     const auto s0 = r.saveState();
     const int f0 = r.frame;
@@ -293,12 +298,56 @@ void crossSession(const GameResources& res, const std::filesystem::path& game) {
     CHECK(ha == hb);
 }
 
+// The CD music of the game (Ogg Vorbis): a state restored into a fresh mixer reopens the track
+// and seeks; the samples must be those of the uninterrupted playback.
+void music(const std::filesystem::path& game) {
+    const std::vector<std::filesystem::path> dirs{game / "music", game / "MUSIC"};
+    Mixer m{44100};
+    m.setMusicDirectories(dirs);
+    m.playMusic({3, 4, 3, 4});
+    if (m.currentTrack() != 3) {
+        std::fprintf(stderr, "music: track 3 not found, skipped\n");
+        return;
+    }
+    std::vector<std::int16_t> out(735 * 2);
+    const auto refNone = [](const SoundData*) { return std::int32_t{-1}; };
+    const auto lookupNone = [](std::int32_t) -> const SoundData* { return nullptr; };
+    for (const int frames : {1, 97, 1234, 4000}) {
+        Mixer a{44100};
+        a.setMusicDirectories(dirs);
+        a.playMusic({3, 4, 3, 4});
+        for (int i = 0; i < frames; ++i) a.render(out.data(), 735);
+        std::vector<std::uint8_t> buf;
+        state::Writer w{buf};
+        gromada::SaveStateAccess::save(w, a, refNone);
+        buf.resize(w.size());
+        std::vector<std::int16_t> ra, rb;
+        for (int i = 0; i < 120; ++i) {
+            a.render(out.data(), 735);
+            ra.insert(ra.end(), out.begin(), out.end());
+        }
+        Mixer b{44100};
+        b.setMusicDirectories(dirs);
+        state::Reader r{buf};
+        gromada::SaveStateAccess::apply(b, gromada::SaveStateAccess::decode(r, lookupNone));
+        for (int i = 0; i < 120; ++i) {
+            b.render(out.data(), 735);
+            rb.insert(rb.end(), out.begin(), out.end());
+        }
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < ra.size(); ++i) diff += ra[i] != rb[i];
+        std::fprintf(stderr, "music: restored after %d frames into a fresh mixer: %zu of %zu samples differ\n", frames, diff, ra.size());
+        CHECK_EQ(diff, std::size_t{0});
+    }
+}
+
 } // namespace
 
 int main() {
     SKIP_WITHOUT_DATA();
     const auto game = *gromada_test::dataDir();
     GameResources res{game / "fw.res"};
+    music(game);
     level(res, game, 19, true);
     level(res, game, 1, false);
     crossSession(res, game);

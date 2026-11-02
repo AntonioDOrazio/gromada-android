@@ -28,6 +28,9 @@ input="btn=a@$(r 10 12) btn=a@$(r 40 42) btn=x@$(r 80 82) btn=a@$(r 160 162) btn
 fail=0
 run() { # name frames options...
     name=$1; frames=$2; shift 2
+    # the game's fw.ini has the CD music off (4th line): on here, so the sound checks cover it
+    mkdir -p "$out/save_$name/gromada"
+    printf '1\r\n1\r\n50\r\n80\r\n1\r\n' > "$out/save_$name/gromada/fw.ini"
     # shellcheck disable=SC2086
     "$harness" "$core" "$GROMADA_DATA/gromada.exe" "$frames" "$out/$name" savedir="$out/save_$name" $input \
         hashes="$out/$name.txt" "$@" 2> "$out/$name.log"

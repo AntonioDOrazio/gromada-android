@@ -290,6 +290,11 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
   mediato in sincrono al periodo del tick (50 / 41,7 ms) da 6,5 / 5,2 dB a 2,4 / 2,5 dB
   (controllo a un periodo non correlato: 1,3–2,4 dB).
 
+## Save state
+
+Lo stato completo della sessione (motore, script, UI, audio, input, demo, filmati) si salva e si
+ricarica per i save state, il riavvolgimento e il run-ahead di RetroArch: `docs/savestates.md`.
+
 ## Ipotesi e domande aperte
 
 1. Animazioni degli oggetti di menu e ritorno da `act_birth`/`act_menupress*` (sopra).
