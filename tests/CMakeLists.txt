@@ -89,3 +89,8 @@ add_test(NAME core_sfx_loop COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop
 add_test(NAME core_sfx_loop_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop.sh $<TARGET_FILE:harness>
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_120_out gromada_fps=120)
 set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_CODE 77)
+
+# Visual fidelity (issue #15): 16-bit colour tables, Effect(), gamma and putcadr against
+# vectors from the original exe (tests/data/oracle/hicolor_*.json; no game data needed).
+gromada_add_test(hicolor_test hicolor_test.cpp)
+target_compile_definitions(hicolor_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")

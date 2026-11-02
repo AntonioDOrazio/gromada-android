@@ -93,6 +93,10 @@ direttamente su tutti i vettori (`tests/engine_oracle_test.cpp`, §9).
 | `action_vehicle` | `Action` Vehicle `0x40ea20` | thiscall, `ret 0xc` | 1400 | 24 azioni, `act_nextcommand` (waypoint, sterzata, bersagli, fuoco, radar) |
 | `action_kassandra` | `Action` Kassandra `0x411a60` | thiscall, `ret 0xc` | 1000 | input del giocatore (`0x43d045`), salto, munizioni, `act_coor_attack` con le teste `0x58..0x5c` |
 | `action_building` | `Action` Building `0x410e10` | thiscall, `ret 0xc` | 800 | produzione (timer, `CreateUnit` che fallisce), sollevamento del carico, `act_buildunit` |
+| `hicolor_tables` | `SVGA::SetMode` `0x404ed0..0x40541e` (RGB565), RGB → 16 bit `0x405560` | intervallo / thiscall | 1029 + tabelle | maschere, schiarimento, scurimento, trasparenza, dissolvenza (issue #15, `tests/hicolor_test.cpp`) |
+| `hicolor_effects` | `0x405da0`, `0x405e20`, `0x405c40` | thiscall | 531 | hash dell'uscita su tutti i 65536 valori |
+| `hicolor_gamma` | gamma `0x4072c0` | thiscall | 4300 | hash su una palette di 256 colori; uscite intere per le gamme degli script |
+| `hicolor_putcadr` | `putcadr` `0x4021f0` | thiscall | 40 | frame sintetici dei formati 2/3/4/8, ombra proiettata; superfici 56×18 |
 
 Formato dei file: `{"family", "function", "columns", "notes", "cases": [[...], ...]}`, un caso per
 riga; `tables` ha invece `"arrays"`. Le famiglie con oggetti in numero variabile (`check_move`,

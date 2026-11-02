@@ -696,8 +696,8 @@ riparte da dove era (comportamento di DirectSound), uno arrivato in fondo ripart
 
 - Comandi del giocatore col mouse (0x415e20) e scelta del cursore 9: descritti a confidenza media;
   da chiudere con la issue dell'input.
-- Effetti `eff_*` (0x406e40, 0x405700), `SetGamma`, `CreateLight`: comportamento del renderer non
-  analizzato in dettaglio.
+- (Chiusa, issue #15) Effetti `eff_*` (0x406e40, 0x406ea0, 0x405700), `SetGamma` (0x4072c0) e
+  `CreateLight` (0x407530: lista mai letta, le luci non si disegnano): `docs/engine.md` §8 e D7.
 - Significato di `obj+0x32d9`/`obj+0x991`/`obj+0x32eb` (solo azzerati e letti: probabilmente
   modalità dell'editor). (Il campo `+8` degli effetti sonori e il canale fermato da `StopMusic`
   sono chiariti in §9.1.)

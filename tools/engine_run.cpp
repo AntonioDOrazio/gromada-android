@@ -5,7 +5,9 @@
 //
 //   engine_run --data DIR (--level NN | --map FILE) [--seconds S] [--step MS] [--seed N]
 //              [--out DIR] [--shots T1,T2,...] [--trace MS] [--input EVENTS] [--no-player]
-//              [--size WxH] [--quiet]
+//              [--size WxH] [--quiet] [--gamma G] [--effect ID@MS[,ID@MS...]]
+//   --gamma: SetGamma(G) after loading; --effect: Effect(ID) at MS of game time (screenshots
+//   then include drawScreenEffects(), like the session's frame).
 //
 // EVENTS: ';'-separated "t:kind:dx,dy[:ms]" with t in ms of game time, coordinates relative
 // to the flagman. kinds: move (left click), fire (right button held for ms), up/down/left/right
@@ -97,6 +99,8 @@ int main(int argc, char** argv) {
     double seconds = 10, step = 1000.0 / 60.0;
     std::uint32_t seed = 12345;
     std::vector<int> shots;
+    int gamma = -1;
+    std::vector<std::pair<int, int>> effects;   // (time ms, effect id)
     int traceEvery = 1000;
     std::string events;
     bool player = true, quiet = false;
@@ -119,6 +123,15 @@ int main(int argc, char** argv) {
         else if (a == "--camera") { const auto v = next(); const auto c = v.find(','); camX = std::stoi(v.substr(0, c)); camY = std::stoi(v.substr(c + 1)); }
         else if (a == "--spawn") { const auto v = next(); const auto c = v.find(','); spawnX = std::stoi(v.substr(0, c)); spawnY = std::stoi(v.substr(c + 1)); }
         else if (a == "--quiet") quiet = true;
+        else if (a == "--gamma") gamma = std::stoi(next(), nullptr, 0);
+        else if (a == "--effect") {
+            std::stringstream ss{next()};
+            std::string t;
+            while (std::getline(ss, t, ',')) {
+                const auto at = t.find('@');
+                effects.emplace_back(std::stoi(t.substr(at + 1)), std::stoi(t.substr(0, at)));
+            }
+        }
         else if (a == "--size") { const auto s = next(); const auto x = s.find('x'); width = std::stoi(s.substr(0, x)); height = std::stoi(s.substr(x + 1)); }
         else if (a == "--shots") {
             std::stringstream ss(next());
@@ -171,6 +184,7 @@ int main(int argc, char** argv) {
         call(126, {camX, camY});
         call(128, {0});
     }
+    if (gamma >= 0) call(106, {gamma});
     const auto evs = parseEvents(events);
     if (std::getenv("ENGINE_TRACE_DAMAGE"))
         w.damageHook = [&](const Sprite& t, int amount, int src) {
@@ -229,6 +243,8 @@ int main(int argc, char** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         engine.beginFrame(dt);
         engine.setInput(in);
+        for (auto& [at, id] : effects)
+            if (at >= 0 && now >= at) { call(80, {id}); at = -1; }
         const auto tw0 = std::chrono::steady_clock::now();
         engine.tactWorld();
         const double twMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw0).count();
@@ -252,6 +268,8 @@ int main(int argc, char** argv) {
             const auto d0 = std::chrono::steady_clock::now();
             engine.draw(fb);
             drawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count();
+            if (std::getenv("ENGINE_TRACE_EFFECT")) std::printf("shot %d effect %d level %d\n", now, engine.effect(), engine.screenEffects().level());
+            engine.drawScreenEffects(fb);
             char name[64];
             std::snprintf(name, sizeof name, "shot_%06d.ppm", now);
             writePpm(outDir / name, pixels, width, height);
@@ -269,7 +287,8 @@ int main(int argc, char** argv) {
             Sprite* fl = w.byId(flagman);
             std::printf("t=%6d clock=%d sprites=%zu units=%zu [a0=%d a1=%d a2=%d] moving=%d attacking=%d sounds=%ld", now,
                         engine.clock(), w.liveCount(), w.gridUnits().size(), army[0], army[1], army[2], moving, attacking, sounds);
-            if (fl) std::printf(" flagman=(%d,%d,%d) hp=%d act=%d", fl->x, fl->y, fl->z, fl->hp, fl->action);
+            if (fl) std::printf(" flagman=(%d,%d,%d) hp=%d act=%d turret=%d", fl->x, fl->y, fl->z, fl->hp, fl->action,
+                                fl->child ? fl->child->direction : -1);
             else if (player) std::printf(" flagman=dead");
             std::printf(" cam=(%d,%d)\n", engine.camera().x, engine.camera().y);
         }
