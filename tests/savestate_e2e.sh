@@ -9,7 +9,8 @@
 #   4. a state saved during a movie, loaded by another process at its start: identical frames;
 #   5. run-ahead (every frame: run, save, run one more, load) over the whole flow: the real
 #      frames equal a plain run, each run-ahead frame equals the plain run's next frame;
-#   6. corrupted states refused without changing anything (statefuzz).
+#   6. the direct control scheme (camera follow, aim assist): reload and run-ahead;
+#   7. corrupted states refused without changing anything (statefuzz).
 # usage: savestate_e2e.sh <harness> <core.so> <out_dir> [extra harness options]
 # Exit code 77 (skipped) without GROMADA_DATA. Output in <out_dir> (never commit it).
 set -u
@@ -55,13 +56,26 @@ cat "$out/movie_a.txt" > "$out/movie.txt"
 awk -v from=$(f 5) '$1 != "ahead" && $1 >= from' "$out/movie_b.txt" >> "$out/movie.txt"
 reload movie
 # run-ahead against a plain run
+runahead() { # plain runahead
+    awk -v name="$2" 'FNR == NR { ref[$1] = $2 " " $3; vid[$1] = $2; next }
+         $1 == "ahead" { if (!($2 in vid)) next; a++; if (vid[$2] != $3) ad++; next }
+         { n++; if (ref[$1] != $2 " " $3) d++ }
+         END { printf "%s: %d real frames, %d differ; %d run-ahead frames, %d differ\n", name, n, d, a, ad; exit (d > 0 || ad > 0 || n == 0) }' \
+        "$out/$1.txt" "$out/$2.txt" || fail=1
+}
 run plain $(f 1500) "$@"
 run runahead $(f 1500) runahead=1 "$@"
-awk 'FNR == NR { ref[$1] = $2 " " $3; vid[$1] = $2; next }
-     $1 == "ahead" { if (!($2 in vid)) next; a++; if (vid[$2] != $3) ad++; next }
-     { n++; if (ref[$1] != $2 " " $3) d++ }
-     END { printf "runahead: %d real frames, %d differ; %d run-ahead frames, %d differ\n", n, d, a, ad; exit (d > 0 || ad > 0 || n == 0) }' \
-    "$out/plain.txt" "$out/runahead.txt" || fail=1
+runahead plain runahead
+# the direct control scheme (issue #16: camera following the player, aim assist, weapon
+# requests, move orders) with the input of controls_e2e.sh: drive, turn, aim and fire
+input="btn=a@$(r 10 12) btn=a@$(r 40 42) btn=x@$(r 80 82) btn=a@$(r 160 162) btn=x@$(r 420 422) btn=a@$(r 460 462)
+       btn=down@$(r 480 482) btn=a@$(r 500 502) btn=start@$(r 540 545) btn=x@$(r 600 602) btn=x@$(r 800 803)
+       btn=x@$(r 1300 1303) btn=r@$(r 1350 1352) btn=l@$(r 1370 1372)
+       lstick=1,0@$(r 1400 1459) lstick=0,-1@$(r 1460 1609) rstick=0,-1@$(r 1740 1900)"
+run direct $(f 2000) gromada_input_scheme=Diretto savestate=$(f 1440) loadstate=$(f 1800) "$@"; reload direct
+run direct_plain $(f 1920) gromada_input_scheme=Diretto "$@"
+run direct_runahead $(f 1920) gromada_input_scheme=Diretto runahead=1 "$@"
+runahead direct_plain direct_runahead
 # corrupted states
 run fuzz $(f 1400) statefuzz=400 "$@"
 if [ $fail -ne 0 ]; then echo "FAILED"; exit 1; fi

@@ -31,6 +31,8 @@ endif()
 gromada_add_test(ui_text_test ui_text_test.cpp)
 gromada_add_test(ui_data_test ui_data_test.cpp)
 gromada_add_test(input_mapper_test input_mapper_test.cpp)
+# Controls on the gameplay (issue #16): move orders, follow camera, weapons (synthetic).
+gromada_add_test(controls_test controls_test.cpp)
 gromada_add_test(cursor_file_test cursor_file_test.cpp)
 # Movies: synthetic tests (CI) and the full decode of the game's movies compared with ffmpeg.
 gromada_add_test(video_test video_test.cpp ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
@@ -49,9 +51,17 @@ gromada_add_test(sound_channels_test sound_channels_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 
+# Differential oracle of the sound-effect system (issue #18): DirectSound calls of the original
+# (vectors in the repo); with GROMADA_DATA also the fw.res descriptor table.
+gromada_add_test(sound_oracle_test sound_oracle_test.cpp)
+target_compile_definitions(sound_oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+
 # Differential oracle (issue #11): reference math vs vectors from the original exe (no game data).
 gromada_add_test(oracle_test oracle_test.cpp)
 target_compile_definitions(oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# The engine's own code against the same vectors (issue #12), no game data.
+gromada_add_test(engine_oracle_test engine_oracle_test.cpp)
+target_compile_definitions(engine_oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
 # Simulation engine (src/game, issue #8): synthetic tests, data-backed level runs and the
 # desktop driver tools/engine_run (screenshots + trace).
 gromada_add_test(engine_test engine_test.cpp)
@@ -82,6 +92,24 @@ add_test(NAME core_sfx_loop_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_s
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_120_out gromada_fps=120)
 set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_CODE 77)
 
+# Visual fidelity (issue #15): 16-bit colour tables, Effect(), gamma and putcadr against
+# vectors from the original exe (tests/data/oracle/hicolor_*.json; no game data needed).
+gromada_add_test(hicolor_test hicolor_test.cpp)
+target_compile_definitions(hicolor_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# Controls on the real gameplay (issue #16): direct scheme drives to a point and hits a target,
+# menus by pad only and by touch only; 60/120 fps x 4:3/16:9 (needs the game data).
+foreach(mode pad touch)
+    foreach(cfg "60;4:3" "120;4:3" "60;16:9" "120;16:9")
+        list(GET cfg 0 fps)
+        list(GET cfg 1 aspect)
+        string(REPLACE ":" "" tag "${aspect}")
+        set(name controls_e2e_${mode}_${fps}fps_${tag})
+        add_test(NAME ${name} COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/controls_e2e.sh $<TARGET_FILE:harness>
+                 $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/${name}_out ${mode}
+                 gromada_fps=${fps} gromada_aspect=${aspect})
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+endforeach()
 # Save states (issue #14): synthetic tests (format, engine, VM, mixer, mapper) and, with the
 # game data, determinism of real levels, run-ahead, demos and corrupted states; plus the core
 # end to end through the harness (tests/savestate_e2e.sh).

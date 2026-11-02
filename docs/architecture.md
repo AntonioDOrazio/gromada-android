@@ -26,8 +26,11 @@ testi, menu), `input/` (controller, cursori), `video/` (filmati), `demo/` (parse
 - Eccezione (issue #10): `Action`, `GetX`, `GetY`, `GetUnitVid` su un handle di un oggetto della
   sessione (menu, testi: bit 30 acceso, `>= 0x40000000`) li gestisce la sessione; gli handle delle
   unità del motore devono restare sotto `0x40000000`.
+- Query opzionale aggiunta dalla #16 (controlli): `playerAim()` (flagman, gittata dell'arma,
+  unità colpibili; vuota di default), vedi `docs/controls.md`.
 - Ganci opzionali aggiunti dalla #10 (implementazione vuota di default): `setScrollLock(bool)` e
   `drawScreenEffects(fb)`; vedi `docs/session.md`.
+- Gancio opzionale aggiunto dalla #15: `stateBarInfo()` (dati della barra di stato).
 - Il motore si costruisce in un solo punto: `makeGameEngine()` in `src/gromada_libretro.cpp`.
 - Finché il motore (#8) non è fuso, la sessione usa un'implementazione provvisoria del contratto
   basata su `engine/level.hpp` (disegno del livello, builtin minime), così da poter sviluppare menu,

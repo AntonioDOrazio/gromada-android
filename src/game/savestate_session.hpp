@@ -35,9 +35,17 @@ struct SessionStaged {
     double moviePosition = 0;
     std::filesystem::path moviePath;
     struct SfxRequest { int nsfx, pan, attenuation; };
-    struct SfxChannel { int nsfx; bool active; std::uint32_t voice, time; };
+    struct SfxChannel { bool active, loaded; int nsfx; std::uint32_t time; };
+    struct SfxBuffer { std::int32_t sound; const SoundData* data; int nsfx; std::uint32_t voice; int pan, attenuation; };
     std::array<SfxRequest, SoundChannels::QueueSize> sfxQueue{};
     std::array<SfxChannel, SoundChannels::ChannelCount> sfxChannels{};
+    std::array<SfxBuffer, SoundChannels::ChannelCount> sfxBuffers{};   // Session::MixerSink
+    std::string wavName;
+    bool wavLoaded = false;
+    std::uint32_t messageClock = 0;
+    // controls (issue #16)
+    struct FollowState { bool valid, hold; float fx, fy, vx, vy; int px, py, lastX, lastY; } follow{};
+    struct HudState { int current, requested; float timer; } hud{-1, -1, 0};
     std::optional<std::deque<SoundData>> wavs; // reloaded PlayWAV sounds (names differ)
     std::vector<std::string> wavNames;
     std::array<int, 4> playlist{};
@@ -62,6 +70,7 @@ struct SessionStaged {
     std::string message;
     int nextObject = 1;
     std::uint64_t seq = 0;
+    std::uint32_t uiClock = 0, uiUpdateClock = 0;
     ui::TextManagerState texts;
     // output picture (only stored while a demo plays: a demo frame without a tick shows it)
     std::vector<std::uint32_t> xrgb;
@@ -165,7 +174,22 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
     if (s.m_movieActive) w.f64(*s.m_movies->position());
     // sound-effect scheduler: pending requests and the 8 channels (voice ids of the mixer)
     for (const auto& q : s.m_sfx.m_queue) { w.i32(q.nsfx); w.i32(q.pan); w.i32(q.attenuation); }
-    for (const auto& c : s.m_sfx.m_channels) { w.i32(c.nsfx); w.boolean(c.active); w.u32(c.voice); w.u32(c.time); }
+    for (const auto& c : s.m_sfx.m_channels) { w.boolean(c.active); w.boolean(c.loaded); w.i32(c.nsfx); w.u32(c.time); }
+    w.str(s.m_sfx.m_wavName);
+    for (const auto& b : s.m_sfxSink.buffers) {   // one DirectSound buffer per channel
+        w.i32(b.sound ? soundRef(s, b.sound) : 0);
+        w.i32(b.nsfx); w.u32(b.voice); w.i32(b.pan); w.i32(b.attenuation);
+    }
+    w.boolean(s.m_wavLoaded);
+    w.u32(s.m_messageClock);
+    {
+        const FollowCamera& f = s.m_follow;   // its Params are configuration
+        w.boolean(f.m_valid); w.boolean(f.m_hold);
+        w.f32(f.m_fx); w.f32(f.m_fy); w.f32(f.m_vx); w.f32(f.m_vy);
+        w.i32(f.m_px); w.i32(f.m_py); w.i32(f.m_lastX); w.i32(f.m_lastY);
+        const WeaponHud& h = s.m_weaponHud;
+        w.i32(h.m_current); w.i32(h.m_requested); w.f32(h.m_timer);
+    }
     w.count(s.m_wavNames.size());
     for (const auto& n : s.m_wavNames) w.str(n);
     for (const int t : s.m_playlist) w.i32(t);
@@ -197,7 +221,7 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
     for (const ScreenObject& o : u.m_objects) {
         w.i32(o.handle); w.u16(o.nvid); w.i32(o.x); w.i32(o.y); w.i32(o.z);
         w.i32(o.dirIndex); w.i32(o.action); w.i32(o.layer); w.u8(static_cast<std::uint8_t>(o.list));
-        w.boolean(o.button); w.u64(o.seq); w.i32(o.frame); w.f32(o.clockMs);
+        w.boolean(o.button); w.u64(o.seq); w.i32(o.frame); w.u32(o.lastTact); w.boolean(o.soundDone);
     }
     w.array(std::span<const int>{u.m_menu});
     w.count(u.m_textSeq.size());
@@ -208,6 +232,7 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
     w.str(u.m_message);
     w.i32(u.m_nextObject);
     w.u64(u.m_seq);
+    w.u32(u.m_clock); w.u32(u.m_updateClock);   // m_rand is the engine's rand() (configuration)
     ui::SaveStateAccess::save(w, u.m_texts);
     // script identity (the VM chunk follows the session chunk)
     w.boolean(static_cast<bool>(s.m_vm));
@@ -285,10 +310,27 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
         q.attenuation = r.ranged<std::int32_t>(std::numeric_limits<std::int32_t>::min() / 2, 0, "sound attenuation");
     }
     for (auto& c : st.sfxChannels) {
-        c.nsfx = r.i32();
         c.active = r.boolean();
-        c.voice = r.u32();
+        c.loaded = r.boolean();
+        c.nsfx = r.i32();
         c.time = r.u32();
+    }
+    st.wavName = r.str(4096);
+    for (auto& b : st.sfxBuffers) {
+        b.sound = r.i32();
+        b.data = nullptr;   // resolved with the PlayWAV sounds below
+        b.nsfx = r.i32(); b.voice = r.u32(); b.pan = r.i32(); b.attenuation = r.i32();
+    }
+    for (std::size_t i = 0; i < st.sfxChannels.size(); ++i)
+        if (st.sfxChannels[i].loaded != (st.sfxBuffers[i].sound != 0)) throw state::Error("save state: sound channel without its buffer");
+    st.wavLoaded = r.boolean();
+    st.messageClock = r.u32();
+    {
+        auto& f = st.follow;
+        f.valid = r.boolean(); f.hold = r.boolean();
+        f.fx = r.finite32(); f.fy = r.finite32(); f.vx = r.finite32(); f.vy = r.finite32();
+        f.px = r.i32(); f.py = r.i32(); f.lastX = r.i32(); f.lastY = r.i32();
+        st.hud.current = r.i32(); st.hud.requested = r.i32(); st.hud.timer = r.finite32();
     }
     const std::size_t nWavs = r.count(4, 1u << 12);
     for (std::size_t i = 0; i < nWavs; ++i) st.wavNames.push_back(r.str(4096));
@@ -336,7 +378,8 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
         o.button = r.boolean();
         o.seq = r.u64();
         o.frame = r.i32();
-        o.clockMs = r.finite32();
+        o.lastTact = r.u32();
+        o.soundDone = r.boolean();
         st.objects.push_back(o);
     }
     st.menu = r.array<int>(1u << 16);
@@ -351,6 +394,7 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
     st.message = r.str(1u << 16);
     st.nextObject = r.i32();
     st.seq = r.u64();
+    st.uiClock = r.u32(); st.uiUpdateClock = r.u32();
     st.texts = ui::SaveStateAccess::decode(r);
     st.hasVm = r.boolean();
     std::string ini;
@@ -402,15 +446,18 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
     const auto* engine = dynamic_cast<const GameEngine*>(s.m_engine.get());
     if (!engine) throw state::Error("save state: the engine has no save states");
     st.engine = decodeEngine(outer, *engine);
-    if (st.hasMixer) {
-        const std::deque<SoundData>& wavs = st.wavs ? *st.wavs : s.m_wavs;
-        st.mixer = gromada::SaveStateAccess::decode(outer, [&](std::int32_t id) -> const SoundData* {
-            if (id >= 1 && static_cast<std::size_t>(id) <= s.m_sounds.size()) return &s.m_sounds[static_cast<std::size_t>(id - 1)];
-            const std::int64_t extra = std::int64_t{id} - static_cast<std::int64_t>(s.m_sounds.size()) - 1;
-            if (extra >= 0 && static_cast<std::size_t>(extra) < wavs.size()) return &wavs[static_cast<std::size_t>(extra)];
-            return nullptr;
-        });
-    }
+    // Sounds referenced by the channel buffers and the mixer voices (fw.res, then PlayWAV).
+    const std::deque<SoundData>& wavs = st.wavs ? *st.wavs : s.m_wavs;
+    if (st.wavLoaded && wavs.empty()) throw state::Error("save state: PlayWAV slot without a sound");
+    const auto lookup = [&](std::int32_t id) -> const SoundData* {
+        if (id >= 1 && static_cast<std::size_t>(id) <= s.m_sounds.size()) return &s.m_sounds[static_cast<std::size_t>(id - 1)];
+        const std::int64_t extra = std::int64_t{id} - static_cast<std::int64_t>(s.m_sounds.size()) - 1;
+        if (extra >= 0 && static_cast<std::size_t>(extra) < wavs.size()) return &wavs[static_cast<std::size_t>(extra)];
+        return nullptr;
+    };
+    for (auto& b : st.sfxBuffers)
+        if (b.sound && !(b.data = lookup(b.sound))) throw state::Error("save state: unknown sound in a channel buffer");
+    if (st.hasMixer) st.mixer = gromada::SaveStateAccess::decode(outer, lookup);
     return st;
 }
 
@@ -464,11 +511,23 @@ inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
         s.m_sfx.m_queue[i] = {st.sfxQueue[i].nsfx, st.sfxQueue[i].pan, st.sfxQueue[i].attenuation};
     for (std::size_t i = 0; i < st.sfxChannels.size(); ++i) {
         const auto& c = st.sfxChannels[i];
-        // a channel must not follow a voice the mixer does not have (dropped or no mixer):
-        // it is then a finished channel, as after its sound ended
-        const bool alive = c.voice && s.m_mixer && st.hasMixer &&
-                           std::ranges::any_of(st.mixer.voices, [&](const MixerState::Voice& v) { return v.id == c.voice; });
-        s.m_sfx.m_channels[i] = {c.nsfx, c.active && alive, alive ? c.voice : 0u, c.time};
+        const auto& b = st.sfxBuffers[i];
+        s.m_sfx.m_channels[i] = {c.active, c.loaded, c.nsfx, c.time};
+        // The voice id is kept as saved. The mixer is restored with the same voices and the
+        // same next id, so the id is either a restored voice or one that already ended, which
+        // the mixer treats like the game does (not playing; Play starts the sound again).
+        s.m_sfxSink.buffers[i] = {b.data, b.nsfx, b.voice, b.pan, b.attenuation};
+    }
+    s.m_sfx.m_wavName = std::move(st.wavName);
+    s.m_wavLoaded = st.wavLoaded;
+    s.m_messageClock = st.messageClock;
+    {
+        FollowCamera& f = s.m_follow;
+        f.m_valid = st.follow.valid; f.m_hold = st.follow.hold;
+        f.m_fx = st.follow.fx; f.m_fy = st.follow.fy; f.m_vx = st.follow.vx; f.m_vy = st.follow.vy;
+        f.m_px = st.follow.px; f.m_py = st.follow.py; f.m_lastX = st.follow.lastX; f.m_lastY = st.follow.lastY;
+        s.m_weaponHud.m_current = st.hud.current; s.m_weaponHud.m_requested = st.hud.requested;
+        s.m_weaponHud.m_timer = st.hud.timer;
     }
     if (st.wavs) s.m_wavs = std::move(*st.wavs);
     s.m_wavNames = std::move(st.wavNames);
@@ -497,6 +556,7 @@ inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
     u.m_message = std::move(st.message);
     u.m_nextObject = st.nextObject;
     u.m_seq = st.seq;
+    u.m_clock = st.uiClock; u.m_updateClock = st.uiUpdateClock;
     ui::SaveStateAccess::apply(u.m_texts, std::move(st.texts));
     if (s.m_mixer && st.hasMixer) gromada::SaveStateAccess::apply(*s.m_mixer, std::move(st.mixer));
     s.updateView();
@@ -652,10 +712,10 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
 #if defined(__x86_64__) && defined(_LIBCPP_VERSION) && !defined(GROMADA_NO_SAVESTATE_TRIPWIRE)
 #define GROMADA_SAVESTATE_TRIPWIRE(T, n) \
     static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
-GROMADA_SAVESTATE_TRIPWIRE(World, 2752);
-GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 2976);
-GROMADA_SAVESTATE_TRIPWIRE(Session, 2432);
-GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 304);
+GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
+GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3184);
+GROMADA_SAVESTATE_TRIPWIRE(Session, 2768);
+GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 352);
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
 GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);
 GROMADA_SAVESTATE_TRIPWIRE(DemoPlayer, 160);
@@ -666,20 +726,24 @@ GROMADA_SAVESTATE_TRIPWIRE(VidInfo, 288);
 GROMADA_SAVESTATE_TRIPWIRE(Player, 36);
 GROMADA_SAVESTATE_TRIPWIRE(Group, 32);
 GROMADA_SAVESTATE_TRIPWIRE(CommandStack, 32);
-GROMADA_SAVESTATE_TRIPWIRE(ScreenObject, 56);
+GROMADA_SAVESTATE_TRIPWIRE(ScreenObject, 64);
 GROMADA_SAVESTATE_TRIPWIRE(MenuState, 16);
 GROMADA_SAVESTATE_TRIPWIRE(script::Interpreter, 320);
 GROMADA_SAVESTATE_TRIPWIRE(script::StringMemory, 24);
 GROMADA_SAVESTATE_TRIPWIRE(ui::TextManager, 112);
 GROMADA_SAVESTATE_TRIPWIRE(ui::ScreenText, 56);
-GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 408);
-GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 104);
+GROMADA_SAVESTATE_TRIPWIRE(input::Mapper, 488);
+GROMADA_SAVESTATE_TRIPWIRE(input::PcState, 112);
 GROMADA_SAVESTATE_TRIPWIRE(input::RawInput, 112);
 GROMADA_SAVESTATE_TRIPWIRE(Mixer, 248);
+GROMADA_SAVESTATE_TRIPWIRE(ScreenEffects, 112);
+GROMADA_SAVESTATE_TRIPWIRE(FollowCamera, 56);
+GROMADA_SAVESTATE_TRIPWIRE(WeaponHud, 12);
 inline void SaveStateAccess::tripwire() {
     GROMADA_SAVESTATE_TRIPWIRE(SoundChannels::Request, 12);
-    GROMADA_SAVESTATE_TRIPWIRE(SoundChannels::Channel, 16);
+    GROMADA_SAVESTATE_TRIPWIRE(SoundChannels::Channel, 12);
     GROMADA_SAVESTATE_TRIPWIRE(SaveFiles::File, 64);
+    GROMADA_SAVESTATE_TRIPWIRE(Session::MixerSink::Buffer, 24);
 }
 #undef GROMADA_SAVESTATE_TRIPWIRE
 #endif

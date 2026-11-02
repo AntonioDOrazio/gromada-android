@@ -9,62 +9,13 @@
 #include <cstring>
 #include <unordered_map>
 #include "game/engine_api.hpp"
+#include "game/hicolor.hpp"
+#include "game/screen_effects.hpp"
 #include "game/world.hpp"
 #include "libgromada/libgromada_all.hpp"
 
 namespace gromada::game {
 
-namespace detail {
-
-// Palette with the global gamma of the map (0x4072c0, three nibbles 0xRGB, 7 = neutral,
-// 0 = channel off, 15 = saturated, 1..6 darker, 8..14 lighter). The original works on the
-// 16-bit palette with a lookup table; this is the same rule on 8-bit channels.
-inline std::uint8_t gammaChannel(std::uint8_t c, int n) {
-    if (n == 7) return c;
-    if (n >= 15) return 255;
-    if (n < 1) return 0;
-    if (n < 7) return static_cast<std::uint8_t>(c * (n + 1) / 8);
-    return static_cast<std::uint8_t>(std::min(255, c * 8 / (15 - n)));
-}
-inline void applyGamma(std::array<ColorRgb8, 256>& pal, int gamma) {
-    const int r = (gamma >> 8) & 0xf, g = (gamma >> 4) & 0xf, b = gamma & 0xf;
-    if (r == 7 && g == 7 && b == 7) return;
-    for (auto& c : pal) c = {gammaChannel(c.r, r), gammaChannel(c.g, g), gammaChannel(c.b, b)};
-}
-
-// Draws a frame as a shadow: every opaque pixel darkens the destination (putcadr in shadow
-// mode, 0x4021f0).
-struct ShadowVisitor {
-    int x0, y0;
-    FramebufferRef fb;
-    int x = 0, y = 0;
-    [[nodiscard]] ClippingInfo begin_image(BoundingBox source_rect) noexcept {
-        const BoundingBox dst{-x0, fb.extent(1) - x0, -y0, fb.extent(0) - y0};
-        return {source_rect, dst};
-    }
-    void set_cursor(int cx, int cy) noexcept { x = x0 + cx; y = y0 + cy; }
-    void advance_cursor(int n) noexcept { x += n; }
-    void dark(int n) noexcept {
-        if (y >= 0 && y < fb.extent(0)) {
-            const int e = std::min(x + n, fb.extent(1));
-            for (int i = std::max(x, 0); i < e; ++i) {
-                auto& p = fb[y, i];
-                p = RGBA8{{static_cast<std::uint8_t>(p.r >> 1), static_cast<std::uint8_t>(p.g >> 1),
-                           static_cast<std::uint8_t>(p.b >> 1)}, 255};
-            }
-        }
-        x += n;
-    }
-    void draw_pixels_shadow(int n) noexcept { advance_cursor(n); }
-    void draw_pixels(std::span<const CompressedColor> c) noexcept { dark(static_cast<int>(c.size())); }
-    void draw_pixels_indexed(std::span<const IndexedColor> c) noexcept { dark(static_cast<int>(c.size())); }
-    void draw_pixels_repeat(int n, IndexedColor) noexcept { dark(n); }
-    void draw_pixels_repeat(int n, CompressedColor) noexcept { dark(n); }
-    void draw_pixels_light(int n, std::uint8_t, std::uint8_t, std::uint8_t) noexcept { advance_cursor(n); }
-    void draw_pixels_alpha_blend(std::uint8_t, std::span<const std::byte> c) noexcept { advance_cursor(static_cast<int>(c.size())); }
-};
-
-} // namespace detail
 
 class GameEngine final : public Engine {
 public:
@@ -91,9 +42,9 @@ public:
         m_scrollVX = m_scrollVY = 0;
         m_autoScroll = false;
         m_scrollLock = false;
-        m_effect = 0;
-        m_effectLevel = 0;
-        m_lights.clear();
+        m_lights.clear();   // CreateLight records (never drawn by the original either)
+        m_frameLocked = false;
+        m_turretClock = m_world.clock();
         m_iterUnit = -1;
         m_loaded = true;
     }
@@ -113,6 +64,8 @@ public:
 
     // ------------------------------------------------------------ frame phases
     void beginFrame(int elapsedMs) override {
+        // A frame that was not drawn still steps Effect() (EndFrame with draw == 0).
+        if (!std::exchange(m_effectsDone, false) && m_loaded) m_effects.endFrame(std::nullopt, m_world.clock(), m_frameLocked);
         m_realElapsed = std::max(0, elapsedMs);
         m_world.advanceClock(elapsedMs);
     }
@@ -130,10 +83,10 @@ public:
     void tactWorld() override {
         m_world.setCamera(m_camera.x, m_camera.y, m_camera.width, m_camera.height);
         m_world.tact();
-        advanceEffect();
     }
     void tactPlayers() override {
         if (m_world.paused()) return;
+        m_turretSteps = turretSteps();
         for (auto& p : m_world.players()) playerTact(p);
     }
     void tactGroupAi() override {
@@ -151,6 +104,7 @@ public:
     [[nodiscard]] int clock() const override { return static_cast<int>(m_world.clock()); }
     [[nodiscard]] Camera& camera() override { return m_camera; }
     [[nodiscard]] CursorKind cursorAt(int screenX, int screenY) const override;
+    [[nodiscard]] PlayerAim playerAim() const override;
     [[nodiscard]] std::vector<SoundEvent> takeSounds() override {
         std::vector<SoundEvent> out;
         auto& s = m_world.sounds();
@@ -166,19 +120,32 @@ public:
     void setScrollLock(bool on) override { m_scrollLock = on; }
     // Demo playback: the recorded initial clock. Sprites created by loadMap() keep ticking
     // from the new clock (their lastTact is moved with it).
+    // The clock then comes from a recording: the original's per-frame behaviours (turret
+    // turning, eff_openwindow) run once per recorded frame instead of being paced on time.
     void setClock(std::uint32_t c) override {
         const std::uint32_t old = m_world.clock();
         m_world.setClock(c);
+        m_frameLocked = true;
+        m_turretClock = c;
         for (int l = 0; l < World::MaxLayers; ++l)
             for (Sprite* s = m_world.layerHead(l); s; s = s->next)
                 for (Sprite* k = s; k; k = k->child) k->lastTact += c - old;
     }
 
+    std::optional<StateBarInfo> stateBarInfo() override;
+
     // ------------------------------------------------------------ extras (tools, tests)
     World& world() noexcept { return m_world; }
     const World& world() const noexcept { return m_world; }
     [[nodiscard]] int globalGamma() const noexcept { return m_gamma; }
-    [[nodiscard]] int effect() const noexcept { return m_effect; }
+    [[nodiscard]] int effect() const noexcept { return m_effects.effect(); }
+    [[nodiscard]] const ScreenEffects& screenEffects() const noexcept { return m_effects; }
+    // Effect() on the finished picture (menus, texts and status bar included), 0x406ea0.
+    void drawScreenEffects(FramebufferRef fb) override {
+        if (!m_loaded) return;
+        m_effects.endFrame(fb, m_world.clock(), m_frameLocked);
+        m_effectsDone = true;
+    }
     [[nodiscard]] bool autoScroll() const noexcept { return m_autoScroll; }
 
 private:
@@ -186,12 +153,16 @@ private:
     Sprite* unit(int id) const { return m_world.byId(id); }
 
     void playerTact(Player& p);
+    int turretSteps();
+    void turnTurret(Sprite& head, int dir) {
+        for (int i = 0; i < m_turretSteps; ++i)
+            if (m_world.turnStep(head, dir)) break;
+    }
     void scrollCamera();
     void clampCamera();
-    void advanceEffect();
-    void applyEffect(FramebufferRef fb) const;
     void drawSprite(const Sprite& s, FramebufferRef fb);
     const std::array<ColorRgb8, 256>* paletteFor(const Sprite& s);
+    const VidInfo& graphicsOwner(int nvid) const;
     void setGlobalGamma(int g) {
         if (g == m_gamma) return;
         m_gamma = g;
@@ -209,8 +180,11 @@ private:
     int m_scrollVX = 0, m_scrollVY = 0;
     bool m_autoScroll = false, m_scrollLock = false;
     int m_gamma = 0x777;
-    int m_effect = 0, m_effectLevel = 0;
-    std::uint32_t m_effectClock = 0;
+    ScreenEffects m_effects;
+    bool m_effectsDone = true;
+    bool m_frameLocked = false;          // demo playback: one original frame per frame
+    std::uint32_t m_turretClock = 0;     // turret pacing (D9)
+    int m_turretSteps = 1;
     struct Light { int x, y, z, color; };
     std::vector<Light> m_lights;
     int m_iterUnit = -1, m_iterArmy = 0, m_iterType = 0;
@@ -223,7 +197,7 @@ private:
 
 // ---------------------------------------------------------------------------- players
 // 0x4169b0 Player::Tact: cursor, left click = move, right click = fire, turret follows the
-// mouse (one direction step per frame, like the original).
+// mouse (one direction step per original frame, see turretSteps()).
 inline void GameEngine::playerTact(Player& p) {
     if (p.type != 1) return;
     Sprite* f = m_world.byId(p.flagman);
@@ -249,13 +223,78 @@ inline void GameEngine::playerTact(Player& p) {
     if (!m_world.vidOf(*f).linkedObjectVid || !head || head->action == act::fight) return;
     const Weapon& w = m_world.weaponOf(*f);
     if (under && !(m_world.vidOf(*under).category & static_cast<std::uint8_t>(w.targetCategory))) under = nullptr;
-    if (w.flags & 4) { m_world.turnStep(*head, f->direction); return; }
+    // the head's own weapon decides the aiming (0x416b8b: flag 4; 0x416be1: anti-aircraft =
+    // targetCategory & Avia, 80 px higher)
+    const Weapon& hw = m_world.weaponOf(*head);
+    if (hw.flags & 4) { turnTurret(*head, f->direction); return; }
     if (under) {
-        m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, under->y).dir());
+        turnTurret(*head, m_world.getDirection(f->x, f->y, mx, under->y).dir());
         return;
     }
-    const int ty = my + ((w.flags & 8) ? 80 : 0);
-    m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, ty).dir());
+    const int ty = my + ((static_cast<std::uint8_t>(hw.targetCategory) & cat::Avia) ? 80 : 0);
+    turnTurret(*head, m_world.getDirection(f->x, f->y, mx, ty).dir());
+}
+
+// D9: Player::Tact turns the turret by one direction step per call (0x40b220), i.e. per frame
+// of the original. Here the steps are paced on the original's mean frame time
+// (ScreenEffects::ReferenceFrameMs of game clock per step, at most 2 per frame), so the turret
+// turns at the same speed at 60 and 120 fps as gromada.exe at ~27 fps. Demo playback (recorded
+// frames, setClock) keeps one step per frame.
+inline int GameEngine::turretSteps() {
+    if (m_frameLocked) return 1;
+    constexpr std::uint32_t period = ScreenEffects::ReferenceFrameMs;
+    const std::uint32_t now = m_world.clock();
+    const auto elapsed = static_cast<std::int32_t>(now - m_turretClock);
+    if (elapsed < 0 || elapsed > static_cast<std::int32_t>(4 * period)) {   // Pause(0) rewound the clock, or a long stall
+        m_turretClock = now - (elapsed < 0 ? 0 : period);
+        return elapsed < 0 ? 0 : 1;
+    }
+    const int steps = static_cast<int>(static_cast<std::uint32_t>(elapsed) / period);
+    m_turretClock += static_cast<std::uint32_t>(steps) * period;
+    return std::min(steps, 2);
+}
+
+// StateBar::Tact 0x416de0 (called by Player::Tact for the local player): flagman hp and
+// ammo, the weapon head, the radar dots (grid objects within +-464 px, 0x40d6d0) and the
+// nearest enemy (grid unit list, army 1, distance <= 60000, 0x417209).
+inline std::optional<StateBarInfo> GameEngine::stateBarInfo() {
+    if (!m_loaded || m_world.paused()) return std::nullopt;
+    const Player& p = m_world.players()[0];
+    Sprite* f = p.type == 1 ? m_world.byId(p.flagman) : nullptr;
+    if (!f) return std::nullopt;
+    StateBarInfo out;
+    out.hp = f->hp;
+    out.maxHp = m_world.vidOf(*f).maxHP;
+    if (const Sprite* c = f->child) {
+        out.turretNvid = c->nvid;
+        if (const Vid* src = m_world.vidOf(*c).src) out.turretName.assign(src->name.data(), strnlen(src->name.data(), src->name.size()));
+    }
+    for (std::size_t i = 0; i < out.ammo.size(); ++i) out.ammo[i] = f->ammo[i];
+    // Colours initialised once by 0x416e16 (0x405560) and the grey of SetMode (+0x1a82).
+    constexpr auto own = hicolor::fromRgb8(0x53, 0xa5, 0x36), avia1 = hicolor::fromRgb8(0x38, 0x91, 0xa5),
+                   avia = hicolor::fromRgb8(0x23, 0x58, 0x64), mine = hicolor::fromRgb8(0xc8, 0x32, 0x32),
+                   missile = hicolor::fromRgb8(0xc8, 0xc8, 0x32);
+    m_world.forEachInRect(f->x - 0x1d0, f->y - 0x1d0, f->x + 0x1d0, f->y + 0x1d0, [&](Sprite* o) {
+        if (o == f) return true;
+        const VidInfo& v = m_world.vidOf(*o);
+        std::uint16_t c = 0;
+        if (v.cls == cls::AviaMissile) c = missile;
+        else if (v.category & cat::Avia) c = v.army == 1 ? avia1 : avia;
+        else if (v.cls == cls::Mine) c = mine;
+        else if (v.category & cat::Vehicle) c = v.army == 1 ? own : hicolor::Grey;
+        if (c) out.radar.push_back({o->x - f->x, o->y - f->y, c});
+        return true;
+    });
+    int best = 60001;
+    const Sprite* nearest = nullptr;
+    for (const Sprite* u : m_world.gridUnits()) {
+        const VidInfo& v = m_world.vidOf(*u);
+        if (!(v.category & (cat::Vehicle | cat::Avia)) || u == f || v.army != 1) continue;   // single player: no net Kassandra
+        const int d = World::distance(*f, *u);
+        if (d <= 60000 && d < best) { best = d; nearest = u; }
+    }
+    if (nearest) out.enemyDirection = fx::getDirection(f->x, f->y, nearest->x, nearest->y).dir() & 0xff;
+    return out;
 }
 
 inline CursorKind GameEngine::cursorAt(int screenX, int screenY) const {
@@ -267,6 +306,33 @@ inline CursorKind GameEngine::cursorAt(int screenX, int screenY) const {
     if (Sprite* u = w.unitAt(wx, wy); u && f->army != w.vidOf(*u).army) return CursorKind::Fight;
     if (w.askPlace(*f, wx, wy, f->z)) return CursorKind::NoMove;
     return CursorKind::Move;
+}
+
+// Controls query (issue #16): the units FindTarget (0x40c970) would accept for the flagman's
+// current weapon, wherever they are, with the point that selects them under the cursor
+// (unitAt's box centre), so that a right click there attacks them.
+inline PlayerAim GameEngine::playerAim() const {
+    PlayerAim out;
+    auto& w = const_cast<World&>(m_world);
+    const Player& p = w.players()[0];
+    Sprite* f = w.byId(p.flagman);
+    if (!f || p.type != 1 || !f->alive) return out;
+    out.valid = true;
+    out.flagmanX = f->x;
+    out.flagmanY = f->y;
+    const Weapon& wp = w.weaponOf(*f);
+    out.weaponRange = static_cast<std::int16_t>(wp.weaponRange);
+    const auto tcat = static_cast<std::uint8_t>(wp.targetCategory);
+    const int myArmy = w.action(*f, act::getarmy, 0, 0);
+    for (Sprite* u : w.gridUnits()) {
+        if (u == f || !u->alive || (u->state & st::Invisible)) continue;
+        const VidInfo& uv = w.vidOf(*u);
+        if (!(uv.category & tcat)) continue;
+        const int ua = w.action(*u, act::getarmy, 0, 0);
+        if (ua == 2 || ua == myArmy) continue;
+        out.targets.push_back({World::idOf(u), u->x, u->y - u->z - (uv.sizeZ >> 1), u->x, u->y, u->hp});
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------- camera
@@ -290,10 +356,13 @@ inline void GameEngine::scrollCamera() {
         m_camera.x = static_cast<std::int16_t>(m_camera.x + ((dt * m_scrollVX) >> 10));
         m_camera.y = static_cast<std::int16_t>(m_camera.y + ((dt * m_scrollVY) >> 10));
         if (f) {
-            if (m_camera.x < f->x - 586) m_camera.x = f->x - 586;
-            if (m_camera.y < f->y - 440) m_camera.y = f->y - 440;
-            if (m_camera.x + w > f->x + 586) m_camera.x = f->x - w + 586;
-            if (m_camera.y + h > f->y + 440) m_camera.y = f->y - h + 440;
+            // 586 x 440 = a 640 x 480 view minus 54 x 40: the flagman stays at least 54 x 40 px
+            // inside the view. Wider views (16:9) keep the same margin (issue #16).
+            const int lx = std::max(586, w - 54), ly = std::max(440, h - 40);
+            if (m_camera.x < f->x - lx) m_camera.x = f->x - lx;
+            if (m_camera.y < f->y - ly) m_camera.y = f->y - ly;
+            if (m_camera.x + w > f->x + lx) m_camera.x = f->x - w + lx;
+            if (m_camera.y + h > f->y + ly) m_camera.y = f->y - h + ly;
         }
     }
 }
@@ -307,56 +376,34 @@ inline void GameEngine::clampCamera() {
     if (m_camera.y > m_world.mapHeight() - m_camera.height - 1) m_camera.y = m_world.mapHeight() - m_camera.height - 1;
 }
 
-// ---------------------------------------------------------------------------- effects
-// Effect(eff) (0x406e40/0x406ea0): the level rises by 2 every 71 ms of game clock up to 7,
-// then fades from -32 back to 0. 1 = white flash, 2/3/4 = red/green/blue, 5 = fade.
-inline void GameEngine::advanceEffect() {
-    if (!m_effect || m_effect == 6) return;
-    const std::uint32_t now = m_world.clock();
-    while (now - m_effectClock >= 71) {
-        m_effectClock += 71;
-        if (m_effectLevel > 0) {
-            m_effectLevel += 2;
-            if (m_effectLevel > 6) m_effectLevel = -32;
-        } else {
-            m_effectLevel += 1;
-            if (m_effectLevel >= 0) { m_effect = 0; m_effectLevel = 0; return; }
-        }
-    }
-}
-
-inline void GameEngine::applyEffect(FramebufferRef fb) const {
-    if (!m_effect || m_effect == 6 || !m_effectLevel) return;
-    const int lv = m_effectLevel > 0 ? m_effectLevel * 2 : (-m_effectLevel) >> 2;   // 0..14 / 0..8
-    const int t = std::min(255, lv * 255 / 14);
-    ColorRgb8 target{255, 255, 255};
-    if (m_effect == 2) target = {255, 0, 0};
-    else if (m_effect == 3) target = {0, 255, 0};
-    else if (m_effect == 4) target = {0, 0, 255};
-    else if (m_effect == 5) target = {0, 0, 0};
-    for (int y = 0; y < fb.extent(0); ++y)
-        for (int x = 0; x < fb.extent(1); ++x) {
-            auto& p = fb[y, x];
-            p.r = static_cast<std::uint8_t>((p.r * (255 - t) + target.r * t) / 255);
-            p.g = static_cast<std::uint8_t>((p.g * (255 - t) + target.g * t) / 255);
-            p.b = static_cast<std::uint8_t>((p.b * (255 - t) + target.b * t) / 255);
-        }
-}
-
 // ---------------------------------------------------------------------------- drawing
+// The vid whose graphics a vid uses (0x130 chain, 0x402346): its flags decide the gamma.
+inline const VidInfo& GameEngine::graphicsOwner(int nvid) const {
+    const auto& vids = m_world.vids();
+    const VidInfo* v = &vids[static_cast<std::size_t>(nvid)];
+    for (int guard = 0; guard < 8 && v->src; ++guard) {
+        const auto* from = std::get_if<std::int32_t>(&v->src->graphicsData);
+        if (!from || *from < 0 || *from >= static_cast<int>(vids.size())) break;
+        v = &vids[static_cast<std::size_t>(*from)];
+    }
+    return *v;
+}
+
+// The palette a sprite is drawn with: an alternative palette (st_gamma, 0x40b660) or the
+// graphics' 16-bit palette with the global gamma (0x406830), as displayed 565 colours.
 inline const std::array<ColorRgb8, 256>* GameEngine::paletteFor(const Sprite& s) {
     const VidInfo& v = m_world.vidOf(s);
     if (!v.gfx) return nullptr;
     if (v.altPalettes) return &(*v.altPalettes)[(s.state >> 12) & 3];
     auto& cached = m_palettes[s.nvid];
-    if (!cached) {
-        cached = v.gfx->palette;
-        if (m_gamma != 0x777 && v.gfx->dataFormat == 2 && !(v.flags & vf::IgnoreGlobalGamma)) detail::applyGamma(*cached, m_gamma);
-    }
+    if (!cached)
+        cached = hicolor::expand(hicolor::palette16(v.gfx->palette, m_gamma, (graphicsOwner(s.nvid).flags & vf::IgnoreGlobalGamma) != 0));
     return &*cached;
 }
 
-// 0x40b620 + 0x4021f0: one sprite, with its shadow.
+// 0x40b620 + 0x4021f0: one sprite. With vid flag 0x80 (Shadow) and z > 0 putcadr first draws
+// the same frame as a cast shadow at (x - z/2 - z/4, y + z/4 - z/2), then the body (at y - z
+// unless ZeroZ), whose own shadow pixels are then skipped (hicolor::FrameVisitor).
 inline void GameEngine::drawSprite(const Sprite& s, FramebufferRef fb) {
     const VidInfo& v = m_world.vidOf(s);
     if (!v.gfx || s.frame < 0 || static_cast<std::size_t>(s.frame) >= v.gfx->frames.size()) return;
@@ -367,16 +414,11 @@ inline void GameEngine::drawSprite(const Sprite& s, FramebufferRef fb) {
     int sx = s.x - (v.width >> 1), sy = s.y - (v.height >> 1);
     if (!(s.state & st::Screen)) { sx -= m_camera.x; sy -= m_camera.y; }
     int z = s.z;
-    if ((v.flags & vf::Shadow) && z > 0) {
-        const int shx = sx - (z >> 1) - (z >> 2), shy = sy + (z >> 2) - (z >> 1);
-        if (!(shx + v.width <= 0 || shy + v.height <= 0 || shx >= fb.extent(1) || shy >= fb.extent(0)))
-            DecodeFrame(frame, detail::ShadowVisitor{shx, shy, fb});
-    }
+    const bool cast = (v.flags & vf::Shadow) && z > 0;
+    if (cast)
+        hicolor::drawFrame(frame, sx - (z >> 1) - (z >> 2), sy + (z >> 2) - (z >> 1), *pal, fb, hicolor::FrameVisitor::Pass::CastShadow);
     if (v.flags & vf::ZeroZ) z = 0;
-    sy -= z;
-    if (sx + v.width <= 0 || sy + v.height <= 0 || sx >= fb.extent(1) || sy >= fb.extent(0)) return;
-    SoftwareRendererVisitor r{sx, sy, std::span<const ColorRgb8, 256>{*pal}, fb};
-    DecodeFrame(frame, r);
+    hicolor::drawFrame(frame, sx, sy - z, *pal, fb, hicolor::FrameVisitor::Pass::Normal, cast);
 }
 
 // 0x40b880 draw half: layers 0..15 in list order, culling at +-512 px from the view centre,
@@ -427,7 +469,6 @@ inline void GameEngine::draw(FramebufferRef fb) {
             drawWithChain(s);
         }
     }
-    applyEffect(fb);
 }
 
 // ---------------------------------------------------------------------------- builtins
@@ -437,7 +478,9 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
         case 65: {   // SizeTo(unit, x, y)
             Sprite* u = unit(argInt(a, 0));
             if (!u) return Value{60000};
-            return Value{fx::gameDistance(u->x - argInt(a, 1), u->y - argInt(a, 2))};
+            // the point is truncated to s16 (0x412bcc, docs/oracle.md §3.14)
+            return Value{fx::gameDistance(u->x - static_cast<std::int16_t>(argInt(a, 1)),
+                                          u->y - static_cast<std::int16_t>(argInt(a, 2)))};
         }
         case 67: {   // Action(unit, act, var1, var2)
             Sprite* u = unit(argInt(a, 0));
@@ -458,16 +501,9 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
             if (nvid >= 0 && nvid < static_cast<int>(m_world.vids().size())) m_world.vid(nvid).maxUnit = argInt(a, 1);
             return Value{0};
         }
-        case 80: {   // Effect(effect)
-            if (m_effect == 6) return Value{0};
-            int e = argInt(a, 0);
-            if (e == 255) e = m_world.rand() % 6 + 1;
-            m_effect = e;
-            m_effectLevel = 1;
-            m_effectClock = m_world.clock();
-            if (e == 6) m_effect = 0;   // eff_openwindow: transition of the session's frame (not emulated)
+        case 80:   // Effect(effect): 0x406e40, drawn by drawScreenEffects()
+            m_effects.start(argInt(a, 0), [this] { return m_world.rand(); });
             return Value{0};
-        }
         case 85: {   // Flagman(army)
             const int army = argInt(a, 0);
             if (army < 0 || army >= World::MaxPlayers) return Value{0};
@@ -481,7 +517,7 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
         }
         case 89: m_world.pause(argInt(a, 0) != 0); return Value{0};   // Pause(flag)
         case 90: {   // Random(max) = rand() % (max + 1)
-            const int m = argInt(a, 0) + 1;
+            const int m = fx::wrapAdd(argInt(a, 0), 1);
             const int r = m_world.rand();
             return Value{m ? r % m : 0};
         }
@@ -559,20 +595,19 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
             else if (type == 22) v.flags = static_cast<std::uint16_t>(var);
             else if (type >= 2 && type < 18) v.childNvid[static_cast<std::size_t>(type - 2)] = static_cast<std::int16_t>(var);
             else if (type >= 18 && type < 22 && v.gfx) {
-                // VID_GAMMA+k (0x406d60): the palette of the graphics is reloaded (so it carries
-                // the global gamma), copied into the 4 alternative palettes the first time, and
-                // palette k becomes that copy with the gamma `var`. Shared by every vid that uses
-                // the same graphics.
-                std::array<ColorRgb8, 256> base = v.gfx->palette;
-                if (m_gamma != 0x777 && v.gfx->dataFormat == 2 && !(v.flags & vf::IgnoreGlobalGamma))
-                    detail::applyGamma(base, m_gamma);
+                // VID_GAMMA+k (0x406d60): the palette of the graphics owner is reloaded (so it
+                // carries the global gamma), copied into the 4 alternative palettes the first
+                // time, and palette k becomes that copy with the gamma `var` (0x4072c0). Shared
+                // by every vid that uses the same graphics.
+                const auto base = hicolor::palette16(v.gfx->palette, m_gamma, (graphicsOwner(nvid).flags & vf::IgnoreGlobalGamma) != 0);
                 auto alt = v.altPalettes;
                 if (!alt) {
                     alt = std::make_shared<std::array<std::array<ColorRgb8, 256>, 4>>();
-                    alt->fill(base);
+                    alt->fill(hicolor::expand(base));
                 }
-                (*alt)[static_cast<std::size_t>(type - 18)] = base;
-                detail::applyGamma((*alt)[static_cast<std::size_t>(type - 18)], var);
+                auto k = base;
+                hicolor::applyGamma(k, var);
+                (*alt)[static_cast<std::size_t>(type - 18)] = hicolor::expand(k);
                 for (auto& o : m_world.vids())
                     if (o.gfx == v.gfx) o.altPalettes = alt;
             }

@@ -34,7 +34,7 @@
 namespace gromada::game {
 
 inline constexpr std::array<char, 8> SaveStateMagic = {'G', 'R', 'M', 'D', 'S', 'T', 'A', 'T'};
-inline constexpr std::uint32_t SaveStateVersion = 1;
+inline constexpr std::uint32_t SaveStateVersion = 2;
 inline constexpr std::size_t SaveStateHeaderSize = 64;
 // retro_serialize_size(): libretro wants one size for the whole session, so this is a fixed
 // upper bound (see docs/savestates.md for the measured sizes); a larger state fails to save.
@@ -108,7 +108,7 @@ struct SpriteState {
 struct VidRecord {   // the per-vid values that change at run time (dense part)
     std::int32_t maxUnit = -1, count = 0;
     std::uint8_t weapon = 0;
-    std::uint8_t paletteCache = 0;   // GameEngine::m_palettes: 0 none, 1 plain, 2 with gamma, 3 raw
+    std::uint8_t paletteCache = 0;   // GameEngine::m_palettes: 0 none, 1 rebuilt from the vid, 3 raw bytes
     std::int32_t altPalettes = 0;    // index + 1 into WorldState::palettes
 };
 
@@ -157,8 +157,18 @@ struct EngineState {
     bool loaded = false;
     int realElapsed = 0, scrollVX = 0, scrollVY = 0;
     bool autoScroll = false, scrollLock = false;
-    int gamma = 0x777, effect = 0, effectLevel = 0;
-    std::uint32_t effectClock = 0;
+    int gamma = 0x777;
+    // ScreenEffects (Effect(), survives map loads)
+    int effect = 0, effectLevel = 0;
+    std::uint32_t effectLast = 0;
+    int effectW = 0, effectH = 0;
+    std::array<int, 4> effectFull{0, -1, 0, -1}, effectClip{0, -1, 0, -1};
+    bool effectDirty = false;
+    bool hasPictures = false;                 // eff_openwindow running: both pictures stored
+    std::vector<RGBA8> offscreen, screen;
+    bool effectsDone = true, frameLocked = false;
+    std::uint32_t turretClock = 0;
+    int turretSteps = 1;
     std::vector<std::array<int, 4>> lights;
     int iterUnit = -1, iterArmy = 0, iterType = 0;
     std::string commandsBuffer;
@@ -529,6 +539,7 @@ struct SaveStateAccess {
             v.count = r.i32();
             v.weapon = r.u8();
             v.paletteCache = r.ranged<std::uint8_t>(0, 3, "palette cache");
+            if (v.paletteCache == 2) throw state::Error("save state: bad palette cache mode");
             v.altPalettes = r.i32();
         }
         const std::size_t nPal = r.count(4 * 256 * sizeof(ColorRgb8), 1u << 16);
@@ -725,8 +736,22 @@ struct SaveStateAccess {
         w.i32(e.m_realElapsed);
         w.i32(e.m_scrollVX); w.i32(e.m_scrollVY);
         w.boolean(e.m_autoScroll); w.boolean(e.m_scrollLock);
-        w.i32(e.m_gamma); w.i32(e.m_effect); w.i32(e.m_effectLevel);
-        w.u32(e.m_effectClock);
+        w.i32(e.m_gamma);
+        const ScreenEffects& fx = e.m_effects;
+        w.i32(fx.m_effect); w.i32(fx.m_level); w.u32(fx.m_last); w.i32(fx.m_w); w.i32(fx.m_h);
+        for (const auto* rc : {&fx.m_full, &fx.m_clip}) { w.i32(rc->left); w.i32(rc->right); w.i32(rc->top); w.i32(rc->bottom); }
+        w.boolean(fx.m_dirty);
+        // the pictures matter only while eff_openwindow composes the old screen with the new one
+        const bool pictures = fx.m_effect == 6;
+        w.boolean(pictures);
+        if (pictures) {
+            w.count(fx.m_offscreen.size());
+            w.bytes(fx.m_offscreen.data(), fx.m_offscreen.size() * sizeof(RGBA8));
+            w.count(fx.m_screen.size());
+            w.bytes(fx.m_screen.data(), fx.m_screen.size() * sizeof(RGBA8));
+        }
+        w.boolean(e.m_effectsDone); w.boolean(e.m_frameLocked);
+        w.u32(e.m_turretClock); w.i32(e.m_turretSteps);
         w.count(e.m_lights.size());
         for (const auto& l : e.m_lights) { w.i32(l.x); w.i32(l.y); w.i32(l.z); w.i32(l.color); }
         w.i32(e.m_iterUnit); w.i32(e.m_iterArmy); w.i32(e.m_iterType);
@@ -750,8 +775,29 @@ struct SaveStateAccess {
         s.realElapsed = r.i32();
         s.scrollVX = r.i32(); s.scrollVY = r.i32();
         s.autoScroll = r.boolean(); s.scrollLock = r.boolean();
-        s.gamma = r.i32(); s.effect = r.i32(); s.effectLevel = r.i32();
-        s.effectClock = r.u32();
+        s.gamma = r.i32();
+        s.effect = r.i32(); s.effectLevel = r.i32(); s.effectLast = r.u32();
+        s.effectW = r.ranged<std::int32_t>(0, 4096, "effect width");
+        s.effectH = r.ranged<std::int32_t>(0, 4096, "effect height");
+        for (auto* rc : {&s.effectFull, &s.effectClip})
+            for (int& v : *rc) v = r.i32();
+        s.effectDirty = r.boolean();
+        const std::size_t pixels = static_cast<std::size_t>(s.effectW) * static_cast<std::size_t>(s.effectH);
+        s.hasPictures = r.boolean();
+        if (s.hasPictures) {
+            for (auto* pic : {&s.offscreen, &s.screen}) {
+                if (r.count(sizeof(RGBA8), 1u << 24) != pixels) throw state::Error("save state: bad effect picture");
+                pic->resize(pixels);
+                r.bytes(pic->data(), pixels * sizeof(RGBA8));
+            }
+        }
+        // the window rectangle indexes the pictures: it must stay inside them
+        const auto inside = [&](const std::array<int, 4>& rc) {
+            return rc[1] < rc[0] || rc[3] < rc[2] || (rc[0] >= 0 && rc[2] >= 0 && rc[1] < s.effectW && rc[3] < s.effectH);
+        };
+        if (!inside(s.effectFull) || !inside(s.effectClip)) throw state::Error("save state: bad effect rectangle");
+        s.effectsDone = r.boolean(); s.frameLocked = r.boolean();
+        s.turretClock = r.u32(); s.turretSteps = r.ranged<std::int32_t>(0, 64, "turret steps");
         const std::size_t nLights = r.count(16, 1u << 20);
         s.lights.resize(nLights);
         for (auto& l : s.lights) for (int& v : l) v = r.i32();
@@ -761,20 +807,19 @@ struct SaveStateAccess {
         return s;
     }
 
-    // How a cached palette of GameEngine (built on first use) can be rebuilt: from the
-    // graphics (1), from the graphics with the current global gamma (2), or only from its bytes
-    // (3, e.g. the vid's flags changed since it was cached).
+    // A palette of GameEngine's cache as paletteFor() builds it now.
+    static std::array<ColorRgb8, 256> builtPalette(const GameEngine& e, std::size_t nvid) {
+        const VidInfo& v = e.m_world.m_vids[nvid];
+        return hicolor::expand(hicolor::palette16(v.gfx->palette, e.m_gamma,
+                                                  (e.graphicsOwner(static_cast<int>(nvid)).flags & vf::IgnoreGlobalGamma) != 0));
+    }
+    // How a cached palette (built on first use) is restored: built again (1) when that gives
+    // the same colours, else from its bytes (3, e.g. the vid's flags changed since).
     static std::uint8_t paletteCacheMode(const GameEngine* e, const VidInfo& v, std::size_t i) {
         if (!e || i >= e->m_palettes.size() || !e->m_palettes[i]) return 0;
-        const auto& cached = *e->m_palettes[i];
         if (!v.gfx) return 3;
-        const auto same = [](const std::array<ColorRgb8, 256>& a, const std::array<ColorRgb8, 256>& b) {
-            return std::memcmp(a.data(), b.data(), sizeof a) == 0;
-        };
-        if (same(cached, v.gfx->palette)) return 1;
-        auto withGamma = v.gfx->palette;
-        detail::applyGamma(withGamma, e->m_gamma);
-        return same(cached, withGamma) ? 2 : 3;
+        const auto built = builtPalette(*e, i);
+        return std::memcmp(built.data(), e->m_palettes[i]->data(), sizeof built) == 0 ? 1 : 3;
     }
 
     static void applyEngine(GameEngine& e, ss::EngineState&& s) {
@@ -790,21 +835,32 @@ struct SaveStateAccess {
         e.m_realElapsed = s.realElapsed;
         e.m_scrollVX = s.scrollVX; e.m_scrollVY = s.scrollVY;
         e.m_autoScroll = s.autoScroll; e.m_scrollLock = s.scrollLock;
-        e.m_gamma = s.gamma; e.m_effect = s.effect; e.m_effectLevel = s.effectLevel;
-        e.m_effectClock = s.effectClock;
+        e.m_gamma = s.gamma;
+        ScreenEffects& fx = e.m_effects;
+        fx.m_effect = s.effect; fx.m_level = s.effectLevel; fx.m_last = s.effectLast;
+        fx.m_w = s.effectW; fx.m_h = s.effectH;
+        fx.m_full = {s.effectFull[0], s.effectFull[1], s.effectFull[2], s.effectFull[3]};
+        fx.m_clip = {s.effectClip[0], s.effectClip[1], s.effectClip[2], s.effectClip[3]};
+        fx.m_dirty = s.effectDirty;
+        const std::size_t pixels = static_cast<std::size_t>(s.effectW) * static_cast<std::size_t>(s.effectH);
+        if (s.hasPictures) {
+            fx.m_offscreen = std::move(s.offscreen);
+            fx.m_screen = std::move(s.screen);
+        } else if (fx.m_offscreen.size() != pixels || fx.m_screen.size() != pixels) {
+            // not stored: the surface is redrawn whole at the next frame (no window effect)
+            fx.m_offscreen.assign(pixels, RGBA8{{0, 0, 0}, 255});
+            fx.m_screen = fx.m_offscreen;
+        }
+        e.m_effectsDone = s.effectsDone; e.m_frameLocked = s.frameLocked;
+        e.m_turretClock = s.turretClock; e.m_turretSteps = s.turretSteps;
         e.m_lights.clear();
         for (const auto& l : s.lights) e.m_lights.push_back({l[0], l[1], l[2], l[3]});
         e.m_iterUnit = s.iterUnit; e.m_iterArmy = s.iterArmy; e.m_iterType = s.iterType;
         e.m_commandsBuffer = std::move(s.commandsBuffer);
-        // The palette cache: rebuilt as it was (plain, or with the global gamma applied when
-        // it was built), so a vid whose flags changed since keeps the palette it had.
+        // The palette cache, as it was (a vid whose flags changed since keeps its palette).
         e.m_palettes.assign(e.m_world.vids().size(), std::nullopt);
-        for (std::size_t i = 0; i < cache.size() && i < e.m_palettes.size(); ++i) {
-            const VidInfo& v = e.m_world.vid(static_cast<int>(i));
-            if (!v.gfx || (cache[i] != 1 && cache[i] != 2)) continue;
-            e.m_palettes[i] = v.gfx->palette;
-            if (cache[i] == 2) detail::applyGamma(*e.m_palettes[i], e.m_gamma);
-        }
+        for (std::size_t i = 0; i < cache.size() && i < e.m_palettes.size(); ++i)
+            if (cache[i] == 1 && e.m_world.vid(static_cast<int>(i)).gfx) e.m_palettes[i] = builtPalette(e, i);
         for (const auto& [nvid, pal] : raw)
             if (nvid < e.m_palettes.size()) e.m_palettes[nvid] = pal;
     }

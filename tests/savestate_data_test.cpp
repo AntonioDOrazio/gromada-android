@@ -194,7 +194,7 @@ void robustness(const GameResources& res, const std::filesystem::path& game) {
         recomputeCrc(bad);
         CHECK(!r.states.load(*r.s, bad));
         bad = good;
-        bad[8] = 2;     // version
+        bad[8] = 1;     // version (an older format)
         recomputeCrc(bad);
         CHECK(!r.states.load(*r.s, bad));
         bad = good;

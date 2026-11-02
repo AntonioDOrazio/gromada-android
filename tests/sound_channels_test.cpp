@@ -34,43 +34,86 @@ struct Play {
     int nsfx;
     float volume, pan;
     bool loop;
-    std::uint32_t voice;
+    std::uint32_t voice;  // the channel's buffer (load() count)
+    bool resumed = false; // Play on a buffer stopped mid-way (DirectSound keeps the position)
 };
 
-// Records what the scheduler asks; voices play until stop() or finish().
+// A DirectSound buffer per channel: records the starts; buffers play until stop(), release()
+// or finish().
 struct MockSink final : SoundSink {
+    struct Buffer {
+        int nsfx = -1;
+        std::uint32_t id = 0;
+        int pan = 0, att = 0;
+        bool playing = false, stopped = false;
+    };
+    std::array<Buffer, SoundChannels::ChannelCount> buf{};
     std::vector<Play> plays;
-    std::vector<std::uint32_t> stops;
+    std::vector<std::uint32_t> stops; // buffers stopped or released while playing
     std::set<std::uint32_t> live;
-    int updates = 0;
+    int updates = 0, loads = 0, duplicates = 0;
     std::uint32_t next = 0;
-    std::uint32_t play(int nsfx, const SoundData&, float volume, float pan, bool loop) override {
-        plays.push_back({nsfx, volume, pan, loop, ++next});
-        live.insert(next);
-        return next;
+    bool load(int ch, int nsfx, const SoundData&, int source) override {
+        buf[ch] = {nsfx, ++next};
+        ++loads;
+        duplicates += source >= 0;
+        return true;
     }
-    bool playing(std::uint32_t v) const override { return live.contains(v); }
-    void update(std::uint32_t, float, float) override { ++updates; }
-    void stop(std::uint32_t v) override { stops.push_back(v); live.erase(v); }
-    void finishAll() { live.clear(); }
+    void release(int ch) override { halt(ch); buf[ch] = {}; }
+    bool playing(int ch) override { return buf[ch].playing; }
+    void setPan(int ch, int pan) override { buf[ch].pan = pan; }
+    void setVolume(int ch, int att) override {
+        buf[ch].att = att;
+        updates += buf[ch].playing;
+    }
+    void play(int ch, bool loop) override {
+        auto& b = buf[ch];
+        plays.push_back({b.nsfx, volumeOf(b.att), panOf(b.pan), loop, b.id, b.stopped});
+        b.playing = true;
+        b.stopped = false;
+        live.insert(b.id);
+    }
+    void stop(int ch) override {
+        if (buf[ch].playing) buf[ch].stopped = true;
+        halt(ch);
+    }
+    void halt(int ch) {
+        if (buf[ch].playing) stops.push_back(buf[ch].id);
+        buf[ch].playing = false;
+        live.erase(buf[ch].id);
+    }
+    void finish(std::uint32_t id) {
+        for (auto& b : buf)
+            if (b.id == id) b.playing = false;
+        live.erase(id);
+    }
+    void finishAll() {
+        for (auto& b : buf) b.playing = false;
+        live.clear();
+    }
     int started(int nsfx) const {
         return static_cast<int>(std::ranges::count_if(plays, [nsfx](const Play& p) { return p.nsfx == nsfx; }));
     }
+    static float volumeOf(int att) { return SoundChannels::volumeOf(att); }
+    static float panOf(int pan) { return SoundChannels::panOf(pan); }
 };
 
-// Sounds 1..12: 1 = looping (kind 0), 2..11 = one-shot (kind 1), 12 = non-positional (100).
+// Effects 1..12: 1 = looping (kind 0), 2..11 = one-shot (kind 1), 12 = non-positional (100);
+// 13 = the PlayWAV slot (N, looping), holding `wav` when set.
 struct Bank {
-    std::vector<SoundData> sounds;
+    std::vector<SoundData> sounds; // sounds[0] = fw.res sound 0 (not playable)
+    SoundData wavSound = makeSound(100, std::vector<std::int16_t>(100, 1000));
+    const SoundData* wav = nullptr;
     Bank() {
+        sounds.push_back(makeSound(1, std::vector<std::int16_t>(100, 1000)));
         sounds.push_back(makeSound(0, std::vector<std::int16_t>(100, 1000)));
         for (int i = 2; i <= 11; ++i) sounds.push_back(makeSound(1, std::vector<std::int16_t>(100, 1000)));
         sounds.push_back(makeSound(100, std::vector<std::int16_t>(100, 1000)));
     }
+    int slot() const { return static_cast<int>(sounds.size()); }
     SoundChannels channels() {
-        return SoundChannels{[this](int n) -> const SoundData* {
-                                 return n >= 1 && n <= static_cast<int>(sounds.size()) ? &sounds[n - 1] : nullptr;
-                             },
-                             [this] { return static_cast<int>(sounds.size()); }};
+        return SoundChannels{[this](int n) { return gromada::game::effectSound(sounds, wav, n); },
+                             [this] { return slot(); }};
     }
 };
 
@@ -116,21 +159,22 @@ void testLoopKeptAlive() {
 }
 
 // Two requests of a looping sound in one frame are not merged, but only one voice starts
-// (the second hits the 50 ms guard); the "last effect number" loop never times out.
+// (the second hits the 50 ms guard); the PlayWAV slot (N) loops and never times out.
 void testLoopDuplicatesAndExempt() {
     Bank bank;
-    bank.sounds.back().kind = 0; // sound 12 = count: the PlayWAV slot of the original
+    bank.wav = &bank.wavSound;
     auto ch = bank.channels();
     MockSink sink;
     ch.request(1, -500, -100);
     ch.request(1, 500, -200);
     CHECK_EQ(ch.pendingRequests(), 2);
-    ch.request(12);
+    ch.request(13);
     ch.tact(sink, 0);
     CHECK_EQ(sink.started(1), 1);
-    CHECK_EQ(sink.started(12), 1);
+    CHECK_EQ(sink.started(13), 1);
+    CHECK(sink.plays[1].loop); // kind 100 in the SoundData: the slot is looping anyway
     ch.tact(sink, 5000);
-    CHECK_EQ(ch.activeChannels(), 1); // sound 1 stopped, 12 kept
+    CHECK_EQ(ch.activeChannels(), 1); // sound 1 stopped, N kept
     CHECK(sink.live.contains(sink.plays[1].voice));
 }
 
@@ -178,8 +222,8 @@ void testChannelLimit() {
     CHECK_EQ(sink.plays.size(), std::size_t{8});
     CHECK(sink.stops.empty());
     // two channels finish: the two loudest of three requests play
-    sink.live.erase(sink.plays[0].voice);
-    sink.live.erase(sink.plays[1].voice);
+    sink.finish(sink.plays[0].voice);
+    sink.finish(sink.plays[1].voice);
     ch.request(10, 0, -1500);
     ch.request(11, 0, -300);
     ch.request(1, 0, -700); // looping, not playing: competes like the others
@@ -240,12 +284,12 @@ void testNonPositional() {
 // StopSFX(n) releases the channels of n (no 50 ms guard afterwards).
 void testStop() {
     Bank bank;
-    bank.sounds.back().kind = 0;
+    bank.wav = &bank.wavSound;
     auto ch = bank.channels();
     MockSink sink;
     ch.request(1);
     ch.request(2);
-    ch.request(12);
+    ch.request(13);
     ch.tact(sink, 0);
     CHECK_EQ(ch.activeChannels(), 3);
     ch.request(3);
@@ -317,6 +361,128 @@ void testMixerLoop() {
     CHECK(m.sfxPlaying(tid));
 }
 
+// DirectSound Stop keeps the position and the channel keeps its buffer: a looping engine that
+// timed out (500 ms) and is requested again on the same channel resumes (Play without reload),
+// as does a one-shot cut by StopSFX(); a one-shot that played to its end starts over (#18).
+void testResumeAfterStop() {
+    Bank bank;
+    auto ch = bank.channels();
+    MockSink sink;
+    ch.request(1);
+    ch.tact(sink, 1000);
+    ch.tact(sink, 1501); // not requested for 501 ms: Stop
+    CHECK_EQ(sink.stops.size(), std::size_t{1});
+    ch.tact(sink, 1600); // the original calls Stop again on the stopped buffer
+    ch.request(1);
+    ch.tact(sink, 2000);
+    CHECK_EQ(sink.loads, 1);              // same buffer
+    CHECK_EQ(sink.started(1), 2);
+    CHECK(sink.plays[1].resumed);         // from where it stopped
+    CHECK(sink.plays[1].loop);
+    // one-shot cut by StopSFX() and requested again: resumed
+    ch.request(2);
+    ch.tact(sink, 3000);
+    ch.stopAll(sink);
+    ch.request(2);
+    ch.tact(sink, 3100);
+    CHECK_EQ(sink.started(2), 2);
+    CHECK(sink.plays.back().resumed);
+    // finished on its own: from the start, still the same buffer
+    sink.finish(sink.plays.back().voice);
+    ch.request(2);
+    ch.tact(sink, 3200);
+    CHECK_EQ(sink.started(2), 3);
+    CHECK(!sink.plays.back().resumed);
+    CHECK_EQ(sink.loads, 2);
+}
+
+// PlayWAV (0x408c50): slot N is queued at once at full volume and loops (it was silent before
+// #18); the same file while it plays is left alone; another file releases the channel and
+// replaces the slot; a missing file returns 0 and empties the slot; StopSFX() spares the slot,
+// StopMusic() (StopSFX(N)) releases it.
+void testPlayWav() {
+    Bank bank;
+    auto ch = bank.channels();
+    MockSink sink;
+    using WavLoad = SoundChannels::WavLoad;
+    int loads = 0;
+    auto loader = [&](WavLoad result) {
+        return [&, result] {
+            ++loads;
+            bank.wav = result == WavLoad::Loaded ? &bank.wavSound : nullptr;
+            return result;
+        };
+    };
+    CHECK_EQ(ch.playWav(sink, "a.wav", loader(WavLoad::Loaded)), 13);
+    CHECK_EQ(ch.pendingRequests(), 1);
+    ch.tact(sink, 100);
+    CHECK_EQ(sink.started(13), 1);
+    CHECK(sink.plays[0].loop && sink.plays[0].volume == 1.0f && sink.plays[0].pan == 0.0f);
+    CHECK_EQ(ch.playWav(sink, "a.wav", loader(WavLoad::Loaded)), 13); // already playing
+    CHECK_EQ(loads, 1);
+    CHECK_EQ(ch.pendingRequests(), 0);
+    ch.stopAll(sink);
+    ch.tact(sink, 10000); // no expiry for the slot
+    CHECK_EQ(ch.activeChannels(), 1);
+    CHECK(sink.stops.empty());
+    CHECK_EQ(ch.playWav(sink, "b.wav", loader(WavLoad::Loaded)), 13); // other file: released, reloaded
+    CHECK_EQ(sink.stops.size(), std::size_t{1});
+    CHECK_EQ(loads, 2);
+    ch.tact(sink, 10100); // released: no 50 ms guard
+    CHECK_EQ(sink.started(13), 2);
+    CHECK_EQ(ch.playWav(sink, "missing.wav", loader(WavLoad::NotFound)), 0);
+    CHECK_EQ(ch.activeChannels(), 0);
+    CHECK_EQ(ch.pendingRequests(), 0);
+    ch.request(13); // empty slot: ignored
+    CHECK_EQ(ch.pendingRequests(), 0);
+    CHECK_EQ(ch.playWav(sink, "bad.wav", loader(WavLoad::Invalid)), 13); // opened, no data
+    CHECK_EQ(ch.pendingRequests(), 0);
+    CHECK_EQ(ch.playWav(sink, "a.wav", loader(WavLoad::Loaded)), 13);
+    ch.tact(sink, 10200);
+    CHECK_EQ(ch.activeChannels(), 1);
+    ch.stop(sink, 13); // StopMusic()
+    CHECK_EQ(ch.activeChannels(), 0);
+}
+
+// The drop loop starts from queue entry 0, compared with attenuation 0 when that entry is
+// free: with only positive attenuations pending (never produced by the game) nothing is dropped.
+void testDropStartsFromEntryZero() {
+    Bank bank;
+    auto ch = bank.channels();
+    MockSink sink;
+    ch.request(1);
+    ch.tact(sink, 0);  // looping sound on channel 0
+    ch.request(1);     // entry 0: only a keep-alive, consumed before the drop loop
+    for (int n = 2; n <= 11; ++n) ch.request(n, 0, 10 * (n - 1)); // entries 1..10, attenuation 10..100
+    ch.tact(sink, 100); // 10 pending, 7 free channels: nothing dropped, the first 7 start
+    for (int n = 2; n <= 8; ++n) CHECK_EQ(sink.started(n), 1);
+    for (int n = 9; n <= 11; ++n) CHECK_EQ(sink.started(n), 0);
+}
+
+// Mixer: a paused voice keeps its position and resumes from it; a finished one-shot is gone.
+void testMixerPauseResume() {
+    std::vector<std::int16_t> ramp(4410);
+    for (std::size_t i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<std::int16_t>(i * 7);
+    const SoundData s = makeSound(1, ramp, 44100);
+    Mixer m{44100};
+    const auto id = m.playSfx(s, 1.0f, 0.0f, false);
+    std::vector<std::int16_t> out(2 * 1000);
+    m.render(out.data(), 1000);
+    const int before = out[2 * 999];
+    m.pauseSfxVoice(id);
+    CHECK(!m.sfxPlaying(id));
+    m.render(out.data(), 1000);
+    CHECK(std::ranges::all_of(out, [](std::int16_t v) { return v == 0; }));
+    CHECK(m.resumeSfxVoice(id, false));
+    CHECK(m.sfxPlaying(id));
+    m.render(out.data(), 10);
+    CHECK(out[0] > before && out[0] - before < 50); // continues the ramp
+    out.resize(2 * 4000);
+    m.render(out.data(), 4000);
+    CHECK(!m.sfxPlaying(id));
+    CHECK(!m.resumeSfxVoice(id, false)); // finished: must be played again
+}
+
 } // namespace
 
 int main() {
@@ -327,6 +493,10 @@ int main() {
     testMerge();
     testNonPositional();
     testStop();
+    testResumeAfterStop();
+    testPlayWav();
+    testDropStartsFromEntryZero();
     testMixerLoop();
+    testMixerPauseResume();
     return gromada_test::finish();
 }

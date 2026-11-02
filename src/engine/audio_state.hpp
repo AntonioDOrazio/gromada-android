@@ -28,7 +28,7 @@ struct MixerState {
         double pos = 0;
         float gainL = 0, gainR = 0;
         std::uint32_t id = 0;
-        bool loop = false;
+        bool loop = false, paused = false;
     };
     std::vector<Voice> voices;
     std::uint32_t nextVoiceId = 0;
@@ -62,6 +62,7 @@ struct SaveStateAccess {
             w.f32(v.gainR);
             w.u32(v.id);
             w.boolean(v.loop);
+            w.boolean(v.paused);
         }
         w.u32(m.m_nextVoiceId);
         w.boolean(m.m_stream != nullptr);
@@ -79,7 +80,7 @@ struct SaveStateAccess {
         s.musicOpen = r.boolean();
         s.musicPos = r.finite64();
         if (s.musicPos < 0 || s.musicPos > 1e12) throw state::Error("save state: music position out of range");
-        const std::size_t n = r.count(25, Mixer::MaxVoices);
+        const std::size_t n = r.count(26, Mixer::MaxVoices);
         for (std::size_t i = 0; i < n; ++i) {
             MixerState::Voice v;
             const std::int32_t id = r.i32();
@@ -91,6 +92,7 @@ struct SaveStateAccess {
             v.gainR = r.finite32();
             v.id = r.u32();
             v.loop = r.boolean();
+            v.paused = r.boolean();
             const auto frames = std::visit([](const auto& d) { return d.size(); }, v.sound->waveData) /
                                 std::max<std::uint16_t>(v.sound->numChannels, 1);
             if (frames == 0 || (!v.loop && v.pos >= static_cast<double>(frames)) || v.pos > 1e12)
@@ -128,6 +130,7 @@ struct SaveStateAccess {
                 .gainR = v.gainR,
                 .id = v.id,
                 .loop = v.loop,
+                .paused = v.paused,
             });
         }
         m.m_nextVoiceId = s.nextVoiceId;

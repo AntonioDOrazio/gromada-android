@@ -58,8 +58,13 @@ inline void writePcState(state::Writer& w, const PcState& s) {
     w.str(s.text);
     detail::putVec(w, s.move);
     w.boolean(s.aiming);
+    w.boolean(s.aimLocked);
+    w.boolean(s.moveOrder);
+    detail::putVec(w, s.moveTarget);
+    w.boolean(s.edgeScroll);
     w.u8(static_cast<std::uint8_t>(s.textCandidate));
     w.i32(s.weaponSlot);
+    w.boolean(s.weaponPending);
     w.u8(static_cast<std::uint8_t>(s.source));
 }
 inline PcState readPcState(state::Reader& r) {
@@ -71,8 +76,13 @@ inline PcState readPcState(state::Reader& r) {
     s.text = r.str(4096);
     s.move = detail::getVec(r);
     s.aiming = r.boolean();
+    s.aimLocked = r.boolean();
+    s.moveOrder = r.boolean();
+    s.moveTarget = detail::getVec(r);
+    s.edgeScroll = r.boolean();
     s.textCandidate = static_cast<char>(r.u8());
     s.weaponSlot = r.ranged<std::int32_t>(0, 3, "weapon slot");
+    s.weaponPending = r.boolean();
     s.source = static_cast<PointerSource>(r.ranged<std::uint8_t>(0, 2, "pointer source"));
     return s;
 }
@@ -117,7 +127,12 @@ struct MapperState {
     std::bitset<128> prevChars;
     std::array<bool, KeyCount> keyPulse{};
     bool leftPulse = false, rightPulse = false;
-    Vec2 aimOffset;
+    Vec2 aimDir, aimOffset;
+    bool aimFree = false, driving = false;
+    Vec2 orderDir;
+    float orderClock = 0;
+    bool weaponPending = false, weaponTracked = false;
+    float weaponAge = 0, weaponWait = 0;
     float accelHold = 0;
     Vec2 accelDir;
     std::uint8_t touchPhase = 0;
@@ -129,7 +144,7 @@ struct MapperState {
 };
 
 struct SaveStateAccess {
-    static constexpr std::uint32_t Tag = state::fourcc("INP1");
+    static constexpr std::uint32_t Tag = state::fourcc("INP2");
 
     static void save(state::Writer& w, const Mapper& m) {
         const std::size_t chunk = w.beginChunk(Tag);
@@ -141,7 +156,13 @@ struct SaveStateAccess {
         detail::putBools(w, m.m_keyPulse);
         w.boolean(m.m_leftPulse);
         w.boolean(m.m_rightPulse);
+        detail::putVec(w, m.m_aimDir);
         detail::putVec(w, m.m_aimOffset);
+        w.boolean(m.m_aimFree); w.boolean(m.m_driving);
+        detail::putVec(w, m.m_orderDir);
+        w.f32(m.m_orderClock);
+        w.boolean(m.m_weaponPending); w.boolean(m.m_weaponTracked);
+        w.f32(m.m_weaponAge); w.f32(m.m_weaponWait);
         w.f32(m.m_accelHold);
         detail::putVec(w, m.m_accelDir);
         w.u8(static_cast<std::uint8_t>(m.m_touch.phase));
@@ -165,7 +186,13 @@ struct SaveStateAccess {
         detail::getBools(r, s.keyPulse);
         s.leftPulse = r.boolean();
         s.rightPulse = r.boolean();
+        s.aimDir = detail::getVec(r);
         s.aimOffset = detail::getVec(r);
+        s.aimFree = r.boolean(); s.driving = r.boolean();
+        s.orderDir = detail::getVec(r);
+        s.orderClock = r.finite32();
+        s.weaponPending = r.boolean(); s.weaponTracked = r.boolean();
+        s.weaponAge = r.finite32(); s.weaponWait = r.finite32();
         s.accelHold = r.finite32();
         s.accelDir = detail::getVec(r);
         s.touchPhase = r.ranged<std::uint8_t>(0, 3, "touch phase");
@@ -188,7 +215,13 @@ struct SaveStateAccess {
         m.m_keyPulse = s.keyPulse;
         m.m_leftPulse = s.leftPulse;
         m.m_rightPulse = s.rightPulse;
+        m.m_aimDir = s.aimDir;
         m.m_aimOffset = s.aimOffset;
+        m.m_aimFree = s.aimFree; m.m_driving = s.driving;
+        m.m_orderDir = s.orderDir;
+        m.m_orderClock = s.orderClock;
+        m.m_weaponPending = s.weaponPending; m.m_weaponTracked = s.weaponTracked;
+        m.m_weaponAge = s.weaponAge; m.m_weaponWait = s.weaponWait;
         m.m_accelHold = s.accelHold;
         m.m_accelDir = s.accelDir;
         m.m_touch.phase = static_cast<Mapper::TouchTracker::Phase>(s.touchPhase);

@@ -21,14 +21,14 @@ lo stesso audio (musica ed effetti compresi) dell'esecuzione originale, byte per
 Ogni classe serializzata dichiara `friend struct SaveStateAccess;` (una riga): il codice dello
 stato vive nei file sopra, non dentro le classi.
 
-## Formato (versione 1)
+## Formato (versione 2)
 
 Intestazione di 64 byte, poi i chunk:
 
 | offset | campo |
 |---|---|
 | 0 | magic `GRMDSTAT` |
-| 8 | versione (`SaveStateVersion` = 1) |
+| 8 | versione (`SaveStateVersion` = 2; la 1 aveva lo scheduler dei suoni e gli effetti prima delle issue #15–#18, non si carica più) |
 | 12 | dimensione dell'intestazione (64) |
 | 16 | dimensione del payload (u64) |
 | 24 | checksum a 64 bit di intestazione (con questo campo a zero) e payload |
@@ -39,11 +39,11 @@ Intestazione di 64 byte, poi i chunk:
 
 | chunk | contenuto |
 |---|---|
-| `CORE` | resto dei campioni audio del core (`audioDebt`, conta quanti campioni escono a ogni frame), chunk `INP1` del mapper dell'input |
-| `SESS` | sessione: mappa e storia, operazioni in coda (`Load`/`PlayAVI`/...), record di input, contesto e tasti "stantii", schermo degli script, orologi reali (`m_realMs` dà i semi di `Load`), contatori di frame e tick, demo in riproduzione (nome, posizione) e in registrazione (dati), filmato in corso (nome, orologio), coda e canali degli effetti (`SoundChannels`), file `PlayWAV`, playlist CD e volumi degli script, `ScrollLock`, barra di stato, cursore, celle portate tra le mappe (`m_carry`), costruttore del record (coda dei tasti, ripetizione), file aperti dagli script (nome, contenuto, posizione), oggetti di menu, lista menu, stato del menu, testi, identità dello script, immagine in uscita (solo durante una demo) |
+| `CORE` | resto dei campioni audio del core (`audioDebt`, conta quanti campioni escono a ogni frame), chunk `INP2` del mapper dell'input (anche schema diretto: direzione di mira, ordini di movimento, richiesta d'arma in attesa) |
+| `SESS` | sessione: mappa e storia, operazioni in coda (`Load`/`PlayAVI`/...), record di input, contesto e tasti "stantii", schermo degli script, orologi reali (`m_realMs` dà i semi di `Load`), contatori di frame e tick, demo in riproduzione (nome, posizione) e in registrazione (dati), filmato in corso (nome, orologio), scheduler degli effetti (`SoundChannels`: 32 richieste, 8 canali con buffer caricato, suono e tempo, file dell'ultimo `PlayWAV`) e i buffer DirectSound del `MixerSink` (suono, voce del mixer, pan, volume), file `PlayWAV` e slot N caricato, orologio del `Message()` della barra di stato, telecamera che segue il giocatore e indicatore dell'arma (issue #16), playlist CD e volumi degli script, `ScrollLock`, barra di stato, cursore, celle portate tra le mappe (`m_carry`), costruttore del record (coda dei tasti, ripetizione), file aperti dagli script (nome, contenuto, posizione), oggetti di menu (con `lastTact` e `SoundDone`: animano sull'orologio del gioco) e orologi dell'UI, lista menu, stato del menu, testi, identità dello script, immagine in uscita (solo durante una demo) |
 | `SVM1` | interprete (se la mappa ha uno script): identità (hash del codice compilato, numero di celle e di `iff`), 2048 celle, blocchi della memoria emulata (codice patchato, buffer dei globali stringa, buffer statici di concatenazione e `_itoa`, risultati delle builtin), buffer di ogni cella stringa, contatori `iff`, stringhe internate, registri |
-| `ENGN` | motore: **tutto il pool degli sprite** (anche gli slot morti) con i collegamenti come indici di slot (liste per strato, catene dei sotto-oggetti, `next`/`prev`), pile dei comandi (anche oltre `count`, l'originale ci rientra con `act_cyclecommand`), oggetti, liste libere nell'ordine, numero di id assegnati, celle della griglia **nel loro ordine** (l'ordine decide quale bersaglio si trova per primo), `gridUnits`, giocatori, squadre, suoni in attesa, orologio, pausa, RNG, vento, puntatore "orfano" degli Effect2, `m_lastDist`; i vid modificati a run time (`SetVid`, `MaxUnit`, conteggi, arma del flagman, palette alternative condivise), le armi (`VID_WEAPONRANGE`); intestazione della mappa, camera, scroll, effetti, gamma, luci, iteratori di `FirstUnit`/`NextUnit`, cache delle palette |
-| `MIX1` | mixer: playlist, traccia corrente, posizione esatta (frame sorgente con la parte frazionaria), voci degli effetti (suono, posizione, guadagni, id, loop), prossimo id, posizione della colonna sonora del filmato |
+| `ENGN` | motore: **tutto il pool degli sprite** (anche gli slot morti) con i collegamenti come indici di slot (liste per strato, catene dei sotto-oggetti, `next`/`prev`), pile dei comandi (anche oltre `count`, l'originale ci rientra con `act_cyclecommand`), oggetti, liste libere nell'ordine, numero di id assegnati, celle della griglia **nel loro ordine** (l'ordine decide quale bersaglio si trova per primo), `gridUnits`, giocatori, squadre, suoni in attesa, orologio, pausa, RNG, vento, puntatore "orfano" degli Effect2, `m_lastDist`; i vid modificati a run time (`SetVid`, `MaxUnit`, conteggi, arma del flagman, palette alternative condivise), le armi (`VID_WEAPONRANGE`); intestazione della mappa, camera, scroll, `ScreenEffects` (effetto, livello, ultimo passo, rettangolo della finestra; le due immagini solo mentre è attivo `eff_openwindow`), gamma, cadenza della torretta (`m_turretClock`, `m_turretSteps`), `m_frameLocked`, `m_effectsDone`, luci, iteratori di `FirstUnit`/`NextUnit`, cache delle palette |
+| `MIX1` | mixer: playlist, traccia corrente, posizione esatta (frame sorgente con la parte frazionaria), voci degli effetti (suono, posizione, guadagni, id, loop, pausa), prossimo id, posizione della colonna sonora del filmato |
 
 La griglia non viene ricostruita ma salvata così com'è: ricostruirla cambierebbe l'ordine delle
 celle e quindi le partite. Dei vid si salvano solo i record diversi da `fw.res` (più conteggi,
@@ -81,11 +81,12 @@ non coincide lo stato è rifiutato. Le demo si rileggono per nome (con cache), i
   spalle, quindi riavvolgimento e run-ahead di pochi frame non decodificano niente. Altrimenti la
   traccia si riapre e il decodificatore cerca la posizione (`MusicStream::seek`: FLAC e WAV esatti,
   Vorbis verificato dai test sulla musica del gioco), o in mancanza decodifica dall'inizio.
-- **Effetti**: le voci del mixer (anche quelle in loop dei motori) e lo scheduler dei canali
-  dell'originale (32 richieste, 8 canali, guardia di 50 ms, keep-alive dei loop) sono salvati
-  interi: niente effetti persi né doppi, e l'audio dopo un caricamento è identico. Un canale non
-  segue mai una voce che il mixer non ha (se una voce non viene ripristinata il canale torna
-  libero, come a fine suono).
+- **Effetti**: le voci del mixer (anche quelle in loop dei motori e quelle in pausa, che
+  riprendono da dove erano), lo scheduler dei canali dell'originale e i buffer per canale del
+  `MixerSink` sono salvati interi: niente effetti persi né doppi, e l'audio dopo un caricamento è
+  identico. Gli id delle voci restano quelli salvati: il mixer torna con le stesse voci e lo stesso
+  prossimo id, quindi un buffer segue una voce ripristinata o una già finita (per il mixer "non in
+  riproduzione", come nel gioco); nessun id può finire su una voce nuova.
 - **Filmati**: lo stato registra il filmato e il suo orologio. Se si carica uno stato dello stesso
   filmato in corso l'orologio torna indietro e l'immagine resta quella già decodificata finché
   l'orologio non la raggiunge (i decodificatori non tornano indietro); se il filmato è un altro (o
@@ -105,7 +106,7 @@ non coincide lo stato è rifiutato. Le demo si rileggono per nome (con cache), i
 
 | situazione | dimensione | salvataggio | caricamento |
 |---|---|---|---|
-| livello 19 (15.400 sprite) | 1,78 MB | 0,9 ms | 1,3 ms |
+| livello 19 (15.400 sprite) | 1,78 MB | 1,0 ms | 1,5 ms |
 | livello 1 | 0,21 MB | 0,5 ms (core, con l'azzeramento del buffer) | 0,15 ms |
 | menu, mappa delle missioni | 45–50 KB | | |
 
@@ -135,30 +136,59 @@ qui il checksum a 64 bit.
 - `savestate_e2e`, `savestate_e2e_169_120fps` (con `GROMADA_DATA`, `tests/savestate_e2e.sh`):
   attraverso il core e l'harness, lo stesso percorso di `core_e2e` (con la musica accesa nel
   `fw.ini` della cartella di salvataggio): livello 1, cambio di mappa,
-  menu, filmato caricato in un altro processo, run-ahead su tutti i 1500 (3000) frame, 400 stati
-  corrotti rifiutati via `retro_unserialize`.
+  menu, filmato caricato in un altro processo, run-ahead su tutti i 1500 (3000) frame, lo schema
+  di controllo diretto (telecamera che segue, mira assistita, ordini di movimento: ricaricamento
+  e run-ahead), 400 stati corrotti rifiutati via `retro_unserialize`.
 
 L'harness ha i comandi `savestate=F`, `loadstate=F`, `statefile=`, `runahead=N`, `hashes=` e
 `statefuzz=N` (vedi l'intestazione di `tools/harness.cpp`).
 
 ## Aggiungere un campo
 
-Chi aggiunge un campo a una classe salvata (`World`, `Sprite`, `VidInfo`, `GameEngine`,
-`Session`, `SessionUi`, `SoundChannels`, `Mixer`, `Mapper`, `Interpreter`...) deve salvarlo
-anche nello stato: scriverlo nella funzione `save`, leggerlo e validarlo in `decode`, applicarlo
-in `apply`, e alzare `SaveStateVersion`. Per non dimenticarlo, in fondo a
-`src/game/savestate_session.hpp` (e in `src/engine/audio_state.hpp` per `Mixer::Voice`) ci sono
-dei `static_assert` sulle dimensioni delle classi, attivi su desktop x86-64 con libc++: un campo
-nuovo ferma la compilazione con il messaggio `save states: <classe> changed size`. Dopo aver
-aggiornato lo stato si aggiorna la dimensione nel controllo (`GROMADA_NO_SAVESTATE_TRIPWIRE`
-lo disattiva). I campi che sono configurazione o cache derivabile non vanno salvati: si scrive
-perché nel commento accanto al campo.
+Ogni campo di una classe salvata che può cambiare durante il gioco deve finire nello stato.
+Classi salvate: `World`, `Sprite`, `VidInfo`, `Player`, `Group`, `CommandStack`, `GameEngine`,
+`ScreenEffects` (`src/game/savestate.hpp`); `Session`, `SessionUi`, `ScreenObject`,
+`MenuState`, `SoundChannels`, `Session::MixerSink`, `SaveFiles`, `InputRecordBuilder`,
+`DemoPlayer`, `DemoRecorder`, `FollowCamera`, `WeaponHud` (`src/game/savestate_session.hpp`);
+`Interpreter`, `StringMemory` (`src/script/vm_state.hpp`); `TextManager`, `ScreenText`
+(`src/ui/text_state.hpp`); `Mapper`, `PcState`, `RawInput` (`src/input/mapper_state.hpp`);
+`Mixer`, `Mixer::Voice` (`src/engine/audio_state.hpp`).
+
+Procedura (anche per chi fonde un branch e vede fallire la compilazione):
+
+1. **Il controllo**: in fondo a `src/game/savestate_session.hpp` (e in `audio_state.hpp` per
+   `Mixer::Voice`) ci sono `static_assert` sulla dimensione di ogni classe salvata, attivi su
+   desktop x86-64 con libc++. Un campo nuovo ferma la compilazione con
+   `save states: <classe> changed size`. (Un `bool` che finisce nel padding non cambia la
+   dimensione: il controllo aiuta, non sostituisce la lettura del diff.)
+2. **Decidere** se il campo è stato o no. Non si salvano: configurazione impostata dal core o
+   dalle opzioni a ogni frame (es. `m_followOn`, `Mapper::m_settings`, `FollowCamera::Params`),
+   funzioni/ganci di test o diagnostica (`World::actionHook`, `changeActionHook`,
+   `damageHook`), cache derivabili ricostruite al volo, puntatori a dati statici. In quel caso
+   basta aggiornare il numero nel `static_assert` e scrivere il motivo nel commento del campo.
+3. **Salvarlo**: la classe ha già `friend struct SaveStateAccess;`. Nel file indicato sopra:
+   scriverlo nella funzione di salvataggio (`saveWorld`/`saveEngine`/`saveSession`/`save`),
+   leggerlo nella `decode*` corrispondente **nello stesso ordine**, validarlo se è un indice, una
+   dimensione o un valore che indicizza memoria (`r.ranged`, `r.count` con limite,
+   `finite32/64` per i float), metterlo nella struttura di appoggio (`ss::EngineState`,
+   `SessionStaged`, ...) e copiarlo nella `apply*`. Puntatori a sprite: come indice di slot
+   (`ref()` / `ptr()`); suoni: con `soundRef`/`lookup`; nessun puntatore grezzo nello stato.
+4. **Versione**: alzare `SaveStateVersion` in `src/game/savestate.hpp` (gli stati vecchi
+   vengono rifiutati con un messaggio, mai letti male).
+5. **Dimensione**: aggiornare il numero nel `static_assert`.
+6. **Verificare**: `savestate_test`, `savestate_data_test`, `savestate_e2e*` (con
+   `GROMADA_DATA`). Se un campo manca, i test di determinismo trovano frame o byte di stato
+   diversi dopo un caricamento; il test "salva, carica, risalva = stessi byte" trova i campi
+   salvati ma non ripristinati.
 
 ## Limiti noti
 
 - Il motore provvisorio `ViewerEngine` e la modalità visualizzatore non hanno save state
   (`retro_serialize` fallisce).
 - Durante un filmato il riavvolgimento non può mostrare immagini passate del filmato (vedi sopra).
+- `eff_openwindow` (che nessuno script del gioco usa) fotografa la schermata precedente quando
+  parte: se parte nel primo frame dopo un caricamento fotografa l'ultima immagine disegnata prima
+  del caricamento (l'immagine non è nello stato quando l'effetto non è attivo).
 - I file su disco non tornano indietro con lo stato.
 - Uno stato salvato a 16:9 si carica anche a 4:3 (e viceversa): la vista prende la dimensione
   attuale dal frame successivo; il determinismo vale a parità di opzioni.

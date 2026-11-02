@@ -950,13 +950,13 @@ scende di 20; sotto 50 risale, sopra 120 riscende. A terra decolla se ha un bers
 5. Culling: sprite oltre ±512 px dal centro vista (in x e in `y - z`) saltati.
 6. Posizione: `sx = x - width/2 - camX`, `sy = y - height/2 - camY - z` (`0x40b620`, `0x4021f0`).
 
-### 9.3 Ombre (alta)
+### 9.3 Ombre (alta; dettagli dei formati in `docs/engine.md` §8)
 
 `0x4021f0`: se `vid.flags & Shadow` e `z > 0`, prima del corpo disegna lo stesso fotogramma in
 modalità ombra in `(sx - z/2 - z/4, sy + z/4 - z/2)` con z = 0 (ombra in basso a sinistra,
 distanza proporzionale alla quota). Con `ZeroZ` la quota non sposta il disegno.
 
-### 9.4 Palette e gamma (media)
+### 9.4 Palette e gamma (alta dopo la issue #15: `docs/engine.md` §8, verificata con l'oracolo)
 
 Grafica a 16 bit (hicolor): ogni vid converte la propria palette RGB in 256 colori a 16 bit al
 caricamento (`0x4055d0`). La gamma globale della mappa (`0x42df7b`, es. `gamma=0x777` negli
@@ -1034,7 +1034,7 @@ Fatti incontrati che riguardano script, input, salvataggi e demo:
 | campo `b` dei record Army | aperto | lettura a `0x415335`, nessun uso trovato |
 | Kassandra (armi multiple, munizioni `act_addammo/getammo`, `0x411a60`) | analizzato solo lo smistamento | casi 32/35/63/64 |
 | Shell, Debris, DownedAvia, NA, Bonus, Image, Font, Effect1/2 | smistamento noto, comportamento non dettagliato | tabelle nella sez. 2.3 |
-| `SetGamma` (builtin 106 → `0x4074a0`) | non analizzato oltre la conversione delle palette | `0x4072c0`, `0x406903` |
+| `SetGamma` (builtin 106 → `0x4074a0`) | analizzato (issue #15) | `docs/engine.md` §8 |
 | blocco di ~770 byte all'inizio delle demo | aperto (issue #3) | |
 
 ## Indice delle funzioni principali
