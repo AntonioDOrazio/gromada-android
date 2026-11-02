@@ -32,6 +32,7 @@
 #include "core/std.hpp"
 #include "engine/audio.hpp"
 #include "game/engine_api.hpp"
+#include "game/sound_channels.hpp"
 #include "game/session_demo.hpp"
 #include "game/session_files.hpp"
 #include "game/session_input.hpp"
@@ -90,6 +91,8 @@ public:
             log(LogLevel::Info, std::format("save directory {}: copied {} original file(s)", m_config.saveDir.string(), n));
         setOutputSize(m_config.outputWidth, m_config.outputHeight);
         m_builtins = script::knownBuiltinRegistry();
+        m_sfxSink.mixer = m_mixer;
+        m_sfxSink.session = this;
         applyVolumes();
     }
 
@@ -315,14 +318,14 @@ public:
         // --- audio ---
         case script::BuiltinId::PlaySFX: queueSfx(argInt(args, 0)); return Value{0};
         case script::BuiltinId::StopSFX:
-            m_sfxQueue.clear();
-            if (m_mixer) m_mixer->stopSfx();
+            m_sfx.stopAll(m_sfxSink);
             return Value{0};
-        case script::BuiltinId::StopSFXOne:
-            if (const SoundData* s = sound(argInt(args, 0)); s && m_mixer) m_mixer->stopSfx(s);
-            return Value{0};
+        case script::BuiltinId::StopSFXOne: m_sfx.stop(m_sfxSink, argInt(args, 0)); return Value{0};
         case script::BuiltinId::PlayAudio: playAudio({argInt(args, 0), argInt(args, 1), argInt(args, 2), argInt(args, 3)}); return Value{0};
-        case script::BuiltinId::StopMusic: stopMusic(); return Value{0};
+        case script::BuiltinId::StopMusic: // also stops the PlayWAV slot (0x412e00 -> 0x408d80)
+            stopMusic();
+            m_sfx.stop(m_sfxSink, playWavSlot());
+            return Value{0};
         case script::BuiltinId::SetSound: m_scriptSfx = std::clamp(argInt(args, 0), 0, 100); applyVolumes(); return Value{0};
         case script::BuiltinId::SetMusic: setMusic(std::clamp(argInt(args, 0), 0, 100)); return Value{0};
         case script::BuiltinId::PlayWAV: return Value{playWav(argString(args, 0))};
@@ -530,7 +533,7 @@ private:
             m_carry = m_vm->snapshot();
         m_ui.clear();
         m_stateBar = false;
-        m_sfxQueue.clear();
+        m_sfx.clearQueue();
         m_engine->unloadMap();
         m_mapLoaded = false;
         m_vm.reset();
@@ -799,49 +802,49 @@ private:
     }
 
     // ---- audio ------------------------------------------------------------------------------------
+    // Effect numbers index fw.res sounds from 0, as the original's descriptor table
+    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (sound 0 is a
+    // silent placeholder, nsfx 0 is rejected by 0x408dd0) and nsfx N = number of fw.res
+    // sounds is the single PlayWAV slot.
+    [[nodiscard]] int playWavSlot() const { return static_cast<int>(m_sounds.size()); }
     [[nodiscard]] const SoundData* sound(int nsfx) const {
-        if (nsfx >= 1 && nsfx <= static_cast<int>(m_sounds.size()))
-            return &m_sounds[static_cast<std::size_t>(nsfx - 1)];
-        const int extra = nsfx - static_cast<int>(m_sounds.size()) - 1;
-        if (extra >= 0 && extra < static_cast<int>(m_wavs.size()))
-            return &m_wavs[static_cast<std::size_t>(extra)];
+        if (nsfx >= 1 && nsfx < playWavSlot())
+            return &m_sounds[static_cast<std::size_t>(nsfx)];
+        if (nsfx == playWavSlot() && !m_wavs.empty())
+            return &m_wavs.back(); // older WAVs stay alive: voices may still point at them
         return nullptr;
     }
 
-    struct PendingSfx {
-        int nsfx = 0;
-        float volume = 1.0f, pan = 0.0f;
-    };
+    // PlaySFX(n) and UI sounds: full volume, centred (0x4130ca -> 0x408dd0).
+    void queueSfx(int nsfx) { m_sfx.request(nsfx); }
 
-    // Equal requests in the same frame merge (0x408dd0).
-    void queueSfx(int nsfx, float volume = 1.0f, float pan = 0.0f) {
-        if (!sound(nsfx))
-            return;
-        if (std::ranges::any_of(m_sfxQueue, [&](const PendingSfx& p) { return p.nsfx == nsfx; }))
-            return;
-        m_sfxQueue.push_back({nsfx, volume, pan});
-    }
-
+    // Plays the effects requested this frame with the original's channel rules (looping
+    // engines kept alive instead of restarted, 8 channels, 50 ms restart guard...): see
+    // game/sound_channels.hpp.
     void playSounds() {
         const auto& cam = m_engine->camera();
         for (const auto& e : m_engine->takeSounds()) {
             // DirectSound pan/attenuation of 0x409a20: pan 4*dx, attenuation -2*max(|dx|,|dy|),
-            // both in 1/100 dB; quieter than -20 dB is not played.
+            // both in 1/100 dB, relative to the centre of the view.
             const int dx = e.x - (cam.x + cam.width / 2), dy = e.y - (cam.y + cam.height / 2);
-            const int att = 2 * std::max(std::abs(dx), std::abs(dy));
-            if (att > 2000)
-                continue;
-            const float volume = std::pow(10.0f, -att / 2000.0f);
-            const int panDb = std::clamp(4 * dx, -10000, 10000);
-            const float far = std::pow(10.0f, -std::abs(panDb) / 2000.0f);
-            queueSfx(e.nsfx, volume, panDb < 0 ? -(1.0f - far) : (1.0f - far));
+            m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
         }
-        if (m_mixer)
-            for (const auto& p : m_sfxQueue)
-                if (const SoundData* s = sound(p.nsfx))
-                    m_mixer->playSfx(*s, p.volume, p.pan);
-        m_sfxQueue.clear();
+        m_sfx.tact(m_sfxSink, static_cast<std::uint32_t>(m_engine->clock()));
     }
+
+    // gromada::Mixer as the SoundChannels sink (no mixer: nothing plays, nothing is "playing").
+    struct MixerSink final : SoundSink {
+        Mixer* mixer = nullptr;
+        Session* session = nullptr;
+        std::uint32_t play(int nsfx, const SoundData& s, float volume, float pan, bool loop) override {
+            if (loop && session) // rare: a looping sound (vehicle engine) starts
+                session->log(LogLevel::Debug, std::format("sfx {} loop start", nsfx));
+            return mixer ? mixer->playSfx(s, volume, pan, loop) : 0;
+        }
+        bool playing(std::uint32_t v) const override { return mixer && mixer->sfxPlaying(v); }
+        void update(std::uint32_t v, float volume, float pan) override { if (mixer) mixer->setSfxVolumePan(v, volume, pan); }
+        void stop(std::uint32_t v) override { if (mixer) mixer->stopSfxVoice(v); }
+    };
 
     // PlayAudio(t1..t4) / PlayMusic: CD playlist (docs/re/runtime.md §9).
     void playAudio(std::array<int, 4> t) {
@@ -893,7 +896,7 @@ private:
             BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
             m_wavs.emplace_back(reader);
             m_wavNames.push_back(file); // save states reload them by name
-            return static_cast<int>(m_sounds.size() + m_wavs.size());
+            return playWavSlot(); // the original has one slot: a new WAV replaces the previous one
         } catch (const std::exception& e) {
             log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
             return 0;
@@ -1026,7 +1029,9 @@ private:
     bool m_movieActive = false;
     std::string m_lastMovie;
 
-    std::vector<PendingSfx> m_sfxQueue;
+    MixerSink m_sfxSink;
+    SoundChannels m_sfx{[this](int n) { return sound(n); },
+                        [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV
     std::vector<std::string> m_wavNames; // PlayWAV file of each m_wavs entry (save states)
     std::string m_demoName;              // .dem being played (save states)

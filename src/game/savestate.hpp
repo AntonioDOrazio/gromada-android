@@ -821,6 +821,9 @@ struct SaveStateAccess {
         return dataFingerprint(e.m_world.m_vids, s.m_sounds, e.m_world.m_weapons);
     }
     static std::uint64_t frames(const Session& s) { return s.m_frames; }
+    static std::optional<double> moviePosition(const Session& s) {
+        return s.m_movies ? s.m_movies->position() : std::nullopt;
+    }
 };
 
 } // namespace gromada::game

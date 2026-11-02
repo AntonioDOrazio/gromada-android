@@ -282,6 +282,7 @@ int main(int argc, char** argv) {
         state.resize(std::fread(state.data(), 1, state.size(), f));
         std::fclose(f);
         saved = true;
+        if (state.size() >= 56) { uint64_t fr; std::memcpy(&fr, state.data() + 48, 8); savedFrame = int(fr); } // header: session frames
     }
 
     auto t0 = std::chrono::steady_clock::now();

@@ -1,8 +1,8 @@
 #pragma once
 // Save states of the mixer (issue #14, docs/savestates.md): the CD playlist, the current track
 // and the exact playback position (source frame, fractional), plus the sound-effect voices
-// (which sound, position, gains). Volumes are set again by the session and the movie stream is
-// never active in a save state (states are refused during movies).
+// (which sound, position, gains, voice id, looping) and the position of the streaming source
+// (movie soundtrack, attached again by the session). Volumes are set again by the session.
 //
 // Restoring the music position: if the same track is open and its decoded window still holds
 // (or has not yet reached) the position, only the position moves -- the common case of rewind
@@ -27,8 +27,15 @@ struct MixerState {
         const SoundData* sound = nullptr;
         double pos = 0;
         float gainL = 0, gainR = 0;
+        std::uint32_t id = 0;
+        bool loop = false;
     };
     std::vector<Voice> voices;
+    std::uint32_t nextVoiceId = 0;
+    // streaming source (movie soundtrack): attached by the session before apply()
+    bool stream = false, streamDone = false;
+    float streamVolume = 1.0f;
+    double streamPos = 0;
 };
 
 struct SaveStateAccess {
@@ -53,7 +60,14 @@ struct SaveStateAccess {
             w.f64(v.pos);
             w.f32(v.gainL);
             w.f32(v.gainR);
+            w.u32(v.id);
+            w.boolean(v.loop);
         }
+        w.u32(m.m_nextVoiceId);
+        w.boolean(m.m_stream != nullptr);
+        w.boolean(m.m_streamDone);
+        w.f32(m.m_streamVolume);
+        w.f64(m.m_streamPos);
         w.endChunk(chunk);
     }
 
@@ -65,7 +79,7 @@ struct SaveStateAccess {
         s.musicOpen = r.boolean();
         s.musicPos = r.finite64();
         if (s.musicPos < 0 || s.musicPos > 1e12) throw state::Error("save state: music position out of range");
-        const std::size_t n = r.count(20, Mixer::MaxVoices);
+        const std::size_t n = r.count(25, Mixer::MaxVoices);
         for (std::size_t i = 0; i < n; ++i) {
             MixerState::Voice v;
             const std::int32_t id = r.i32();
@@ -75,8 +89,22 @@ struct SaveStateAccess {
             if (v.pos < 0) throw state::Error("save state: bad voice position");
             v.gainL = r.finite32();
             v.gainR = r.finite32();
+            v.id = r.u32();
+            v.loop = r.boolean();
+            const auto frames = std::visit([](const auto& d) { return d.size(); }, v.sound->waveData) /
+                                std::max<std::uint16_t>(v.sound->numChannels, 1);
+            if (frames == 0 || (!v.loop && v.pos >= static_cast<double>(frames)) || v.pos > 1e12)
+                throw state::Error("save state: voice past the end of its sound");
+            if (v.id == 0 || std::ranges::any_of(s.voices, [&](const MixerState::Voice& o) { return o.id == v.id; }))
+                throw state::Error("save state: bad voice id");
             s.voices.push_back(v);
         }
+        s.nextVoiceId = r.u32();
+        s.stream = r.boolean();
+        s.streamDone = r.boolean();
+        s.streamVolume = r.finite32();
+        s.streamPos = r.finite64();
+        if (s.streamPos < 0 || s.streamPos > 1e12) throw state::Error("save state: stream position out of range");
         r.expectEnd("mixer");
         return s;
     }
@@ -86,8 +114,6 @@ struct SaveStateAccess {
         for (const auto& v : s.voices) {
             const auto frames = std::visit([](const auto& d) { return d.size(); }, v.sound->waveData) /
                                 std::max<std::uint16_t>(v.sound->numChannels, 1);
-            if (frames == 0 || v.pos >= static_cast<double>(frames))
-                continue;
             m.m_voices.push_back(Mixer::Voice{
                 .sound = v.sound,
                 .frames = frames,
@@ -95,7 +121,27 @@ struct SaveStateAccess {
                 .pos = v.pos,
                 .gainL = v.gainL,
                 .gainR = v.gainR,
+                .id = v.id,
+                .loop = v.loop,
             });
+        }
+        m.m_nextVoiceId = s.nextVoiceId;
+        if (s.stream && m.m_stream) {
+            // Same rule as the music: inside or ahead of the window only the position moves (the
+            // source is read on demand), behind it the stream seeks.
+            const auto target = static_cast<std::size_t>(s.streamPos);
+            if (target < m.m_streamBufStart) {
+                if (m.m_stream->seek(target)) {
+                    m.m_streamBuf.clear();
+                    m.m_streamBufStart = target;
+                    m.m_streamEof = false;
+                    m.m_streamPos = s.streamPos;
+                }
+            } else {
+                m.m_streamPos = s.streamPos;
+            }
+            m.m_streamDone = s.streamDone;
+            m.m_streamVolume = s.streamVolume;
         }
         m.m_playlist = s.playlist;
         if (!s.musicOpen) {

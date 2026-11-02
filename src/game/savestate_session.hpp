@@ -31,8 +31,13 @@ struct SessionStaged {
     std::string demoName, lastDemoLine;
     std::optional<std::vector<std::uint8_t>> recorder;
     std::string recordPath, recordingTo, lastMovie;
-    struct SfxState { int nsfx; float volume, pan; };
-    std::vector<SfxState> sfxQueue;
+    bool movieActive = false;
+    double moviePosition = 0;
+    std::filesystem::path moviePath;
+    struct SfxRequest { int nsfx, pan, attenuation; };
+    struct SfxChannel { int nsfx; bool active; std::uint32_t voice, time; };
+    std::array<SfxRequest, SoundChannels::QueueSize> sfxQueue{};
+    std::array<SfxChannel, SoundChannels::ChannelCount> sfxChannels{};
     std::optional<std::deque<SoundData>> wavs; // reloaded PlayWAV sounds (names differ)
     std::vector<std::string> wavNames;
     std::array<int, 4> playlist{};
@@ -156,8 +161,11 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
     w.boolean(s.m_recorder.has_value());
     if (s.m_recorder) w.blob(s.m_recorder->m_data);
     w.str(s.m_recordPath); w.str(s.m_recordingTo); w.str(s.m_lastMovie);
-    w.count(s.m_sfxQueue.size());
-    for (const auto& p : s.m_sfxQueue) { w.i32(p.nsfx); w.f32(p.volume); w.f32(p.pan); }
+    w.boolean(s.m_movieActive);
+    if (s.m_movieActive) w.f64(*s.m_movies->position());
+    // sound-effect scheduler: pending requests and the 8 channels (voice ids of the mixer)
+    for (const auto& q : s.m_sfx.m_queue) { w.i32(q.nsfx); w.i32(q.pan); w.i32(q.attenuation); }
+    for (const auto& c : s.m_sfx.m_channels) { w.i32(c.nsfx); w.boolean(c.active); w.u32(c.voice); w.u32(c.time); }
     w.count(s.m_wavNames.size());
     for (const auto& n : s.m_wavNames) w.str(n);
     for (const int t : s.m_playlist) w.i32(t);
@@ -263,11 +271,24 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
     st.lastDemoLine = r.str(1u << 16);
     if (r.boolean()) st.recorder = r.blob(1u << 26);
     st.recordPath = r.str(4096); st.recordingTo = r.str(4096); st.lastMovie = r.str(4096);
-    const std::size_t nSfx = r.count(12, 1u << 16);
-    for (std::size_t i = 0; i < nSfx; ++i) {
-        SessionStaged::SfxState p;
-        p.nsfx = r.i32(); p.volume = r.finite32(); p.pan = r.finite32();
-        st.sfxQueue.push_back(p);
+    st.movieActive = r.boolean();
+    if (st.movieActive) {
+        st.moviePosition = r.finite64();
+        if (st.moviePosition < 0 || st.moviePosition > 1e6) throw state::Error("save state: bad movie position");
+        const auto path = script::resolveCaseInsensitive(s.m_config.gameDir, st.lastMovie);
+        if (!s.m_movies || !path) throw state::Error("save state: the movie " + st.lastMovie + " cannot be played");
+        st.moviePath = *path;
+    }
+    for (auto& q : st.sfxQueue) {
+        q.nsfx = r.i32();
+        q.pan = r.ranged<std::int32_t>(-10000, 10000, "sound pan");
+        q.attenuation = r.ranged<std::int32_t>(std::numeric_limits<std::int32_t>::min() / 2, 0, "sound attenuation");
+    }
+    for (auto& c : st.sfxChannels) {
+        c.nsfx = r.i32();
+        c.active = r.boolean();
+        c.voice = r.u32();
+        c.time = r.u32();
     }
     const std::size_t nWavs = r.count(4, 1u << 12);
     for (std::size_t i = 0; i < nWavs; ++i) st.wavNames.push_back(r.str(4096));
@@ -394,7 +415,20 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
 }
 
 inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
-    s.stopMovie();
+    // Movie: the same one keeps playing from the saved clock; another one is opened and wound
+    // forward to it (the mixer's stream position is restored with the mixer below).
+    if (!st.movieActive || !s.m_movieActive || s.m_lastMovie != st.lastMovie) {
+        s.stopMovie();
+        if (st.movieActive) {
+            if (s.m_movies->open(st.moviePath)) {
+                s.m_movieActive = true;
+                if (s.m_mixer) s.m_mixer->setStream(s.m_movies->audio());
+            } else {
+                s.log(LogLevel::Warn, std::format("load state: movie {} cannot be opened, skipped", st.lastMovie));
+            }
+        }
+    }
+    if (s.m_movieActive) s.m_movies->seek(st.moviePosition);
     applyEngine(*dynamic_cast<GameEngine*>(s.m_engine.get()), std::move(st.engine));
     if (!st.hasVm) {
         s.m_vm.reset();
@@ -426,8 +460,16 @@ inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
     s.m_recordPath = std::move(st.recordPath);
     s.m_recordingTo = std::move(st.recordingTo);
     s.m_lastMovie = std::move(st.lastMovie);
-    s.m_sfxQueue.clear();
-    for (const auto& p : st.sfxQueue) s.m_sfxQueue.push_back({p.nsfx, p.volume, p.pan});
+    for (std::size_t i = 0; i < st.sfxQueue.size(); ++i)
+        s.m_sfx.m_queue[i] = {st.sfxQueue[i].nsfx, st.sfxQueue[i].pan, st.sfxQueue[i].attenuation};
+    for (std::size_t i = 0; i < st.sfxChannels.size(); ++i) {
+        const auto& c = st.sfxChannels[i];
+        // a channel must not follow a voice the mixer does not have (dropped or no mixer):
+        // it is then a finished channel, as after its sound ended
+        const bool alive = c.voice && s.m_mixer && st.hasMixer &&
+                           std::ranges::any_of(st.mixer.voices, [&](const MixerState::Voice& v) { return v.id == c.voice; });
+        s.m_sfx.m_channels[i] = {c.nsfx, c.active && alive, alive ? c.voice : 0u, c.time};
+    }
     if (st.wavs) s.m_wavs = std::move(*st.wavs);
     s.m_wavNames = std::move(st.wavNames);
     s.m_playlist = st.playlist;
@@ -514,8 +556,8 @@ inline bool SaveStateManager::save(Session& session, std::vector<std::uint8_t>& 
         m_error = "the engine has no save states";
         return false;
     }
-    if (session.moviePlaying()) {
-        m_error = "save states are not available while a movie plays";
+    if (session.moviePlaying() && !SaveStateAccess::moviePosition(session)) {
+        m_error = "the movie player has no playback position: no save state while a movie plays";
         return false;
     }
     try {
