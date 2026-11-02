@@ -165,7 +165,7 @@ public:
             tick(step.input, std::clamp(static_cast<int>(step.clock) - m_engine->clock(), 0, MaxFrameMs), dtSeconds);
         } else {
             m_msDebt += dtMs;
-            const int elapsed = static_cast<int>(m_msDebt);
+            const int elapsed = static_cast<int>(m_msDebt + 1e-6);
             m_msDebt -= elapsed;
             const auto vp = viewPointer(pc);
             const auto& cam = m_engine->camera();
@@ -373,17 +373,21 @@ private:
 
     // The input mapper gives buttons a different meaning in each context (Start = Enter while
     // typing a name, Esc in menus; A types a letter or clicks): a button still held when the
-    // context changes would arrive as a fresh key or click. Keys and mouse buttons held at a
-    // context change are ignored until released.
+    // context changes would arrive as a fresh key or click. When the context changes while
+    // something was held in the previous frame, what is down now is ignored until released.
     const input::PcState& filterStale(const input::PcState& pc) {
         const input::Context ctx = inputContext();
         if (ctx != m_lastContext) {
             m_lastContext = ctx;
-            for (std::size_t i = 0; i < input::KeyCount; ++i)
-                m_staleKey[i] = pc.keys[i].down;
-            m_staleLeft = pc.left.down;
-            m_staleRight = pc.right.down;
+            if (m_prevAnyDown) {
+                for (std::size_t i = 0; i < input::KeyCount; ++i)
+                    m_staleKey[i] = pc.keys[i].down;
+                m_staleLeft = pc.left.down;
+                m_staleRight = pc.right.down;
+            }
         }
+        m_prevAnyDown = pc.left.down || pc.right.down ||
+                        std::ranges::any_of(pc.keys, [](const input::ButtonState& b) { return b.down; });
         m_filtered = pc;
         auto filter = [](input::ButtonState& b, bool& stale) {
             if (stale && !b.down) stale = false;
@@ -1052,7 +1056,7 @@ private:
     input::PcState m_pc, m_filtered;
     input::Context m_lastContext = input::Context::Menu;
     std::array<bool, input::KeyCount> m_staleKey{};
-    bool m_staleLeft = false, m_staleRight = false;
+    bool m_staleLeft = false, m_staleRight = false, m_prevAnyDown = false;
 
     std::vector<RGBA8> m_view;      // m_viewW x m_outH, what the engine and the menus draw on
     std::vector<std::uint32_t> m_xrgb;

@@ -35,3 +35,12 @@ gromada_add_test(music_test music_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+
+# Game session (src/game/session*.hpp): synthetic tests (mock engine, synthetic scripts) and
+# the whole flow of the game + the three demos on the original data (provisional engine).
+gromada_add_test(session_test session_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+gromada_add_test(session_data_test session_data_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
