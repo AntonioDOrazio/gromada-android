@@ -94,10 +94,11 @@ public:
     std::optional<Value> operator()(const BuiltinInfo& b, std::span<const Value> args) {
         switch (static_cast<BuiltinId>(b.id)) {
             case BuiltinId::GetTime: return Value{timeMs};
-            case BuiltinId::Random: {
+            case BuiltinId::Random: { // like the original: rand() % (max + 1), MSVC LCG
                 const std::int32_t max = argInt(args, 0);
-                randomState = randomState * 1103515245u + 12345u;
-                return Value{max > 0 ? std::int32_t((randomState >> 16) % std::uint32_t(max)) : 0};
+                randomState = randomState * 214013u + 2531011u;
+                const std::int32_t r = std::int32_t((randomState >> 16) & 0x7FFF);
+                return Value{max + 1 != 0 ? r % (max + 1) : 0};
             }
             case BuiltinId::Create:
             case BuiltinId::MenuCreate:

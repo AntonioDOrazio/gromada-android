@@ -10,16 +10,20 @@
 //   --tick-ms MS       GetTime() advance per tick in the simulated world (default 50)
 //   --set NAME=VALUE   set a global before the first tick; NAME[i]=VALUE for an element;
 //                      VALUE is an integer or "text" (repeatable)
-//   --iff MODE         once (default) | edge | if
-//   --missing-args M   keep (default) | reset
-//   --no-short-circuit evaluate both sides of && and ||
+//   --iff MODE         patch (default, the original) | site (once per iff site) | if
 //   --stub             no simulated world: every builtin returns 0
 //   --quiet A,B,...    do not print calls to these builtins (e.g. GetTime,GetKey)
 //   --results          print the value returned by each builtin call
 //   --trace            also print calls to user functions (prefixed with '>')
 //   --globals          print every global variable after the run
-//   --dump             print the parsed program (fully parenthesized) and exit
+//   --dis              print the bytecode (disassembly) and exit
+//   --layout           print code bytes, cells and functions in a machine-readable form and exit
+//                      (tests/script_layout_compare.py compares it with gscript.py)
 //   --builtins         print the builtin registry (id, signature) and exit
+//   --notes            print the compiler's notes (quirks met in the source)
+//   --fragment         compile without requiring main() (include-only files: maps/HEADER.INI)
+//   --predeclare       declare the game's builtins before the script (fragments that use them
+//                      without including the header, such as maps/music.ini)
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -30,7 +34,6 @@
 #include <string_view>
 #include <vector>
 
-#include "script/printer.hpp"
 #include "script/recording_host.hpp"
 #include "script/script.hpp"
 
@@ -42,8 +45,8 @@ namespace {
 [[noreturn]] void usage(std::string_view error) {
     if (!error.empty()) std::println(stderr, "script_run: {}", error);
     std::println(stderr, "usage: script_run [--root DIR] [--ticks N] [--tick-ms MS] [--set NAME=VALUE]... "
-                         "[--iff once|edge|if] [--missing-args keep|reset] [--no-short-circuit] [--stub] "
-                         "[--quiet A,B] [--results] [--trace] [--globals] [--dump] [--builtins] SCRIPT");
+                         "[--iff patch|site|if] [--stub] [--quiet A,B] [--results] [--trace] [--globals] "
+                         "[--dis] [--layout] [--builtins] [--notes] [--fragment] [--predeclare] SCRIPT");
     std::exit(2);
 }
 
@@ -100,7 +103,8 @@ int main(int argc, char** argv) {
     int ticks = 1, tickMs = 50;
     std::vector<Assignment> sets;
     ExecConfig cfg;
-    bool stub = false, results = false, printGlobals = false, dump = false, listBuiltins = false;
+    bool stub = false, results = false, printGlobals = false, dis = false, layout = false, listBuiltins = false;
+    bool notes = false, fragment = false, predeclare = false;
     std::set<std::string, std::less<>> quiet;
 
     for (int i = 1; i < argc; ++i) {
@@ -115,22 +119,20 @@ int main(int argc, char** argv) {
         else if (a == "--set") sets.push_back(parseSet(value()));
         else if (a == "--iff") {
             const auto m = value();
-            if (m == "once") cfg.iffMode = IffMode::OncePerSite;
-            else if (m == "edge") cfg.iffMode = IffMode::RisingEdge;
+            if (m == "patch") cfg.iffMode = IffMode::Patch;
+            else if (m == "site") cfg.iffMode = IffMode::OncePerSite;
             else if (m == "if") cfg.iffMode = IffMode::PlainIf;
-            else usage("--iff expects once, edge or if");
-        } else if (a == "--missing-args") {
-            const auto m = value();
-            if (m == "keep") cfg.missingArguments = MissingArguments::KeepPrevious;
-            else if (m == "reset") cfg.missingArguments = MissingArguments::Reset;
-            else usage("--missing-args expects keep or reset");
-        } else if (a == "--no-short-circuit") cfg.shortCircuit = false;
-        else if (a == "--stub") stub = true;
+            else usage("--iff expects patch, site or if");
+        } else if (a == "--stub") stub = true;
         else if (a == "--quiet") quiet = splitList(value());
         else if (a == "--results") results = true;
         else if (a == "--trace") cfg.traceUserFunctions = true;
         else if (a == "--globals") printGlobals = true;
-        else if (a == "--dump") dump = true;
+        else if (a == "--dis" || a == "--dump") dis = true;
+        else if (a == "--layout") layout = true;
+        else if (a == "--notes") notes = true;
+        else if (a == "--fragment") fragment = true;
+        else if (a == "--predeclare") predeclare = true;
         else if (a == "--builtins") listBuiltins = true;
         else if (a == "-h" || a == "--help") usage("");
         else if (a.starts_with("--")) usage("unknown option " + std::string{a});
@@ -144,12 +146,35 @@ int main(int argc, char** argv) {
         FileSystemSourceLoader loader{*root};
         const BuiltinRegistry known = knownBuiltinRegistry();
         CompileOptions copt;
-        copt.predeclared = &known; // lets include-only fragments (music.ini...) run too
+        if (fragment) copt.requireMain = false;
+        if (predeclare) copt.predeclared = &known;
         const Script script = Script::compile(loader, scriptPath, copt);
-        for (const auto& w : script.warnings()) std::println(stderr, "{}", w);
+        if (notes)
+            for (const auto& w : script.warnings()) std::println(stderr, "{}", w);
 
-        if (dump) {
-            std::print("{}", AstPrinter::program(script.ast()));
+        if (dis) {
+            std::print("{}", script.disassemble());
+            return 0;
+        }
+        if (layout) {
+            std::string hex;
+            for (const std::uint8_t b : script.code()) hex += std::format("{:02x}", b);
+            std::println("code {}", hex);
+            std::println("cells {}", script.cellCount());
+            for (std::size_t i = 0; i < script.cells().size(); ++i) {
+                const auto& c = script.cells()[i];
+                std::println("cell {} {} {} {}", i, int(c.flags),
+                             c.initialized ? (c.hasInitValue ? std::to_string(c.initValue) : std::string{"?"}) : std::string{"-"},
+                             c.name);
+            }
+            for (const auto& f : script.functions())
+                std::println("func {} {} {} {}", f.name, f.entry, f.paramBase, f.paramCount);
+            for (const BuiltinInfo* b : script.builtins().declarations()) std::println("extern {} {}", b->name, b->id);
+            for (const auto& d : script.defines())
+                std::println("define {} {}", d.name, d.isString ? "\"" + d.text + "\"" : std::to_string(d.value));
+            for (const auto& s : script.iffSites())
+                std::println("iff {} {} {}:{}{}", s.conditionStart, s.opcodeOffset, s.loc.file ? *s.loc.file : "?", s.loc.line,
+                             s.reachableByJump ? " jump" : "");
             return 0;
         }
         if (listBuiltins) {
@@ -173,13 +198,13 @@ int main(int argc, char** argv) {
         };
 
         host.setTick(0);
-        Interpreter vm{script, host, cfg}; // initializers may call builtins (tick 0)
+        Interpreter vm{script, host, cfg};
         for (const auto& s : sets) {
             if (!vm.hasGlobal(s.name)) usage("--set: no global named '" + s.name + "'");
             vm.set(s.name, s.value, s.index);
         }
         flush();
-        if (script.findFunction("main")) {
+        if (script.mainEntry() != 0) {
             for (int t = 1; t <= ticks; ++t) {
                 host.setTick(std::uint64_t(t));
                 const Value r = vm.tick();

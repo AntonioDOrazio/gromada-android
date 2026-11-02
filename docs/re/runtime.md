@@ -24,7 +24,7 @@ Regole di esecuzione da seguire. Tutte a confidenza **alta** salvo dove indicato
   `<mappa>.ini` viene **compilato in un bytecode per una macchina a pila** (compilatore a discesa
   ricorsiva, 0x417cb0–0x41a790) ed eseguito dalla VM `0x41a790`. Un modo fedele e semplice per la
   issue #1 è replicare lo stesso bytecode: `tools/re/runtime/gscript.py` è una replica del
-  compilatore (vedi §2) e compila senza errori tutti i 38 script del gioco. Non esiste bytecode
+  compilatore (vedi §2) e compila senza errori tutti i 39 script del gioco. Non esiste bytecode
   originale con cui confrontarla byte per byte, ma la disposizione delle variabili coincide con
   quella registrata nelle tre demo (§8).
 - **`main()` viene eseguita da capo una volta per frame** di gioco (una "tick"): la VM parte
@@ -67,7 +67,7 @@ Regole di esecuzione da seguire. Tutte a confidenza **alta** salvo dove indicato
   meccanismo con cui gli script si passano informazioni (`n_map`, `old_n_map`, `map`,
   `n_player`, opzioni...). Vale anche per gli elementi di array **non coperti** da un
   inizializzatore parziale (`int weapon[16]={88,0,0,0};` lascia invariati `weapon[4..15]`):
-  17 casi negli script. Al primo avvio tutte le celle valgono 0. Le stringhe invece ripartono da
+  19 casi negli script, `levels/18.ini` compreso. Al primo avvio tutte le celle valgono 0. Le stringhe invece ripartono da
   `""` a ogni caricamento.
 - Una variabile array usata senza indice indica il suo primo elemento (`invisible=GetTime();`,
   `FWrite(win,nweapon)`).
@@ -149,10 +149,10 @@ calcolato in compilazione ma è "l'inizio dell'istruzione corrente" tenuto dalla
 posizione dopo l'ultimo `;` (EOS), `if`/`while`/`for` (JZ), IFF, CALL o RET eseguiti. Se la `iff`
 è raggiunta con un salto (fine del ramo `if` di un `if/else`, `break`), quel punto è il salto
 stesso: è il salto a essere trasformato e la `iff` può scattare **una seconda volta** se poi viene
-raggiunta per un'altra strada. Succede in 6 punti degli script (§2.9), tra cui
+raggiunta per un'altra strada. Succede in 7 punti degli script (§2.9), tra cui
 `iff(n_map>0 && n_map<=30)` in `Tact()` quando nello stesso frame scatta un ramo della catena
 dei cheat (evento praticamente impossibile al primo frame). Un'implementazione con "flag per
-sito" si discosta dall'originale solo in quei 6 punti e solo in sequenze rare (negli script la
+sito" si discosta dall'originale solo in quei 7 punti e solo in sequenze rare (negli script la
 seconda esecuzione è innocua); per la fedeltà assoluta conviene il bytecode.
 `iff ... else` è sintatticamente valido (dopo lo scatto si esegue sempre il ramo `else`) ma nessuno
 script lo usa.
@@ -314,16 +314,20 @@ come documentazione), l'ID è letto con `%i` e troncato a un byte.
 - `string s="x";` e `int x=COSTANTE;` non compilano.
 
 ### 2.9 Risultati del controllo statico su tutti gli script (`gscript.py check`)
-Tutti i 38 script (`maps/*.ini`, `maps/levels/*.INI`, `maps/net/*.INI`) compilano senza errori.
+Tutti i 39 script (`maps/*.ini`, `maps/levels/*.INI` con `18.ini`, `maps/net/*.INI`) compilano senza errori
+(il controllo leggeva solo `*.INI` e saltava `levels/18.ini`: corretto con la issue #9).
 Massimi: 20413 byte di codice (`levels/12.INI`), 243 celle (`net/05.INI`), 98 funzioni, 173 define.
 - Nessuna chiamata a funzione utente dopo altri valori della stessa istruzione, nessun errore di
   pila (simulazione lineare della profondità), nessuna `iff` con chiamate utente nella condizione,
   nessun uso di precedenze che darebbero risultati diversi da C, nessuna lettura `s[i]` su stringhe,
   nessun letterale ottale, nessuna dichiarazione dentro funzione.
-- 17 inizializzatori parziali di array (§1.3).
-- 6 `iff` raggiungibili da un salto (§1.7): `HEADER.INI:751` (in `Tact`), `levels/01.INI:128`
-  (dopo un `for` con `break`), `levels/12.INI:114`, `levels/15.INI:87`, `levels/19.INI:132`,
-  `levels/27.INI:82` (dopo `if/else`).
+- 19 inizializzatori parziali di array (§1.3).
+- 7 `iff` raggiungibili da un salto (§1.7): `HEADER.INI:751` (in `Tact`), `levels/01.INI:128`
+  (dopo un `for` con `break`), `levels/12.INI:114`, `levels/15.INI:87`, `levels/18.ini:125`,
+  `levels/19.INI:132`, `levels/27.INI:82` (dopo `if/else`).
+- L'interprete C++ (`src/script`, issue #9) produce lo stesso bytecode e le stesse celle di
+  `gscript.py` su tutti i 39 script (`tests/script_layout_compare.py`) e riproduce la patch delle
+  `iff`: vedi `docs/script-language.md`.
 
 ---
 
