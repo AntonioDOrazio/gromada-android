@@ -127,17 +127,24 @@ inline void toXrgb(const RGBA8* src, std::uint32_t* out, int n) noexcept {
 //      previous screen.
 class HiResComposite {
 public:
-    void beginLogical(FramebufferRef world, FramebufferRef logical, int k) {
+    void beginLogical(FramebufferRef world, FramebufferRef logical, int k, int bands = 1,
+                      const std::function<void(int, const std::function<void(int)>&)>& parallel = {}) {
         m_k = k;
         const int lw = logical.extent(1), lh = logical.extent(0);
         const int ww = world.extent(1);
         const int off = k / 2;
-        for (int y = 0; y < lh; ++y) {
-            const RGBA8* src = world.data_handle() + static_cast<std::size_t>(y * k + off) * static_cast<std::size_t>(ww) + off;
-            RGBA8* dst = logical.data_handle() + static_cast<std::size_t>(y) * static_cast<std::size_t>(lw);
-            for (int x = 0; x < lw; ++x) dst[x] = src[static_cast<std::size_t>(x) * static_cast<std::size_t>(k)];
-        }
-        snapshot(logical, m_world);
+        m_world.resize(static_cast<std::size_t>(lw) * static_cast<std::size_t>(lh));
+        const auto job = [&](int b) {   // rows [lh b / bands, lh (b + 1) / bands): the logical rows and their snapshot
+            for (int y = lh * b / bands, e = lh * (b + 1) / bands; y < e; ++y) {
+                const RGBA8* src = world.data_handle() + static_cast<std::size_t>(y * k + off) * static_cast<std::size_t>(ww) + off;
+                RGBA8* dst = logical.data_handle() + static_cast<std::size_t>(y) * static_cast<std::size_t>(lw);
+                RGBA8* snap = m_world.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(lw);
+                for (int x = 0; x < lw; ++x) snap[x] = dst[x] = src[static_cast<std::size_t>(x) * static_cast<std::size_t>(k)];
+            }
+        };
+        bands = std::clamp(bands, 1, std::max(1, lh));
+        if (bands > 1 && parallel) parallel(bands, job);
+        else for (int b = 0; b < bands; ++b) job(b);
         m_haveUi = m_haveFx = false;
     }
     void beforeEffects(FramebufferRef logical) { snapshot(logical, m_ui); m_haveUi = true; }
@@ -183,6 +190,18 @@ private:
             // per logical pixel: 0 = the world, 1 = the world through the effect, 2 = a block
             const std::size_t r = static_cast<std::size_t>(y) * static_cast<std::size_t>(lw);
             const bool rowOutside = window && (y < m_effect.top || y > m_effect.bottom);
+            // Fast path (most rows while playing): nothing drawn over the world on this row
+            // and no effect, i.e. every pixel would get mode 0. Whole-row comparisons (alpha
+            // included: if only alpha differs the per-pixel path below decides, same result).
+            if (!colour && !window) {
+                const std::size_t bytes = static_cast<std::size_t>(lw) * sizeof(RGBA8);
+                if (std::memcmp(fin + r, fx + r, bytes) == 0 && std::memcmp(ui + r, m_world.data() + r, bytes) == 0) {
+                    for (int yy = 0; yy < k; ++yy)
+                        toXrgb(world.data_handle() + static_cast<std::size_t>(y * k + yy) * static_cast<std::size_t>(ww),
+                               dst + static_cast<std::size_t>(y * k + yy) * dstPitch, ww);
+                    continue;
+                }
+            }
             for (int x = 0; x < lw; ++x) {
                 const std::size_t i = r + static_cast<std::size_t>(x);
                 const std::uint32_t f = word(fin[i]), e = word(fx[i]);

@@ -1306,7 +1306,7 @@ private:
                 }
             m_composite.compose(FramebufferRef{m_world.data(), h, w}, FramebufferRef{m_view.data(), m_outH, m_viewW},
                                 m_xrgb.data() + static_cast<std::size_t>(m_viewX) * k, static_cast<std::size_t>(width()),
-                                m_pool ? m_pool->threads() : 1, parallel());
+                                renderBands(), parallel());
         }
         drawCursor();
     }
@@ -1443,25 +1443,40 @@ private:
         };
     }
 
+    // Bands of the picture passes: several per thread, handed out as threads get free (a slow
+    // core of a big.LITTLE phone takes fewer); the pictures are the same for any number.
+    [[nodiscard]] int renderBands() const noexcept {
+        const int t = m_pool ? m_pool->threads() : 1;
+        return t > 1 ? t * 4 : 1;
+    }
+
     // The world of this frame into the logical picture `fb` (and, k > 1, into m_world).
     void drawWorld(ViewRequest req, FramebufferRef fb) {
         m_hiRes = false;
         if (identityView()) {
+            m_worldIntact = false;
             m_engine->draw(fb);
             return;
         }
         const int k = m_renderScale;
         FramebufferRef target = fb;
         if (k > 1) {
+            const RGBA8* before = m_world.data();
             m_world.resize(static_cast<std::size_t>(m_viewW) * k * static_cast<std::size_t>(m_outH) * k);
             target = FramebufferRef{m_world.data(), m_outH * k, m_viewW * k};
             m_hiRes = true;
+            // m_world is only written by drawView() (the composite reads it): unchanged since
+            // the last frame unless reallocated, resized or drawn by something else
+            req.targetIntact = m_worldIntact && m_world.data() == before && m_worldDims == std::pair{m_outH * k, m_viewW * k};
+            m_worldDims = {m_outH * k, m_viewW * k};
         }
+        m_worldIntact = false;
         if (m_worldPass) req.drawn = &m_drawn;
         if (!m_pool) m_pool = std::make_unique<view::WorkerPool>(view::WorkerPool::autoThreads(m_config.renderThreads));
         req.threads = m_pool->threads();
         req.parallel = parallel();
         bool drawn = m_viewSupported && m_engine->drawView(target, req, ViewOrigin{m_mapX, m_mapY});
+        m_worldIntact = drawn && k > 1 && !m_worldPass;
         if (!drawn) {   // engines without drawView: the original picture, scaled
             m_engine->draw(fb);
             m_drawn.clear();
@@ -1475,7 +1490,7 @@ private:
             m_worldPass(pass);
         }
         if (k > 1)
-            m_composite.beginLogical(target, fb, k);
+            m_composite.beginLogical(target, fb, k, renderBands(), parallel());
     }
 
     // ---- state ----------------------------------------------------------------------------------------
@@ -1555,6 +1570,8 @@ private:
     bool m_smooth = false, m_viewSupported = false, m_hiRes = false;
     std::pair<int, int> m_menuPointer{0, 0};   // cursor of this frame for the menus (logical)
     std::vector<RGBA8> m_world;                // k > 1: the world at internal resolution
+    bool m_worldIntact = false;                // m_world holds the last drawView() picture, untouched
+    std::pair<int, int> m_worldDims{0, 0};
     view::HiResComposite m_composite;
     std::vector<DrawnSprite> m_drawn;
     std::function<void(const WorldPass&)> m_worldPass;

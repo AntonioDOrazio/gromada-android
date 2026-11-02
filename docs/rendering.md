@@ -10,6 +10,7 @@ codice: `Engine::draw()`), verificato frame per frame su tutto il percorso del g
 | file | contenuto |
 |---|---|
 | `src/game/view_raster.hpp` | `view::Raster` (trasformazione di vista in virgola fissa), `drawFrameScaled()`: `putcadr` (`hicolor::FrameVisitor`) per qualunque scala e posizione sub-pixel |
+| `src/game/view_cache.hpp` | `view::PictureCache`: l'immagine del mondo tenuta fra i frame, ridisegnata solo dove cambia (§ 9) |
 | `src/game/render_view.hpp` | `HiResComposite` (immagine a risoluzione interna con menu/testi/effetti), `drawCursorScaled()` |
 | `src/game/engine.hpp` | `GameEngine::viewOrigin()`, `drawView()`, `motion()`, `drawnPosition()` |
 | `src/game/engine_api.hpp` | contratto (ganci opzionali): `ViewRequest`, `ViewOrigin`, `DrawnSprite`, `ScreenEffectView` |
@@ -255,3 +256,39 @@ dell'immagine nel frontend):
 Sul Flip 2 (16:9, 1080p a 60 Hz, budget 16,7 ms) 2× (1708×960) e 3× stanno nel budget; oltre
 1080p 4× non serve. Sono stime: da verificare sul dispositivo con `render_bench` (Termux) o con
 le statistiche di RetroArch.
+
+## 9. Cache dell'immagine e bande (lag a 2× / 120 Hz)
+
+Segnalazione: a 2× e 120 Hz sul Nova, con spari ed esplosioni, il gioco scattava (a 60 Hz no).
+Tre interventi, **immagine identica bit per bit** (hash di ogni frame uguali a prima su demo,
+menu, livello, zoom, 1×/2×/3×/4×, effetti, run-ahead, caricamento di stati, 1–3 thread):
+
+- **`view::PictureCache`** (`view_cache.hpp`). Un pixel è il risultato, sul nero, dei comandi che
+  lo coprono, nell'ordine. I comandi del frame sono confrontati in ordine con quelli dell'immagine
+  tenuta (sottosequenza comune di chiavi uguali: frame, contenuto della palette, posizione,
+  passata); fuori dai rettangoli dei comandi non accoppiati (dove erano, dove sono) i comandi sono
+  gli stessi nello stesso ordine, quindi il pixel non cambia; quei rettangoli sono ridisegnati con
+  tutti i comandi che li toccano. Con scala intera k un comando a posizione intera finisce alla
+  colonna k·m − N, N = ⌈origine·k/256⌉: quando la camera si muove l'immagine è traslata di pixel
+  interi (anche con origine sub-pixel) e si disegnano le strisce scoperte; i comandi a posizione
+  sub-pixel (cose in movimento) hanno l'origine nella chiave. Un rettangolo è disegnato su un
+  buffer suo con origine o + 256·x0/k (x0 multiplo di k): stesse colonne. Oltre metà schermo da
+  ridisegnare → immagine intera. Scala non intera (zoom fra i valori interi) → niente cache.
+  A 2× l'immagine sta direttamente nel buffer del mondo (`ViewRequest::targetIntact`: la sessione
+  garantisce che nessun altro l'ha scritto), senza copie.
+- **Fusioni** (ombre, luci, dissolvenze: un intervallo contiguo per riga; alpha formato 8: il
+  colore sorgente una volta per pixel sorgente, i k pixel interni senza controlli di bordo) e
+  riempimento opaco a k > 1 senza controlli di bordo all'interno.
+- **Bande dinamiche**: 4 bande per thread (disegno, campionamento logico, composizione), prese
+  dai thread man mano che si liberano. Prima ogni thread aveva una banda fissa: sui telefoni
+  big.LITTLE il frame aspettava la banda finita su un core lento (A510).
+
+Battaglia nel livello 1 (stato salvato, schema diretto, sparando), 2×, 120 Hz, un thread, stessa VM:
+
+| ms per frame | media | p50 | p95 | p99 |
+|---|---|---|---|---|
+| prima | 2,98 | 2,94 | 3,17 | 3,67 |
+| dopo | 1,64 | 1,51 | 2,07 | 2,78 |
+
+Ripartizione dopo (media): `drawView` 0,53 ms, campionamento logico 0,22, composizione 0,50
+(due passate limitate dalla banda di memoria), simulazione/UI/suono il resto.

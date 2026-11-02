@@ -118,6 +118,9 @@ struct ViewRequest {
     // many bands (same picture for any number). Empty: one thread.
     std::function<void(int n, const std::function<void(int)>& fn)> parallel;
     int threads = 1;
+    // The framebuffer still holds what the previous drawView() left in it (same buffer, nothing
+    // else wrote it since): drawView() may then only redraw what changed in place.
+    bool targetIntact = false;
 };
 struct ViewOrigin {
     double x = 0, y = 0;                   // world point at the view's top-left corner

@@ -24,6 +24,7 @@
 //             statefuzz=<n>           after the run: n corrupted/truncated copies of a fresh state
 //                                     must be rejected by retro_unserialize without crashing
 //   timing=<from>-<to>        retro_run time of those frames: mean, median, p95, p99, max (ms)
+//   frametimes=<file>         retro_run time of every frame: "<frame> <ms>" per line
 //   Exit() from the game (RETRO_ENVIRONMENT_SHUTDOWN) stops the run.
 #include <dlfcn.h>
 #include <chrono>
@@ -215,6 +216,7 @@ static int16_t input(unsigned port, unsigned device, unsigned index, unsigned id
 
 #define SYM(name) auto name = reinterpret_cast<decltype(&::name)>(dlsym(lib, #name)); if (!name) { std::fprintf(stderr, "missing %s\n", #name); return 1; }
 
+static std::string frameTimesPath;
 static int saveAt = -1, loadAt = -1, runAhead = 0, stateFuzz = 0, timingFrom = -1, timingTo = -1;
 static std::string stateFile, hashFile;
 
@@ -238,6 +240,7 @@ int main(int argc, char** argv) {
         else if (k == "runahead") runAhead = std::atoi(v.c_str());
         else if (k == "hashes") hashFile = v;
         else if (k == "statefuzz") stateFuzz = std::atoi(v.c_str());
+        else if (k == "frametimes") frameTimesPath = v;
         else if (k == "timing") { timingFrom = std::atoi(v.c_str()); timingTo = std::atoi(v.c_str() + v.find('-') + 1); }
         else if (k == "shots") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) shots.insert(std::atoi(t)); }
         else opts[k] = v;
@@ -298,6 +301,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<double> runMs;
+    FILE* frameTimes = frameTimesPath.empty() ? nullptr : std::fopen(frameTimesPath.c_str(), "w");
     auto t0 = std::chrono::steady_clock::now();
     for (int run = 0; run < frames && !shutdownRequested; ++run) {
         if (frame == saveAt && !saved) {
@@ -320,8 +324,10 @@ int main(int argc, char** argv) {
         videoHash = audioHash = 0xcbf29ce484222325ull;
         const auto r0 = std::chrono::steady_clock::now();
         retro_run();
+        const double runMsThis = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
         if (frame >= timingFrom && frame <= timingTo)
-            runMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count());
+            runMs.push_back(runMsThis);
+        if (frameTimes) std::fprintf(frameTimes, "%d %.3f\n", frame, runMsThis);
         if (hashes) std::fprintf(hashes, "%d %016llx %016llx\n", frame, (unsigned long long)videoHash, (unsigned long long)audioHash);
         if (runAhead > 0 && !shutdownRequested) {
             if (!doSave(scratch)) { std::fprintf(stderr, "[f%d] run-ahead: retro_serialize failed\n", frame); ++failures; }
@@ -352,6 +358,7 @@ int main(int argc, char** argv) {
                      timingFrom, timingTo, v.size(), sum / double(v.size()), q(0.5), q(0.95), q(0.99), v.back());
     }
     if (hashes) std::fclose(hashes);
+    if (frameTimes) std::fclose(frameTimes);
     if (serializeCount)
         std::fprintf(stderr, "savestates: size %zu (max used %zu), serialize %ld x avg %.3f ms max %.3f ms, "
                      "unserialize %ld x avg %.3f ms max %.3f ms\n", stateSize, maxUsed, serializeCount,

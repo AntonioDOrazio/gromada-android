@@ -8,9 +8,12 @@
 //  - smooth motion: the drawn position is continuous across the ticks of a moving unit, a
 //    teleport is not interpolated, rays and paused worlds are not extrapolated;
 //  - the screen <-> world mapping of the input record (identity = the original's), zoomed;
-//  - the internal-resolution composite: UI as k x k blocks, Effect() on the world, windows.
+//  - the internal-resolution composite: UI as k x k blocks, Effect() on the world, windows;
+//  - the picture cache: the same picture as drawing the whole list, frame after frame, with
+//    moving, appearing, disappearing and reordered commands and a moving camera.
 #include "game/engine.hpp"
 #include "game/render_view.hpp"
+#include "game/view_cache.hpp"
 #include "game/session_input.hpp"
 #include "oracle_vectors.hpp"
 #include "test.hpp"
@@ -502,6 +505,91 @@ void testComposite() {
     CHECK_EQ(at(3 * k + 1, 2 * k + 1), xrgb(world[static_cast<std::size_t>((2 * k + 1) * WW + 3 * k + 1)]));   // inside: the world
 }
 
+
+// ---------------------------------------------------------------------------- picture cache
+void testPictureCache() {
+    // frames: solid tiles and, when the oracle vectors are there, formats 2/3/4/8 (opaque,
+    // light, shadow, alpha): every pixel operation goes through the cache
+    std::vector<SolidFrame> solids;
+    for (int i = 0; i < 6; ++i) solids.emplace_back(5 + 3 * i, 4 + 2 * i, static_cast<std::uint8_t>(1 + i % 3));
+    std::vector<VidGraphics::Frame> frames;
+    for (const auto& sf : solids) frames.push_back(sf.frame());
+    std::map<int, VidGraphics> gfx;
+    std::map<int, std::vector<std::byte>> data;
+    std::array<ColorRgb8, 256> palette{};
+    for (int i = 0; i < 256; ++i) palette[static_cast<std::size_t>(i)] = {static_cast<std::uint8_t>(i * 7), static_cast<std::uint8_t>(255 - i), static_cast<std::uint8_t>(i * 13)};
+    const auto f = oracle_vectors::load("hicolor_putcadr");
+    if (f.loaded) {
+        const auto& a = f.root.find("arrays")->obj;
+        for (const int fmt : {2, 3, 4, 8}) {
+            for (const auto b : ints(a.at("frame" + std::to_string(fmt)))) data[fmt].push_back(static_cast<std::byte>(b));
+            auto& g = gfx[fmt];
+            g.dataFormat = static_cast<std::uint8_t>(fmt);
+            g.width = 40;
+            g.height = 12;
+            g.numOfFrames = 1;
+            frames.push_back({std::span<const std::byte>{data[fmt]}, &g});
+        }
+    }
+    std::uint32_t seed = 12345;
+    const auto rnd = [&](int n) { seed = seed * 1103515245u + 12345u; return static_cast<int>((seed >> 8) % static_cast<std::uint32_t>(n)); };
+    struct Item { int frame; std::int64_t x, y; int pass; bool sub; };
+    int frames_ = 0, bad = 0;
+    for (const int k : {1, 2, 3}) {
+        for (const bool inPlace : {false, true}) {
+            constexpr int VW = 96, VH = 64;
+            const int W = VW * k, H = VH * k;
+            std::vector<Item> items;
+            for (int i = 0; i < 60; ++i)
+                items.push_back({rnd(static_cast<int>(frames.size())), (rnd(160) - 30) * 256, (rnd(110) - 25) * 256, rnd(4) == 0, false});
+            view::PictureCache cache;
+            std::vector<RGBA8> target(static_cast<std::size_t>(W * H)), ref(static_cast<std::size_t>(W * H));
+            view::ScaleScratch scratch;
+            double ox = 10, oy = 5;
+            for (int t = 0; t < 120; ++t) {
+                // the world changes: moves (integer and sub-pixel), new frames, appear, vanish, reorder
+                const int changes = rnd(4);
+                for (int c = 0; c < changes; ++c) {
+                    Item& it = items[static_cast<std::size_t>(rnd(static_cast<int>(items.size())))];
+                    switch (rnd(5)) {
+                        case 0: it.x += (rnd(7) - 3) * 256; it.sub = false; it.x &= ~std::int64_t{255}; break;
+                        case 1: it.x += rnd(300) - 150; it.y += rnd(300) - 150; it.sub = true; break;
+                        case 2: it.frame = rnd(static_cast<int>(frames.size())); break;
+                        case 3: std::swap(it, items[static_cast<std::size_t>(rnd(static_cast<int>(items.size())))]); break;
+                        default:
+                            if (rnd(2) && items.size() > 10) items.erase(items.begin() + rnd(static_cast<int>(items.size())));
+                            else items.push_back({rnd(static_cast<int>(frames.size())), (rnd(160) - 30) * 256, (rnd(110) - 25) * 256, 0, false});
+                    }
+                }
+                // the camera: still, sub-pixel steps, whole steps, jumps
+                switch (rnd(6)) {
+                    case 0: case 1: break;
+                    case 2: ox += (rnd(100) - 50) / 37.0; oy += (rnd(100) - 50) / 53.0; break;
+                    case 3: ox += rnd(9) - 4; break;
+                    case 4: oy += rnd(9) - 4; break;
+                    default: if (rnd(10) == 0) { ox += 200; oy -= 150; }
+                }
+                std::vector<view::DrawCommand> list;
+                for (const Item& it : items)
+                    list.push_back({&frames[static_cast<std::size_t>(it.frame)], &palette, it.x, it.y, false,
+                                    it.pass ? hc::FrameVisitor::Pass::CastShadow : hc::FrameVisitor::Pass::Normal, false});
+                const view::Raster world{FramebufferRef{target.data(), H, W}, view::toSub(ox), view::toSub(oy), view::toScale(k)};
+                const view::Raster rworld{FramebufferRef{ref.data(), H, W}, view::toSub(ox), view::toSub(oy), view::toScale(k)};
+                std::ranges::fill(ref, RGBA8{{0, 0, 0}, 255});
+                view::drawBand(list, rworld, rworld, 0, 1, scratch);
+                const bool intact = inPlace && t % 17 != 5;   // now and then the target was overwritten
+                if (!intact) std::ranges::fill(target, RGBA8{{9, 9, 9}, 255});
+                CHECK(cache.update(list, world, {}, 1, inPlace, intact));
+                if (!cache.inTarget()) cache.copyRows(world.fb, 0, H);
+                if (!std::ranges::equal(target, ref, [](const RGBA8& a, const RGBA8& b) { return same(a, b); })) ++bad;
+                ++frames_;
+            }
+        }
+    }
+    std::fprintf(stderr, "picture cache: %d frames, %d differ from the whole list\n", frames_, bad);
+    CHECK_EQ(bad, 0);
+}
+
 } // namespace
 
 int main() {
@@ -512,5 +600,6 @@ int main() {
     testMotion();
     testMapping();
     testComposite();
+    testPictureCache();
     return gromada_test::finish();
 }

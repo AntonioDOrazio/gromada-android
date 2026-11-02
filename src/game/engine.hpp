@@ -12,6 +12,7 @@
 #include "game/enhance/enhance.hpp"
 #include "game/hicolor.hpp"
 #include "game/screen_effects.hpp"
+#include "game/view_cache.hpp"
 #include "game/view_raster.hpp"
 #include "game/world.hpp"
 #include "libgromada/libgromada_all.hpp"
@@ -37,6 +38,7 @@ public:
         loadMap(map, rngSeed);
     }
     void loadMap(const Map& map, std::uint32_t rngSeed) {
+        m_picture.invalidate();
         m_world.load(map, rngSeed);
         m_header = map.header;
         m_camera.x = map.header.observerX;
@@ -238,6 +240,7 @@ private:
     ScreenEffectView m_effectView;
     std::vector<view::DrawCommand> m_drawList;
     std::vector<view::ScaleScratch> m_bandScratch;
+    view::PictureCache m_picture;   // the world's picture kept between frames (view_cache.hpp)
     // issue #21: enhancement settings (owned by the core) and caches; not state.
     const enhance::Settings* m_fxSettings = nullptr;
     std::unique_ptr<enhance::Enhancer> m_fx;
@@ -820,15 +823,27 @@ inline bool GameEngine::drawView(FramebufferRef fb, const ViewRequest& r, ViewOr
     }
     if (enh && enh->prepareLights(fb.extent(1), fb.extent(0), fxView, enh->drawn))   // lights after the last layer
         m_drawList.push_back({nullptr, nullptr, 0, 0, false, hicolor::FrameVisitor::Pass::Normal, false, &enhance::Enhancer::lightBand, enh});
-    const int bands = r.parallel ? std::clamp(r.threads, 1, 16) : 1;
+    // Several bands per thread: the pool hands them out as threads get free, so a slow core
+    // (big.LITTLE phones) takes fewer of them.
+    const int bands = r.parallel && r.threads > 1 ? std::clamp(r.threads * 4, 1, 32) : 1;
     m_bandScratch.resize(static_cast<std::size_t>(bands));
     if (enh) enh->setBands(bands);
+    // The picture from the cache (the same pixels as drawing its commands on black: only what
+    // changed is drawn again), then the rest of the list.
+    const std::size_t cached = view::PictureCache::prefixLength(m_drawList);
+    const bool useCache = cached > 0 && m_picture.update(std::span(m_drawList).first(cached), world, r.parallel, bands,
+                                                         cached == m_drawList.size(), r.targetIntact);
+    if (useCache && m_picture.inTarget()) return true;   // the whole list is in the cache, kept in fb
+    const std::span<const view::DrawCommand> rest = std::span(m_drawList).subspan(useCache ? cached : 0);
     const auto band = [&](int b) {
         const int H = fb.extent(0), W = fb.extent(1);
         const int y0 = static_cast<int>(static_cast<std::int64_t>(H) * b / bands), y1 = static_cast<int>(static_cast<std::int64_t>(H) * (b + 1) / bands);
-        std::fill_n(fb.data_handle() + static_cast<std::size_t>(y0) * static_cast<std::size_t>(W),
-                    static_cast<std::size_t>(y1 - y0) * static_cast<std::size_t>(W), RGBA8{{0, 0, 0}, 255});
-        view::drawBand(m_drawList, world, screen, b, bands, m_bandScratch[static_cast<std::size_t>(b)]);
+        if (useCache)
+            m_picture.copyRows(fb, y0, y1);
+        else
+            std::fill_n(fb.data_handle() + static_cast<std::size_t>(y0) * static_cast<std::size_t>(W),
+                        static_cast<std::size_t>(y1 - y0) * static_cast<std::size_t>(W), RGBA8{{0, 0, 0}, 255});
+        view::drawBand(rest, world, screen, b, bands, m_bandScratch[static_cast<std::size_t>(b)]);
     };
     if (bands > 1) r.parallel(bands, band);
     else band(0);

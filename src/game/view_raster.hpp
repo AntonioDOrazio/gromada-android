@@ -88,7 +88,7 @@ struct ScaledFrameVisitor {
 
     void draw_pixels_shadow(int n) noexcept {
         if (pass == Pass::CastShadow || skipShadowPixels) { sx += n; return; }
-        blend(n, [](RGBA8& p, int) { p = hicolor::toPixel(hicolor::shadow(hicolor::fromPixel(p))); });
+        each(n, [](RGBA8& p) { p = hicolor::toPixel(hicolor::shadow(hicolor::fromPixel(p))); });
     }
     void draw_pixels_indexed(std::span<const IndexedColor> c) noexcept {
         const int n = static_cast<int>(c.size());
@@ -114,28 +114,29 @@ struct ScaledFrameVisitor {
     void draw_pixels_light(int n, std::uint8_t r, std::uint8_t g, std::uint8_t b) noexcept {
         if (pass == Pass::CastShadow && format == 3) {
             const int level = (r >> 1) + 1;
-            blend(n, [&](RGBA8& p, int) { p = hicolor::toPixel(hicolor::fade(hicolor::fromPixel(p), level)); });
+            each(n, [&](RGBA8& p) { p = hicolor::toPixel(hicolor::fade(hicolor::fromPixel(p), level)); });
             return;
         }
-        blend(n, [&](RGBA8& p, int) { p = hicolor::toPixel(hicolor::brighten(hicolor::fromPixel(p), r & 7, g & 7, b & 7)); });
+        const int rl = r & 7, gl = g & 7, bl = b & 7;
+        each(n, [&](RGBA8& p) { p = hicolor::toPixel(hicolor::brighten(hicolor::fromPixel(p), rl, gl, bl)); });
     }
     void draw_pixels_alpha_blend(std::uint8_t t, std::span<const std::byte> c) noexcept {
         const int op = (255 - t) / 42;
         const int n = static_cast<int>(c.size());
         if (pass == Pass::CastShadow) {
             const int level = (op >> 1) + 1;
-            blend(n, [&](RGBA8& p, int) { p = hicolor::toPixel(hicolor::fade(hicolor::fromPixel(p), level)); });
+            each(n, [&](RGBA8& p) { p = hicolor::toPixel(hicolor::fade(hicolor::fromPixel(p), level)); });
             return;
         }
-        blend(n, [&](RGBA8& p, int i) {
-            const hicolor::Color16 src = hicolor::fromRgb8((*palette)[std::to_integer<std::uint8_t>(c[static_cast<std::size_t>(i)])]);
-            p = hicolor::toPixel(hicolor::blend(src, hicolor::fromPixel(p), op));
-        });
+        const auto& pal = *palette;
+        blendSource(
+            n, [&](int i) { return hicolor::fromRgb8(pal[std::to_integer<std::uint8_t>(c[static_cast<std::size_t>(i)])]); },
+            [op](RGBA8& p, hicolor::Color16 src) { p = hicolor::toPixel(hicolor::blend(src, hicolor::fromPixel(p), op)); });
     }
 
 private:
     void opaqueShadow(int n) noexcept {
-        blend(n, [](RGBA8& p, int) { p = hicolor::toPixel(hicolor::shadow(hicolor::fromPixel(p))); });
+        each(n, [](RGBA8& p) { p = hicolor::toPixel(hicolor::shadow(hicolor::fromPixel(p))); });
     }
 
     // The run's source pixels [i0, i1) that exist, and the framebuffer rows of source row sy.
@@ -147,28 +148,6 @@ private:
         sp.i0 = std::max(0, -sx);
         sp.i1 = std::min(n, w - sx);
         return sp.y0 < sp.y1 && sp.i0 < sp.i1;
-    }
-    // Calls f(x, i) for every framebuffer column x of the run's source pixel i, in order.
-    template <class F>
-    void columns(const Span& sp, F&& f) const noexcept {
-        const int W = fb.extent(1);
-        if (k == 1) {
-            const int x = cols[sx];
-            for (int i = std::max(sp.i0, -x), e = std::min(sp.i1, W - x); i < e; ++i) f(x + i, i);
-        } else if (k > 1) {
-            const int x = cols[sx];
-            int X = std::max(x + sp.i0 * k, 0);
-            const int E = std::min(x + sp.i1 * k, W);
-            if (X >= E) return;
-            int i = (X - x) / k, j = (X - x) % k;
-            for (; X < E; ++X) {
-                f(X, i);
-                if (++j == k) { j = 0; ++i; }
-            }
-        } else {
-            for (int i = sp.i0; i < sp.i1; ++i)
-                for (int X = std::max(cols[sx + i], 0), E = std::min(cols[sx + i + 1], W); X < E; ++X) f(X, i);
-        }
     }
     // Pixels whose value does not depend on the destination: computed once per source pixel on
     // the first covered row, the other rows are copies.
@@ -184,10 +163,23 @@ private:
             for (int i = std::max(sp.i0, -x), e = std::min(sp.i1, W - x); i < e; ++i) row[x + i] = value(i);
         } else if (k > 1) {
             const int iLo = std::max(sp.i0, x >= 0 ? 0 : (-x) / k), iHi = std::min(sp.i1, (W - x + k - 1) / k);
-            for (int i = iLo; i < iHi; ++i) {
+            // [iA, iB): source pixels whose k framebuffer pixels are all inside the row, written
+            // without clamping; the (at most one per side) partial ones as before. Every source
+            // pixel writes its own pixels, so the order does not matter: same picture.
+            const int iA = std::min(iHi, std::max(iLo, x >= 0 ? 0 : (-x + k - 1) / k));
+            const int iB = std::max(iA, std::min(iHi, (W - x) / k));
+            const auto clamped = [&](int i) {
                 const RGBA8 v = value(i);
                 for (int X = std::max(x + i * k, 0), E = std::min(x + i * k + k, W); X < E; ++X) row[X] = v;
+            };
+            for (int i = iLo; i < iA; ++i) clamped(i);
+            RGBA8* out = row + x + iA * k;
+            if (k == 2) {
+                for (int i = iA; i < iB; ++i, out += 2) { const RGBA8 v = value(i); out[0] = v; out[1] = v; }
+            } else {
+                for (int i = iA; i < iB; ++i, out += k) { const RGBA8 v = value(i); for (int j = 0; j < k; ++j) out[j] = v; }
             }
+            for (int i = iB; i < iHi; ++i) clamped(i);
         } else {
             for (int i = sp.i0; i < sp.i1; ++i) {
                 const int x0 = std::max(cols[sx + i], 0), x1 = std::min(cols[sx + i + 1], W);
@@ -201,23 +193,58 @@ private:
                             static_cast<std::size_t>(x1 - x0) * sizeof(RGBA8));
         sx += n;
     }
-    // Operations that read the destination: every covered pixel.
+    // Operations that only read the destination: every covered pixel of each row, one
+    // contiguous range (the source pixels' columns are adjacent), each pixel once.
     template <class F>
-    void blend(int n, F&& op) noexcept {
+    void each(int n, F&& op) noexcept {
         Span sp;
         if (!span(n, sp)) { sx += n; return; }
         const int W = fb.extent(1);
-        if (k == 1) {   // the common case without zoom: one pixel per source pixel
-            const int x = cols[sx];
-            const int i0 = std::max(sp.i0, -x), i1 = std::min(sp.i1, W - x);
-            RGBA8* row = fb.data_handle() + static_cast<std::size_t>(sp.y0) * static_cast<std::size_t>(W) + x;
-            for (int i = i0; i < i1; ++i) op(row[i], i);
-            sx += n;
-            return;
-        }
+        const int x0 = std::max(cols[sx + sp.i0], 0), x1 = std::min(cols[sx + sp.i1], W);
+        if (x0 < x1)
+            for (int y = sp.y0; y < sp.y1; ++y) {
+                RGBA8* row = fb.data_handle() + static_cast<std::size_t>(y) * static_cast<std::size_t>(W);
+                for (int X = x0; X < x1; ++X) op(row[X]);
+            }
+        sx += n;
+    }
+    // Operations that read the destination and a value of the source pixel: source(i) once per
+    // row and source pixel, op(pixel, value) on each pixel it covers (k > 1: the k pixels of the
+    // interior ones without clamping, as in opaque()).
+    template <class S, class B>
+    void blendSource(int n, S&& source, B&& op) noexcept {
+        Span sp;
+        if (!span(n, sp)) { sx += n; return; }
+        const int W = fb.extent(1);
+        const int x = cols[sx];
         for (int y = sp.y0; y < sp.y1; ++y) {
             RGBA8* row = fb.data_handle() + static_cast<std::size_t>(y) * static_cast<std::size_t>(W);
-            columns(sp, [&](int x, int i) { op(row[x], i); });
+            if (k == 1) {
+                for (int i = std::max(sp.i0, -x), e = std::min(sp.i1, W - x); i < e; ++i) op(row[x + i], source(i));
+            } else if (k > 1) {
+                const int iLo = std::max(sp.i0, x >= 0 ? 0 : (-x) / k), iHi = std::min(sp.i1, (W - x + k - 1) / k);
+                const int iA = std::min(iHi, std::max(iLo, x >= 0 ? 0 : (-x + k - 1) / k));
+                const int iB = std::max(iA, std::min(iHi, (W - x) / k));
+                const auto clamped = [&](int i) {
+                    const auto v = source(i);
+                    for (int X = std::max(x + i * k, 0), E = std::min(x + i * k + k, W); X < E; ++X) op(row[X], v);
+                };
+                for (int i = iLo; i < iA; ++i) clamped(i);
+                RGBA8* out = row + x + iA * k;
+                if (k == 2) {
+                    for (int i = iA; i < iB; ++i, out += 2) { const auto v = source(i); op(out[0], v); op(out[1], v); }
+                } else {
+                    for (int i = iA; i < iB; ++i, out += k) { const auto v = source(i); for (int j = 0; j < k; ++j) op(out[j], v); }
+                }
+                for (int i = iB; i < iHi; ++i) clamped(i);
+            } else {
+                for (int i = sp.i0; i < sp.i1; ++i) {
+                    const int x0 = std::max(cols[sx + i], 0), x1 = std::min(cols[sx + i + 1], W);
+                    if (x0 >= x1) continue;
+                    const auto v = source(i);
+                    for (int X = x0; X < x1; ++X) op(row[X], v);
+                }
+            }
         }
         sx += n;
     }
