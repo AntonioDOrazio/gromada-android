@@ -1,6 +1,7 @@
-// Gromada libretro core — milestones M1 ("viewer") + M2 (audio):
-// loads the original game data (fw.res + maps), renders a level with the software
-// renderer and scrolls it with the gamepad. 60/120 fps and 4:3/16:9 are core options.
+// Gromada libretro core: runs the original game (game session, issue #10: logo, movies,
+// menus, briefings, levels, demos driven by the original scripts) on the original data.
+// The level viewer of milestones M1/M2 stays reachable with the debug core option
+// "Modalità visualizzatore". 60/120 fps and 4:3/16:9 are core options.
 // Audio: sound effects from fw.res and the CD soundtrack (music/trackNN.ogg).
 //
 // This is the ONLY translation unit of the core (libgromada is header-implemented).
@@ -9,6 +10,8 @@
 #include "engine/audio.hpp"
 #include "engine/level.hpp"
 #include "engine/renderer.hpp"
+#include "game/session_movie.hpp"
+#include "game/engine.hpp"
 #include "input/input.hpp"
 #include "libretro/libretro.h"
 #include "video/movie.hpp"
@@ -45,6 +48,8 @@ struct Options {
     int startLevel = 1;
     int musicVolume = 80;
     int sfxVolume = 100;
+    bool viewer = false;   // debug: level viewer instead of the game
+    int demo = 0;          // debug: play maps/demoN.dem (0 = none)
 };
 
 struct Core {
@@ -63,6 +68,9 @@ struct Core {
     gromada::input::Mapper input;
     gromada::input::CursorSet cursors;
     float cursorBusy = 0; // viewer: CYCLE cursor for a moment after a level load
+    // --- game session (issue #10) ---
+    std::unique_ptr<gromada::game::Session> session;
+    std::filesystem::path gameDir, saveDir;
 };
 
 std::unique_ptr<Core> core;
@@ -70,7 +78,7 @@ std::unique_ptr<Core> core;
 // --- options ---------------------------------------------------------------
 
 std::string levelValues() {
-    std::string values = "Livello (anteprima); ";
+    std::string values = "Livello (visualizzatore); ";
     for (int i = 1; i <= LevelCount; ++i) {
         values += std::to_string(i);
         if (i != LevelCount) values += '|';
@@ -83,7 +91,9 @@ void declareOptions() {
     static const retro_variable vars[] = {
         {"gromada_fps", "Frame rate; 60|120"},
         {"gromada_aspect", "Formato; 4:3|16:9"},
+        {"gromada_viewer", "Modalità visualizzatore (debug); disattivata|attivata"},
         {"gromada_level", levels.c_str()},
+        {"gromada_demo", "Demo (debug); nessuna|1|2|3"},
         {"gromada_music_volume", "Volume musica; 80|90|100|0|10|20|30|40|50|60|70"},
         {"gromada_sfx_volume", "Volume effetti; 100|0|10|20|30|40|50|60|70|80|90"},
         // input (issue #4): scheme, cursor speed/acceleration/precision, touch/mouse, keyboard
@@ -110,6 +120,8 @@ Options readOptions() {
     if (const char* v = getVar("gromada_level")) o.startLevel = std::clamp(std::atoi(v), 1, LevelCount);
     if (const char* v = getVar("gromada_music_volume")) o.musicVolume = std::clamp(std::atoi(v), 0, 100);
     if (const char* v = getVar("gromada_sfx_volume")) o.sfxVolume = std::clamp(std::atoi(v), 0, 100);
+    if (const char* v = getVar("gromada_viewer")) o.viewer = std::strcmp(v, "attivata") == 0;
+    if (const char* v = getVar("gromada_demo")) o.demo = std::clamp(std::atoi(v), 0, 3);
     return o;
 }
 
@@ -210,6 +222,8 @@ void drawCursor(const gromada::input::PcState& pc, bool blockedScroll) {
                                const_cast<std::uint32_t*>(r.xrgb()), r.width(), r.height(), r.pitch());
 }
 void checkMovieOption(); // movies, see below
+void stopMovie();
+void startSession();      // game session, see below
 
 void applyOptions(bool initial) {
     const Options next = readOptions();
@@ -219,7 +233,12 @@ void applyOptions(bool initial) {
     core->mixer.setMusicVolume(next.musicVolume / 100.0f);
     core->mixer.setSfxVolume(next.sfxVolume / 100.0f);
     applyInputOptions();
-    checkMovieOption();
+    if (next.viewer)
+        checkMovieOption();
+    if (core->session) {
+        core->session->setVolumes(next.musicVolume / 100.0f, next.sfxVolume / 100.0f);
+        core->session->setOutputSize(core->renderer.width(), core->renderer.height());
+    }
     if (initial)
         return;
 
@@ -229,8 +248,20 @@ void applyOptions(bool initial) {
     else if (next.widescreen != prev.widescreen)
         env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
 
-    if (next.startLevel != prev.startLevel)
+    if (next.viewer != prev.viewer) {
+        if (next.viewer) {
+            core->session.reset();
+            loadLevel(core->levelIndex);
+        } else {
+            stopMovie();
+            core->level.reset();
+            startSession();
+        }
+    } else if (next.viewer && next.startLevel != prev.startLevel) {
         loadLevel(next.startLevel);
+    }
+    if (!next.viewer && core->session && next.demo != prev.demo && next.demo)
+        core->session->playDemo(next.demo);
 }
 
 // --- per-frame ---------------------------------------------------------------
@@ -386,6 +417,78 @@ bool runMovie() {
     return true;
 }
 
+// --- game session (issue #10) ----------------------------------------------------------
+// The session runs the original game on an implementation of game::Engine.
+
+// THE construction point of the simulation engine (issue #8). The provisional ViewerEngine
+// (src/game/viewer_engine.hpp) stays available for tests and debugging.
+std::unique_ptr<gromada::game::Engine> makeGameEngine(const GameResources& resources) {
+    return std::make_unique<gromada::game::GameEngine>(resources);
+}
+
+// Save files (save1..5, fw.ini, recorded demos) live in <frontend save dir>/gromada.
+std::filesystem::path findSaveDir() {
+    const char* dir = nullptr;
+    if (env_cb && env_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir && *dir)
+        return std::filesystem::path{dir} / "gromada";
+    log(RETRO_LOG_WARN, "no save directory from the frontend: profiles and options will not be saved");
+    return {};
+}
+
+void startSession() {
+    using namespace gromada::game;
+    SessionConfig config;
+    config.gameDir = core->gameDir;
+    config.saveDir = core->saveDir;
+    config.outputWidth = core->renderer.width();
+    config.outputHeight = core->renderer.height();
+    config.log = [](LogLevel level, std::string_view text) {
+        static constexpr retro_log_level levels[] = {RETRO_LOG_DEBUG, RETRO_LOG_INFO, RETRO_LOG_WARN, RETRO_LOG_ERROR};
+        log(levels[static_cast<int>(level)], "%.*s", static_cast<int>(text.size()), text.data());
+    };
+    core->session.reset();
+    core->mixer.stopMusic();
+    core->session = std::make_unique<Session>(core->resources->vids(), core->resources->sounds(),
+                                              makeGameEngine(*core->resources), &core->mixer,
+                                              std::make_unique<VideoMoviePlayer>(), std::move(config));
+    core->session->setCursors(&core->cursors);
+    core->session->setVolumes(core->options.musicVolume / 100.0f, core->options.sfxVolume / 100.0f);
+    core->session->start();
+    if (core->options.demo)
+        core->session->playDemo(core->options.demo);
+}
+
+// The direct control scheme aims from the player's position on screen.
+struct SessionPlayer final : gromada::input::PlayerPosition {
+    [[nodiscard]] std::optional<gromada::input::Vec2> screenPosition() const override {
+        return core && core->session ? core->session->playerScreenPosition() : std::nullopt;
+    }
+} sessionPlayer;
+
+void runSession(float dt) {
+    using namespace gromada::input;
+    auto& s = *core->session;
+    FrameInfo f;
+    f.dt = dt;
+    f.width = s.width();
+    f.height = s.height();
+    f.context = s.inputContext();
+    f.player = &sessionPlayer;
+    const PcState& pc = core->input.update(pollRaw(input_state_cb, core->input.settings()), f);
+    s.runFrame(pc, dt);
+    if (s.exitRequested()) {
+        // Exit() from the scripts (credits): close the content; without that, start over.
+        if (!env_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr)) {
+            log(RETRO_LOG_INFO, "Exit(): the frontend cannot shut down, restarting the game");
+            startSession();
+        } else {
+            s.clearExit();
+        }
+    }
+    video_cb(core->session->xrgb(), core->session->width(), core->session->height(), core->session->pitch());
+    pushAudio();
+}
+
 } // namespace
 
 // --- libretro API ------------------------------------------------------------
@@ -410,7 +513,7 @@ RETRO_API void retro_set_controller_port_device(unsigned, unsigned) {}
 RETRO_API void retro_get_system_info(retro_system_info* info) {
     *info = {};
     info->library_name = "Gromada";
-    info->library_version = "0.2.0-m2";
+    info->library_version = "0.3.0-session";
     info->valid_extensions = "exe|res";
     info->need_fullpath = true;
     info->block_extract = true;
@@ -421,8 +524,13 @@ RETRO_API void retro_get_system_av_info(retro_system_av_info* info) {
 }
 
 RETRO_API void retro_init() { core = std::make_unique<Core>(); }
-RETRO_API void retro_deinit() { stopMovie(); core.reset(); }
-RETRO_API void retro_reset() { if (core && core->resources) loadLevel(core->levelIndex); }
+RETRO_API void retro_deinit() { stopMovie(); if (core) core->session.reset(); core.reset(); }
+RETRO_API void retro_reset() {
+    if (!core || !core->resources)
+        return;
+    if (core->options.viewer) loadLevel(core->levelIndex);
+    else startSession();
+}
 
 RETRO_API bool retro_load_game(const retro_game_info* game) {
     if (!game || !game->path)
@@ -450,13 +558,19 @@ RETRO_API bool retro_load_game(const retro_game_info* game) {
 
     core->mixer.setMusicDirectories({gameDir / "music", gameDir / "MUSIC", gameDir});
     log(RETRO_LOG_INFO, "cursors: %d/5 original cursors loaded", core->cursors.load(gameDir));
+    core->gameDir = gameDir;
+    core->saveDir = findSaveDir();
     applyOptions(true);
-    return loadLevel(core->options.startLevel);
+    if (core->options.viewer)
+        return loadLevel(core->options.startLevel);
+    startSession();
+    return true;
 }
 
 RETRO_API void retro_unload_game() {
     stopMovie();
     movieState.option.clear(); // replay the chosen movie at the next load
+    core->session.reset();
     core->level.reset();
     core->resources.reset();
 }
@@ -467,9 +581,15 @@ RETRO_API void retro_run() {
         applyOptions(false);
 
     input_poll_cb();
+    const float dt = 1.0f / core->options.fps;
+    if (core->session) {
+        runSession(dt);
+        return;
+    }
+    if (!core->level)
+        return;
     // The input layer keeps tracking buttons while a movie plays, so the press that skips
     // a movie is consumed there and does not reach the game as a fresh click.
-    const float dt = 1.0f / core->options.fps;
     const auto& pc = updateInput(dt);
     if (runMovie())
         return;

@@ -82,14 +82,20 @@ public:
     // Shared MSVC CRT rand(): scripts' Random() and the engine draw from the same state.
     virtual int rand() = 0;
 
-    // ScrollLock(flag) (builtin 73, owned by the session) stops the edge scroll, the
-    // auto-scroll and the leash around the flagman, which live in updateCamera().
-    // Added by issue #8 with a default no-op so other implementations keep compiling.
-    virtual void setScrollLock(bool /*locked*/) {}
-
+    // --- optional hooks (default no-ops: engines may ignore them) ----------------------
+    // ScrollLock(flag) is a session builtin (73) but the state it sets (obj+0x32d5) stops
+    // the engine's edge scrolling, the leash around the flagman and the +/- view keys
+    // (docs/re/runtime.md §6). The session calls this whenever a script changes it and
+    // with `false` after every loadMap (the original clears it on map load).
+    virtual void setScrollLock(bool locked) { (void)locked; }
     // Demo playback starts from the clock recorded in the .dem (0x414e8b) instead of the
-    // map's startTimer: call right after loadMap(). Added by issue #8, default no-op.
-    virtual void setClock(std::uint32_t /*curclock*/) {}
+    // map's startTimer: call right after loadMap().
+    virtual void setClock(std::uint32_t curclock) { (void)curclock; }
+    // Full-screen effects of Effect() (eff_fade, eff_nuke...: palette/flash effects applied
+    // in the original's EndFrame 0x406ea0 to the whole picture). Called by the session
+    // after it has drawn menus, texts and the status bar over draw()'s output, just
+    // before the cursor.
+    virtual void drawScreenEffects(FramebufferRef framebuffer) { (void)framebuffer; }
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.

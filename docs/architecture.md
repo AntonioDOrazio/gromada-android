@@ -23,6 +23,12 @@ testi, menu), `input/` (controller, cursori), `video/` (filmati), `demo/` (parse
 - L'input arriva al motore **solo** come `OriginalInput` (il record di 12 byte dell'originale),
   sia dal controller sia dalle demo. Così le demo pilotano il gioco esattamente come i comandi
   veri.
+- Eccezione (issue #10): `Action`, `GetX`, `GetY`, `GetUnitVid` su un handle di un oggetto della
+  sessione (menu, testi: bit 30 acceso, `>= 0x40000000`) li gestisce la sessione; gli handle delle
+  unità del motore devono restare sotto `0x40000000`.
+- Ganci opzionali aggiunti dalla #10 (implementazione vuota di default): `setScrollLock(bool)` e
+  `drawScreenEffects(fb)`; vedi `docs/session.md`.
+- Il motore si costruisce in un solo punto: `makeGameEngine()` in `src/gromada_libretro.cpp`.
 - Finché il motore (#8) non è fuso, la sessione usa un'implementazione provvisoria del contratto
   basata su `engine/level.hpp` (disegno del livello, builtin minime), così da poter sviluppare menu,
   briefing e flusso di gioco in parallelo.

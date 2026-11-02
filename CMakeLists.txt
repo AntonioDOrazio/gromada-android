@@ -53,4 +53,7 @@ if(GROMADA_BUILD_TESTS AND NOT ANDROID)
     target_compile_options(ui_preview PRIVATE "${GROMADA_CXX_WARNINGS}")
     add_test(NAME ui_preview_smoke COMMAND ui_preview --smoke ${CMAKE_BINARY_DIR}/ui_preview_out level=8 res=800)
     set_tests_properties(ui_preview_smoke PROPERTIES SKIP_RETURN_CODE 77)
+    # Headless libretro frontend (screenshots, audio, scripted input): end-to-end tests.
+    add_executable(harness tools/harness.cpp)
+    target_link_libraries(harness PRIVATE ${CMAKE_DL_LIBS})
 endif()

@@ -55,3 +55,18 @@ set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
 add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
 target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
+# Game session (src/game/session*.hpp): synthetic tests (mock engine, synthetic scripts) and
+# the whole flow of the game + the three demos on the original data (provisional engine).
+gromada_add_test(session_test session_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+gromada_add_test(session_data_test session_data_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+
+# The core end to end through the headless frontend (needs the game data, else skipped).
+add_test(NAME core_e2e COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_e2e.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_e2e_out)
+add_test(NAME core_e2e_169_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_e2e.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_e2e_169_out gromada_aspect=16:9 gromada_fps=120)
+set_tests_properties(core_e2e core_e2e_169_120fps PROPERTIES SKIP_RETURN_CODE 77)

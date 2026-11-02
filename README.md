@@ -5,7 +5,11 @@ pensata per Android (Retroid Pocket Nova / Flip 2) con RetroArch in Vulkan e sha
 
 Il core **non contiene asset del gioco**: legge i file della tua copia originale.
 
-## Stato: M2 — viewer + audio
+## Stato: M2 — viewer + audio, sessione di gioco
+- **Sessione di gioco** (issue #10, [`docs/session.md`](docs/session.md)): il core esegue il gioco
+  originale con i suoi script (logo, filmati, menu, giocatori, opzioni, mappa delle missioni,
+  briefing, livelli, demo); profili e opzioni nella cartella di salvataggio di RetroArch. Il
+  motore di simulazione è ancora provvisorio (#8). Il viewer resta come opzione core di debug.
 - Carica `fw.res` e i 30 livelli originali, li disegna con il renderer software
   (sprite indicizzati, ombre, luce, trasparenze) e li fa scorrere col pad.
 - Opzioni core: **Frame rate 60/120**, **Formato 4:3 (640×480) / 16:9 (854×480)**, livello di anteprima.
