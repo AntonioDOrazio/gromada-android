@@ -86,6 +86,10 @@ public:
     // auto-scroll and the leash around the flagman, which live in updateCamera().
     // Added by issue #8 with a default no-op so other implementations keep compiling.
     virtual void setScrollLock(bool /*locked*/) {}
+
+    // Demo playback starts from the clock recorded in the .dem (0x414e8b) instead of the
+    // map's startTimer: call right after loadMap(). Added by issue #8, default no-op.
+    virtual void setClock(std::uint32_t /*curclock*/) {}
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.

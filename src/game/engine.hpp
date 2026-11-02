@@ -148,6 +148,15 @@ public:
 
     // ScrollLock(flag) is a session builtin that acts on the engine's camera.
     void setScrollLock(bool on) override { m_scrollLock = on; }
+    // Demo playback: the recorded initial clock. Sprites created by loadMap() keep ticking
+    // from the new clock (their lastTact is moved with it).
+    void setClock(std::uint32_t c) override {
+        const std::uint32_t old = m_world.clock();
+        m_world.setClock(c);
+        for (int l = 0; l < World::MaxLayers; ++l)
+            for (Sprite* s = m_world.layerHead(l); s; s = s->next)
+                for (Sprite* k = s; k; k = k->child) k->lastTact += c - old;
+    }
 
     // ------------------------------------------------------------ extras (tools, tests)
     World& world() noexcept { return m_world; }

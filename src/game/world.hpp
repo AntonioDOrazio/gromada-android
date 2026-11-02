@@ -129,7 +129,7 @@ public:
             const auto& o = map.objects[i];
             Sprite* s = createUnit(o.nvid, o.x, o.y, o.z, 0, o.direction, nullptr);
             created[i] = s;
-            if (s) restore(*s, o);
+            if (s) restore(*s, o, map.header.mapVersion);
         }
         auto lookup = [&](std::uint32_t mapId) -> Sprite* {
             for (std::size_t i = 0; i < map.objects.size(); ++i)
@@ -322,7 +322,7 @@ public:
 
     // Map objects: act_restore with the payload read by libgromada (0x412580 case 52 and
     // the class overrides, e.g. Vehicle 0x40f57e).
-    void restore(Sprite& s, const GameObject& o) {
+    void restore(Sprite& s, const GameObject& o, MapVersion version = MapVersion::V3) {
         const VidInfo& v = vidOf(s);
         const auto material = [&](std::uint8_t hp) {
             if (s.action == act::birth) {
@@ -339,11 +339,12 @@ public:
             [&](const Payloads::AssetObject& p) {
                 if (!hasMaterial(s.cls)) return;
                 material(p.hp);
-                if (isUnitClass(s.cls)) {
-                    s.buildTime = p.buildTime;
-                    s.army = p.army;
+                if (isUnitClass(s.cls)) {   // Vehicle restore 0x40f57e: fields by map version
+                    if (version >= MapVersion::V3) s.buildTime = p.buildTime;
+                    if (version >= MapVersion::V2) s.army = p.army;
                     s.behave = p.behave;
-                    for (auto it : p.items) addItem(s, it);
+                    if (version != MapVersion::V0)
+                        for (auto it : p.items) addItem(s, it);
                 }
             },
         }, o.payload);
