@@ -88,6 +88,48 @@ struct PlayerAim {
     FireChain fire;              // (default: nothing known)
 };
 
+// ---- presentation (issue #20, docs/rendering.md) ------------------------------------------
+// A sprite as drawView() drew it (enhancement passes: lights, ambient occlusion...).
+struct DrawnSprite {
+    UnitId id = 0;
+    int nvid = 0;
+    std::uint8_t cls = 0;        // ObjectClass of the vid (game/sprite.hpp cls::)
+    std::uint8_t category = 0;   // vid category bits (cat::)
+    bool screen = false;         // screen sprite (st_screen): screen coordinates, not zoomed
+    bool child = false;          // sub-object drawn with the root before it
+    float worldX = 0, worldY = 0, worldZ = 0;   // drawn position (sub-pixel, extrapolated), world px
+    float fbX = 0, fbY = 0;      // ground point (worldX, worldY) on the framebuffer
+    int left = 0, top = 0, right = 0, bottom = 0; // body rectangle on the framebuffer [left, right)
+};
+
+// What the session asks drawView() for. The view shows `width` x `height` world pixels; one
+// world pixel is `scale` framebuffer pixels (zoom x internal resolution).
+struct ViewRequest {
+    double centerX = 320, centerY = 240;   // world point the session wants at the centre
+    double width = 640, height = 480;      // world pixels visible
+    double scale = 1;                      // framebuffer pixels per world pixel
+    double screenScale = 1;                // framebuffer pixels per screen pixel (screen sprites)
+    double renderClock = 0;                // game clock (ms, fractional) the picture shows
+    bool extrapolate = false;              // smooth motion: positions extrapolated to renderClock
+    bool fitMap = false;                   // keep the view inside the map (centred if the map is smaller)
+    std::vector<DrawnSprite>* drawn = nullptr; // filled by drawView() when set
+    // Runs fn(0) .. fn(n - 1), possibly on several threads, and returns when all are done
+    // (the session's workers); with `threads` > 1 drawView() may split the picture into that
+    // many bands (same picture for any number). Empty: one thread.
+    std::function<void(int n, const std::function<void(int)>& fn)> parallel;
+    int threads = 1;
+};
+struct ViewOrigin {
+    double x = 0, y = 0;                   // world point at the view's top-left corner
+};
+// The Effect() picture operation of the last drawScreenEffects() (pipelines that redraw the
+// world at a higher resolution apply it there too).
+struct ScreenEffectView {
+    int colorKind = 0, colorLevel = 0;     // ScreenEffects::applyOp(kind, level, c); 0 = none
+    bool window = false;                   // eff_openwindow: outside the rectangle, the old screen
+    int left = 0, right = -1, top = 0, bottom = -1;   // inclusive, picture pixels
+};
+
 class Engine {
 public:
     virtual ~Engine() = default;
@@ -147,6 +189,26 @@ public:
     // Local player's flagman, weapon range and attackable units (issue #16, read-only query
     // for the controls: aim assist and the aim point at weapon range). Default: nothing known.
     [[nodiscard]] virtual PlayerAim playerAim() const { return {}; }
+
+    // --- presentation (issue #20, docs/rendering.md): zoom, internal resolution, smooth
+    // motion. Default: not supported, the session uses camera() and draw() (zoom 1).
+    // The view's final top-left corner for `request` (the engine may move the requested
+    // centre: leash around the flagman at its drawn position, map limits, small maps centred).
+    [[nodiscard]] virtual std::optional<ViewOrigin> viewOrigin(const ViewRequest& request) { (void)request; return std::nullopt; }
+    // Draws the world like draw() through the view transform: framebuffer pixel =
+    // (world - origin) * scale; screen sprites at screen position * screenScale. False: not
+    // supported (nothing drawn).
+    virtual bool drawView(FramebufferRef framebuffer, const ViewRequest& request, ViewOrigin origin) {
+        (void)framebuffer; (void)request; (void)origin;
+        return false;
+    }
+    [[nodiscard]] virtual ScreenEffectView screenEffectView() const { return {}; }
+    // Where drawView() with `extrapolate` draws a unit at `renderClock` (world, sub-pixel):
+    // the camera that follows the player aims at it. nullopt: no such unit / not supported.
+    [[nodiscard]] virtual std::optional<std::array<double, 2>> drawnPosition(UnitId unit, double renderClock) const {
+        (void)unit; (void)renderClock;
+        return std::nullopt;
+    }
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.

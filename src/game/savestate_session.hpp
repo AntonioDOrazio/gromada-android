@@ -44,8 +44,15 @@ struct SessionStaged {
     bool wavLoaded = false;
     std::uint32_t messageClock = 0;
     // controls (issue #16)
-    struct FollowState { bool valid, hold; float fx, fy, vx, vy; int px, py, lastX, lastY; } follow{};
+    struct FollowState { bool valid, hold; float fx, fy, vx, vy, px, py; int lastX, lastY; } follow{};
     struct HudState { int current, requested; float timer; } hud{-1, -1, 0};
+    // presentation (issue #20): zoom, its anchor, cursor mapping of the last picture
+    float zoom = 1;
+    double viewZoom = 1;
+    double anchorX = 0, anchorY = 0;
+    int anchorCamX = 0, anchorCamY = 0;
+    bool anchorValid = false;
+    double mapX = 0, mapY = 0, mapZoom = 1;
     std::optional<std::deque<SoundData>> wavs; // reloaded PlayWAV sounds (names differ)
     std::vector<std::string> wavNames;
     std::array<int, 4> playlist{};
@@ -186,10 +193,15 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
         const FollowCamera& f = s.m_follow;   // its Params are configuration
         w.boolean(f.m_valid); w.boolean(f.m_hold);
         w.f32(f.m_fx); w.f32(f.m_fy); w.f32(f.m_vx); w.f32(f.m_vy);
-        w.i32(f.m_px); w.i32(f.m_py); w.i32(f.m_lastX); w.i32(f.m_lastY);
+        w.f32(f.m_px); w.f32(f.m_py); w.i32(f.m_lastX); w.i32(f.m_lastY);
         const WeaponHud& h = s.m_weaponHud;
         w.i32(h.m_current); w.i32(h.m_requested); w.f32(h.m_timer);
     }
+    // presentation (issue #20): the zoom is the player's (it moves the engine's camera, and so
+    // the cursor's world point), the mapping is what the next frame's record goes through
+    w.f32(s.m_zoom.zoom); w.f64(s.m_viewZoom);
+    w.f64(s.m_anchor.x); w.f64(s.m_anchor.y); w.i32(s.m_anchor.camX); w.i32(s.m_anchor.camY); w.boolean(s.m_anchor.valid);
+    w.f64(s.m_mapX); w.f64(s.m_mapY); w.f64(s.m_mapZoom);
     w.count(s.m_wavNames.size());
     for (const auto& n : s.m_wavNames) w.str(n);
     for (const int t : s.m_playlist) w.i32(t);
@@ -242,9 +254,18 @@ inline void SaveStateAccess::saveSession(state::Writer& w, const Session& s) {
     }
     const bool picture = s.m_demo.has_value();
     w.boolean(picture);
-    if (picture) {
+    if (picture) {   // at the logical size (internal resolution k > 1: one pixel per k x k block)
         w.i32(s.m_outW); w.i32(s.m_outH);
-        w.bytes(s.m_xrgb.data(), s.m_xrgb.size() * 4);
+        const int k = s.m_renderScale;
+        if (k == 1) {
+            w.bytes(s.m_xrgb.data(), s.m_xrgb.size() * 4);
+        } else {
+            std::vector<std::uint32_t> small(static_cast<std::size_t>(s.m_outW) * static_cast<std::size_t>(s.m_outH));
+            for (int y = 0; y < s.m_outH; ++y)
+                for (int x = 0; x < s.m_outW; ++x)
+                    small[static_cast<std::size_t>(y) * s.m_outW + x] = s.m_xrgb[static_cast<std::size_t>(y) * k * s.m_outW * k + static_cast<std::size_t>(x) * k];
+            w.bytes(small.data(), small.size() * 4);
+        }
     }
     w.boolean(s.m_mixer != nullptr);
     w.endChunk(chunk);
@@ -329,9 +350,17 @@ inline SessionStaged SaveStateAccess::decodeSession(state::Reader& outer, Sessio
         auto& f = st.follow;
         f.valid = r.boolean(); f.hold = r.boolean();
         f.fx = r.finite32(); f.fy = r.finite32(); f.vx = r.finite32(); f.vy = r.finite32();
-        f.px = r.i32(); f.py = r.i32(); f.lastX = r.i32(); f.lastY = r.i32();
+        f.px = r.finite32(); f.py = r.finite32(); f.lastX = r.i32(); f.lastY = r.i32();
         st.hud.current = r.i32(); st.hud.requested = r.i32(); st.hud.timer = r.finite32();
     }
+    st.zoom = r.finite32();
+    if (st.zoom < ViewZoom::Min || st.zoom > ViewZoom::Max) throw state::Error("save state: bad zoom");
+    st.viewZoom = r.finite64();
+    if (!(st.viewZoom >= ViewZoom::Min && st.viewZoom <= ViewZoom::Max)) throw state::Error("save state: bad view zoom");
+    st.anchorX = r.finite64(); st.anchorY = r.finite64(); st.anchorCamX = r.i32(); st.anchorCamY = r.i32();
+    st.anchorValid = r.boolean();
+    st.mapX = r.finite64(); st.mapY = r.finite64(); st.mapZoom = r.finite64();
+    if (!(st.mapZoom >= ViewZoom::Min && st.mapZoom <= ViewZoom::Max)) throw state::Error("save state: bad view zoom");
     const std::size_t nWavs = r.count(4, 1u << 12);
     for (std::size_t i = 0; i < nWavs; ++i) st.wavNames.push_back(r.str(4096));
     for (int& t : st.playlist) t = r.i32();
@@ -529,6 +558,9 @@ inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
         s.m_weaponHud.m_current = st.hud.current; s.m_weaponHud.m_requested = st.hud.requested;
         s.m_weaponHud.m_timer = st.hud.timer;
     }
+    s.m_zoom.zoom = st.zoom; s.m_viewZoom = st.viewZoom;
+    s.m_anchor = {st.anchorX, st.anchorY, st.anchorCamX, st.anchorCamY, st.anchorValid};
+    s.m_mapX = st.mapX; s.m_mapY = st.mapY; s.m_mapZoom = st.mapZoom;
     if (st.wavs) s.m_wavs = std::move(*st.wavs);
     s.m_wavNames = std::move(st.wavNames);
     s.m_playlist = st.playlist;
@@ -561,7 +593,17 @@ inline void SaveStateAccess::applySession(Session& s, SessionStaged&& st) {
     if (s.m_mixer && st.hasMixer) gromada::SaveStateAccess::apply(*s.m_mixer, std::move(st.mixer));
     s.updateView();
     s.applyVolumes();
-    if (!st.xrgb.empty() && st.xrgbW == s.m_outW && st.xrgbH == s.m_outH) s.m_xrgb = std::move(st.xrgb);
+    if (!st.xrgb.empty() && st.xrgbW == s.m_outW && st.xrgbH == s.m_outH) {
+        const int k = s.m_renderScale;
+        if (k == 1) {
+            s.m_xrgb = std::move(st.xrgb);
+        } else {   // the stored logical picture, every pixel a k x k block
+            const std::size_t pitch = static_cast<std::size_t>(s.m_outW) * k;
+            for (std::size_t y = 0; y < static_cast<std::size_t>(s.m_outH) * k; ++y)
+                for (std::size_t x = 0; x < pitch; ++x)
+                    s.m_xrgb[y * pitch + x] = st.xrgb[(y / k) * s.m_outW + x / k];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------- manager
@@ -713,8 +755,9 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
 #define GROMADA_SAVESTATE_TRIPWIRE(T, n) \
     static_assert(sizeof(T) == (n), "save states: " #T " changed size; serialize the new field (docs/savestates.md) and update this check")
 GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
-GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3184);
-GROMADA_SAVESTATE_TRIPWIRE(Session, 3024);     // + #13 tool hooks and per-frame sound buffers (not state); #19 PcState
+GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3264);  // + #20 effect view and draw scratch (per frame, not state)
+// + #20 zoom, anchor, mapping (state, v5); render scale, smooth, buffers, world pass (configuration/scratch)
+GROMADA_SAVESTATE_TRIPWIRE(Session, 3392);     // + #13 tool hooks and per-frame sound buffers (not state); #19 PcState
 GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 416);    // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
 GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);

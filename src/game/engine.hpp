@@ -11,6 +11,7 @@
 #include "game/engine_api.hpp"
 #include "game/hicolor.hpp"
 #include "game/screen_effects.hpp"
+#include "game/view_raster.hpp"
 #include "game/world.hpp"
 #include "libgromada/libgromada_all.hpp"
 
@@ -143,9 +144,38 @@ public:
     // Effect() on the finished picture (menus, texts and status bar included), 0x406ea0.
     void drawScreenEffects(FramebufferRef fb) override {
         if (!m_loaded) return;
+        const auto [kind, level] = m_effects.colourOp();
         m_effects.endFrame(fb, m_world.clock(), m_frameLocked);
         m_effectsDone = true;
+        m_effectView = {};
+        if (kind && level) { m_effectView.colorKind = kind; m_effectView.colorLevel = level; }
+        if (const auto w = m_effects.window()) {
+            m_effectView.window = true;
+            m_effectView.left = (*w)[0]; m_effectView.right = (*w)[1]; m_effectView.top = (*w)[2]; m_effectView.bottom = (*w)[3];
+        }
     }
+    [[nodiscard]] ScreenEffectView screenEffectView() const override { return m_effectView; }
+
+    // ------------------------------------------------------------ presentation (issue #20)
+    // docs/rendering.md. Nothing here changes the simulation.
+    std::optional<ViewOrigin> viewOrigin(const ViewRequest& request) override;
+    bool drawView(FramebufferRef fb, const ViewRequest& request, ViewOrigin origin) override;
+    // Where a sprite is drawn relative to its integer position (x, y, z) at `renderClock`:
+    // its sub-pixel remainder (the 7-bit accumulators of the move) plus the move its next
+    // tick makes, computed like the physics (speed integrated, direction, wind, vertical
+    // speed with gravity) for the time since its last tick (at most one tick period).
+    // Nothing more while paused, for passive sprites and instantaneous moves (rays); a
+    // teleport, a spawn or a ray is never interpolated (only the current state is used).
+    struct Motion { double x = 0, y = 0, z = 0; };
+    [[nodiscard]] Motion motion(const Sprite& s, double renderClock) const;
+    std::optional<std::array<double, 2>> drawnPosition(UnitId unit, double renderClock) const override {
+        const Sprite* u = m_world.byId(unit);
+        if (!u) return std::nullopt;
+        const Motion m = motion(*u, renderClock);
+        return std::array{u->x + m.x, u->y + m.y};
+    }
+    // Largest extrapolated move (world px): beyond that the sprite is drawn where it is.
+    static constexpr double MaxMotion = 48;
     [[nodiscard]] bool autoScroll() const noexcept { return m_autoScroll; }
 
 private:
@@ -161,6 +191,8 @@ private:
     void scrollCamera();
     void clampCamera();
     void drawSprite(const Sprite& s, FramebufferRef fb);
+    struct ViewTargets { const view::Raster* world; const view::Raster* screen; const ViewRequest* request; ViewOrigin origin; };
+    void drawSpriteView(const Sprite& s, const Motion& m, const ViewTargets& t, bool child);
     const std::array<ColorRgb8, 256>* paletteFor(const Sprite& s);
     const VidInfo& graphicsOwner(int nvid) const;
     void setGlobalGamma(int g) {
@@ -193,6 +225,10 @@ private:
     std::vector<std::optional<std::array<ColorRgb8, 256>>> m_palettes;
     struct SortItem { const Sprite* s; int index; };
     std::vector<SortItem> m_sorted;
+    // presentation (issue #20): per-frame outputs and scratch, not state
+    ScreenEffectView m_effectView;
+    std::vector<view::DrawCommand> m_drawList;
+    std::vector<view::ScaleScratch> m_bandScratch;
 };
 
 // ---------------------------------------------------------------------------- players
@@ -393,8 +429,9 @@ inline void GameEngine::scrollCamera() {
         m_camera.y = static_cast<std::int16_t>(m_camera.y + ((dt * m_scrollVY) >> 10));
         if (f) {
             // 586 x 440 = a 640 x 480 view minus 54 x 40: the flagman stays at least 54 x 40 px
-            // inside the view. Wider views (16:9) keep the same margin (issue #16).
-            const int lx = std::max(586, w - 54), ly = std::max(440, h - 40);
+            // inside the view. Wider views (16:9, issue #16) and the smaller ones of the zoom
+            // (issue #20) keep the same margin.
+            const int lx = w - 54, ly = h - 40;
             if (m_camera.x < f->x - lx) m_camera.x = f->x - lx;
             if (m_camera.y < f->y - ly) m_camera.y = f->y - ly;
             // the view rectangle is inclusive (x1 = width - 1, y1 = height - 1, 0x42da10/18):
@@ -509,6 +546,211 @@ inline void GameEngine::draw(FramebufferRef fb) {
             drawWithChain(s);
         }
     }
+}
+
+// ---------------------------------------------------------------------------- presentation
+inline GameEngine::Motion GameEngine::motion(const Sprite& s, double renderClock) const {
+    // sub-pixel remainders: fx::moveStep / fx::verticalStep keep x + fracX/128 continuous
+    Motion m{s.fracX / 128.0, s.fracY / 128.0, s.vz ? s.fracZ / 128.0 : 0.0};
+    const VidInfo& v = m_world.vidOf(s);
+    if (m_world.paused() || (v.flags & vf::SkipUpdate) || (s.state & st::Passive)) return m;
+    // time since the sprite's last tick, at most one tick period (+ jitter of Randomized vids
+    // and one 60 fps frame: the tick due this frame runs after the drawing)
+    const double now = static_cast<double>(static_cast<std::int32_t>(m_world.clock() - s.lastTact)) +
+                       (renderClock - static_cast<double>(m_world.clock()));
+    const double tau = std::clamp(now, 0.0, v.frameDuration * 9.0 / 8.0 + 20.0);
+    if (tau <= 0) return m;
+    // The next tick first integrates the speed over its dt (fx::integrateSpeed), then moves
+    // speed * dt * Sin >> 20 (fx::moveStep): the same with tau, so the extrapolated position
+    // reaches the next tick's one when tau reaches the tick's dt.
+    double speed = s.speed;
+    if (s.speed != fx::Instant) {
+        if (s.state & st::Accelerate) {
+            if (s.speed < v.speedX) speed = v.acceleration == fx::Instant ? v.speedX : s.speed + tau * v.acceleration / 1024.0;
+        } else if (s.speed > 0) {
+            speed = v.acceleration == fx::Instant ? 0.0 : std::max(0.0, s.speed - tau * v.acceleration / 512.0);
+        }
+    }
+    double vx = 0, vy = 0;   // px per ms
+    if (speed != 0 && s.speed != fx::Instant) {
+        vx = speed * fx::Sin[s.direction] / 1048576.0;
+        vy = speed * fx::NegCos[s.direction] / 1048576.0;
+    }
+    if (m_world.windStrength() != 0 && (v.flags & vf::Wind)) {
+        const auto wd = static_cast<std::uint8_t>(m_world.windDir());
+        vx += static_cast<std::int16_t>(m_world.windStrength()) * fx::Sin[wd] / 1048576.0;
+        vy += static_cast<std::int16_t>(m_world.windStrength()) * fx::NegCos[wd] / 1048576.0;
+    }
+    // (No limit at the destination: the arrival bits do not stop the physics, the command
+    // that follows does, and the tick that crosses the destination moves the whole step.)
+    double ex = vx * tau, ey = vy * tau;
+    if ((ex != 0 || ey != 0) && s.speed != fx::Instant && (v.cls == cls::Vehicle || v.cls == cls::Kassandra)) {
+        // A move the next tick will refuse (an obstacle, the map's edge: path_block,
+        // path_limit) is not drawn: a vehicle pushing against a wall would otherwise go forward
+        // and snap back at every tick. (Only the ground units: for projectiles path_block is
+        // a hit their class handles, they keep flying.) The step of the next tick, one period:
+        const auto period = static_cast<std::uint32_t>(v.frameDuration);
+        const auto sp = fx::integrateSpeed(s.speed, v.acceleration, v.speedX, period, (s.state & st::Accelerate) != 0);
+        const bool wind = m_world.windStrength() != 0 && (v.flags & vf::Wind);
+        const auto step = fx::moveStep(sp, period, s.direction, s.fracX, s.fracY, m_world.windStrength(),
+                                       static_cast<std::uint8_t>(m_world.windDir()), wind);
+        if (const_cast<World&>(m_world).moveWouldBlock(s, s.x + step.mx, s.y + step.my, s.z)) ex = ey = 0;
+    }
+    double ez = 0;
+    double vz = s.vz;
+    if ((v.flags & vf::Gravity) && s.z) vz -= tau * fx::Gravity / 1024.0;   // fx::applyGravity
+    if (vz != 0) {
+        ez = vz * tau / 1024.0;   // fx::verticalStep: dt * vz >> 10
+        if (!(v.flags & vf::Gravity)) {
+            if (s.goZ > s.z) ez = std::min(ez, static_cast<double>(s.goZ - s.z));
+            else if (s.goZ < s.z) ez = std::max(ez, static_cast<double>(s.goZ - s.z));
+            else ez = 0;
+        }
+        if (s.z + m.z + ez < 0) ez = -(s.z + m.z);
+    }
+    if (std::abs(ex) > MaxMotion || std::abs(ey) > MaxMotion || std::abs(ez) > MaxMotion) return m;
+    m.x += ex;
+    m.y += ey;
+    m.z += ez;
+    return m;
+}
+
+// The view's top-left corner: the requested centre; with extrapolated positions the leash of
+// scrollCamera() is applied again to the flagman where it is drawn (the camera follows it
+// without the steps of its ticks); then the map limits (`fitMap`: centred when the map is
+// smaller than the view).
+inline std::optional<ViewOrigin> GameEngine::viewOrigin(const ViewRequest& r) {
+    ViewOrigin o{r.centerX - r.width / 2, r.centerY - r.height / 2};
+    if (!m_loaded) return o;
+    if (r.extrapolate && !m_scrollLock) {
+        if (const Sprite* f = m_world.flagman(0)) {
+            const Motion m = motion(*f, r.renderClock);
+            const double fx = f->x + m.x, fy = f->y + m.y;
+            const double lx = r.width - 54, ly = r.height - 40;
+            if (o.x < fx - lx) o.x = fx - lx;
+            if (o.y < fy - ly) o.y = fy - ly;
+            if (o.x + (r.width - 1) > fx + lx) o.x = fx - (r.width - 1) + lx;
+            if (o.y + (r.height - 1) > fy + ly) o.y = fy - (r.height - 1) + ly;
+        }
+    }
+    if (r.fitMap) {
+        const double mw = m_world.mapWidth(), mh = m_world.mapHeight();
+        o.x = r.width >= mw ? (mw - r.width) / 2 : std::clamp(o.x, 0.0, mw - r.width);
+        o.y = r.height >= mh ? (mh - r.height) / 2 : std::clamp(o.y, 0.0, mh - r.height);
+    }
+    return o;
+}
+
+inline void GameEngine::drawSpriteView(const Sprite& s, const Motion& m, const ViewTargets& t, bool child) {
+    const VidInfo& v = m_world.vidOf(s);
+    if (!v.gfx || s.frame < 0 || static_cast<std::size_t>(s.frame) >= v.gfx->frames.size()) return;
+    const auto& frame = v.gfx->frames[static_cast<std::size_t>(s.frame)];
+    if (frame.data.empty()) return;
+    const auto* pal = paletteFor(s);
+    if (!pal) return;
+    const bool screen = (s.state & st::Screen) != 0;
+    const view::Raster& r = screen ? *t.screen : *t.world;
+    const Motion mm = screen ? Motion{} : m;
+    const auto sub = [](double d) { return static_cast<std::int64_t>(std::llround(d * (1 << view::SubBits))); };
+    const std::int64_t left = (std::int64_t{s.x - (v.width >> 1)} << view::SubBits) + sub(mm.x);
+    const std::int64_t top = (std::int64_t{s.y - (v.height >> 1)} << view::SubBits) + sub(mm.y);
+    int z = s.z;
+    const bool cast = (v.flags & vf::Shadow) && z > 0;
+    if (cast)
+        m_drawList.push_back({&frame, pal, left + (std::int64_t{-(z >> 1) - (z >> 2)} << view::SubBits) + sub(-0.75 * mm.z),
+                              top + (std::int64_t{(z >> 2) - (z >> 1)} << view::SubBits) + sub(-0.25 * mm.z), screen,
+                              hicolor::FrameVisitor::Pass::CastShadow, false});
+    double zf = z + mm.z;
+    if (v.flags & vf::ZeroZ) { z = 0; zf = 0; }
+    const std::int64_t bodyTop = top - (std::int64_t{z} << view::SubBits) - sub(zf - z);
+    m_drawList.push_back({&frame, pal, left, bodyTop, screen, hicolor::FrameVisitor::Pass::Normal, cast});
+    if (t.request->drawn) {
+        const double scale = screen ? t.request->screenScale : t.request->scale;
+        const double ox = screen ? 0 : t.origin.x, oy = screen ? 0 : t.origin.y;
+        DrawnSprite d;
+        d.id = s.id;
+        d.nvid = s.nvid;
+        d.cls = v.cls;
+        d.category = v.category;
+        d.screen = screen;
+        d.child = child;
+        d.worldX = static_cast<float>(s.x + mm.x);
+        d.worldY = static_cast<float>(s.y + mm.y);
+        d.worldZ = static_cast<float>(s.z + mm.z);
+        d.fbX = static_cast<float>((d.worldX - ox) * scale);
+        d.fbY = static_cast<float>((d.worldY - oy) * scale);
+        const auto b = view::frameBounds(r, left, bodyTop, frame.width(), frame.height());
+        d.left = b.x0; d.top = b.y0; d.right = b.x1; d.bottom = b.y1;
+        t.request->drawn->push_back(d);
+    }
+}
+
+// draw() (0x40b880) through the view transform: same layers, order, sorting and chains; the
+// culling window (+-512 px around the centre for a 640 x 480 view) grows with larger views.
+// The draw list is built here (extrapolation, palettes), then rasterized in bands, on the
+// session's threads when it gives them (view::drawBand: the same picture for any number).
+inline bool GameEngine::drawView(FramebufferRef fb, const ViewRequest& r, ViewOrigin o) {
+    if (r.drawn) r.drawn->clear();
+    m_drawList.clear();
+    const view::Raster world{fb, view::toSub(o.x), view::toSub(o.y), view::toScale(r.scale)};
+    const view::Raster screen{fb, 0, 0, view::toScale(r.screenScale)};
+    const ViewTargets targets{&world, &screen, &r, o};
+    const int cx = static_cast<int>(std::floor(o.x + r.width / 2)), cy = static_cast<int>(std::floor(o.y + r.height / 2));
+    const int hx = 512 + std::max(0, static_cast<int>(std::ceil(r.width / 2)) - 320);
+    const int hy = 512 + std::max(0, static_cast<int>(std::ceil(r.height / 2)) - 240);
+    const auto outside = [&](const Sprite* s) {
+        const int dx = s->x - cx, dy = s->y - s->z - cy;
+        return dx < -hx || dx >= hx || dy < -hy || dy >= hy;
+    };
+    const auto drawWithChain = [&](const Sprite* s) {
+        const Motion m = r.extrapolate ? motion(*s, r.renderClock) : Motion{};
+        const auto chain = [&] {
+            const Sprite* parent = s;
+            for (const Sprite* c = s->child; c; parent = c, c = c->child) {
+                if (m_world.vidOf(*parent).flags & vf::InvisibleSubobjects) break;
+                drawSpriteView(*c, m, targets, true);   // sub-objects move with their root
+            }
+        };
+        if (s->dz < 0) chain();
+        drawSpriteView(*s, m, targets, false);
+        if (s->dz >= 0) chain();
+    };
+    for (int layer = 0; layer < World::MaxLayers; ++layer) {
+        if (layer == 5) {
+            m_sorted.clear();
+            int index = 0;
+            for (const Sprite* s = m_world.layerHead(5); s; s = s->next, ++index)
+                if (!(s->state & (st::Invisible | st::Screen)) && !outside(s)) m_sorted.push_back({s, index});
+            std::ranges::sort(m_sorted, [](const SortItem& a, const SortItem& b) {
+                if (a.s->y != b.s->y) return a.s->y < b.s->y;
+                if (a.s->z != b.s->z) return a.s->z < b.s->z;
+                if (a.s->x != b.s->x) return a.s->x < b.s->x;
+                return a.index > b.index;
+            });
+            for (const auto& it : m_sorted) drawWithChain(it.s);
+            continue;
+        }
+        for (const Sprite* s = m_world.layerHead(layer); s; s = s->next) {
+            if (s->state & st::Invisible) continue;
+            if (!(s->state & st::Screen) && outside(s)) {
+                if (s->y - cy >= hy) break;
+                continue;
+            }
+            drawWithChain(s);
+        }
+    }
+    const int bands = r.parallel ? std::clamp(r.threads, 1, 16) : 1;
+    m_bandScratch.resize(static_cast<std::size_t>(bands));
+    const auto band = [&](int b) {
+        const int H = fb.extent(0), W = fb.extent(1);
+        const int y0 = static_cast<int>(static_cast<std::int64_t>(H) * b / bands), y1 = static_cast<int>(static_cast<std::int64_t>(H) * (b + 1) / bands);
+        std::fill_n(fb.data_handle() + static_cast<std::size_t>(y0) * static_cast<std::size_t>(W),
+                    static_cast<std::size_t>(y1 - y0) * static_cast<std::size_t>(W), RGBA8{{0, 0, 0}, 255});
+        view::drawBand(m_drawList, world, screen, b, bands, m_bandScratch[static_cast<std::size_t>(b)]);
+    };
+    if (bands > 1) r.parallel(bands, band);
+    else band(0);
+    return true;
 }
 
 // ---------------------------------------------------------------------------- builtins

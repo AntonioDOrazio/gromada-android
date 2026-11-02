@@ -40,6 +40,23 @@ struct InputView {
     int width = 0, height = 0;
 };
 
+// Screen <-> world mapping of the game view (issue #20): a point of the output (logical
+// pixels, PcState::cursor) is at world origin + (point - viewX) / zoom. Without zoom and with
+// the camera as origin this is the original's world = screen + camera.
+struct ScreenMapping {
+    double viewX = 0;                  // output column of the view's left edge (demo pillarbox)
+    double originX = 0, originY = 0;   // world point at the view's top-left corner
+    double zoom = 1;                   // output pixels per world pixel
+    // Added before rounding down to whole pixels: points the mapper computed in float output
+    // pixels from a sub-pixel origin (player + range...) come back a hair below the integer
+    // they stand for. 0 for the original mapping (integer camera, zoom 1: exact).
+    double snap = 0;
+    [[nodiscard]] double worldX(double outX) const noexcept { return originX + (outX - viewX) / zoom; }
+    [[nodiscard]] double worldY(double outY) const noexcept { return originY + outY / zoom; }
+    [[nodiscard]] double outputX(double wx) const noexcept { return (wx - originX) * zoom + viewX; }
+    [[nodiscard]] double outputY(double wy) const noexcept { return (wy - originY) * zoom; }
+};
+
 class InputRecordBuilder {
 public:
     friend struct SaveStateAccess; // save states (game/savestate.hpp)
@@ -132,6 +149,30 @@ public:
         if (!m_queue.empty()) {
             r.key = m_queue.front();
             m_queue.pop_front();
+        }
+        return r;
+    }
+
+    // The same through a zoomed view (issue #20): the record carries the world point under
+    // the cursor (or the move order's target, or the aim point: as above) (`map`), and as screen position the cursor in the engine's view, in world
+    // pixels from the camera's corner (what the engine's edge scroll and `view` measure).
+    // With zoom 1 and the camera as origin it is build(pc, cursor - viewX, camera...).
+    OriginalInput build(const input::PcState& pc, const ScreenMapping& map, float dt, View view = {}) {
+        const auto floorInt = [](double v) { return static_cast<int>(std::floor(v)); };
+        // The mouse point: the move order's target, else the aim point of the direct scheme
+        // (issue #19, also off screen), else the cursor; output pixels -> view pixels.
+        const input::Vec2& point = pc.moveOrder ? pc.moveTarget : pc.hasAimTarget ? pc.aimTarget : pc.cursor;
+        const double px = point.x - map.viewX, py = point.y;
+        // the build() above with a fixed point: world = screen + camera for this frame
+        const int sx = floorInt(px / map.zoom + map.snap), sy = floorInt(py / map.zoom + map.snap);
+        const int wx = floorInt(map.originX + px / map.zoom + map.snap), wy = floorInt(map.originY + py / map.zoom + map.snap);
+        input::PcState flat = pc;
+        flat.moveOrder = false;   // already resolved into (sx, sy)
+        flat.hasAimTarget = false;
+        OriginalInput r = build(flat, sx, sy, wx - sx, wy - sy, dt, view);
+        if (pc.moveOrder) {
+            r.bits = static_cast<std::uint16_t>((r.bits & ~(OriginalInput::LClick | OriginalInput::LDown | OriginalInput::RClick | OriginalInput::RDown)) |
+                                                OriginalInput::LClick | OriginalInput::LDown);
         }
         return r;
     }

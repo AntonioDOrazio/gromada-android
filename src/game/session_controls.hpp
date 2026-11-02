@@ -106,10 +106,17 @@ public:
     void reset() { m_valid = false; m_hold = false; }
     void setParams(const Params& p) { m_params = p; }
     [[nodiscard]] bool holding() const noexcept { return m_hold; }
+    // The view's corner with sub-pixel precision while `cam` is still where update() put it
+    // (issue #20: smooth scrolling); nullopt when another rule moved it since.
+    [[nodiscard]] std::optional<std::pair<float, float>> position(const Camera& cam) const noexcept {
+        if (!m_valid || cam.x != m_lastX || cam.y != m_lastY) return std::nullopt;
+        return std::pair{m_fx, m_fy};
+    }
 
     // `userScroll`: the player is scrolling with the cursor at the screen edge; following
     // pauses until the player's vehicle moves again.
-    void update(Camera& cam, int px, int py, float dt, bool userScroll) {
+    // (px, py): the player, world pixels (sub-pixel where it is drawn with smooth motion).
+    void update(Camera& cam, float px, float py, float dt, bool userScroll) {
         const Params& p = m_params;
         if (!m_valid || cam.x != m_lastX || cam.y != m_lastY) {
             m_fx = static_cast<float>(cam.x);
@@ -140,8 +147,8 @@ public:
                 const float excess = e > dz ? e - dz : e < -dz ? e + dz : 0.0f;
                 pos += excess * k;
             };
-            axis(m_fx, w, static_cast<float>(px) + leadX);
-            axis(m_fy, h, static_cast<float>(py) + leadY);
+            axis(m_fx, w, px + leadX);
+            axis(m_fy, h, py + leadY);
         }
         cam.x = static_cast<int>(std::lround(m_fx));
         cam.y = static_cast<int>(std::lround(m_fy));
@@ -153,7 +160,8 @@ private:
     Params m_params;
     bool m_valid = false, m_hold = false;
     float m_fx = 0, m_fy = 0, m_vx = 0, m_vy = 0;
-    int m_px = 0, m_py = 0, m_lastX = 0, m_lastY = 0;
+    float m_px = 0, m_py = 0;   // the player at the last update
+    int m_lastX = 0, m_lastY = 0;
 };
 
 // Selected weapon, shown for `duration` seconds after it changes (or is requested) when the
