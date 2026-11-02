@@ -13,6 +13,10 @@ Il core **non contiene asset del gioco**: legge i file della tua copia originale
 - Carica `fw.res` e i 30 livelli originali, li disegna con il renderer software
   (sprite indicizzati, ombre, luce, trasparenze) e li fa scorrere col pad.
 - Opzioni core: **Frame rate 60/120**, **Formato 4:3 (640×480) / 16:9 (854×480)**, livello di anteprima.
+- Presentazione (issue #20, `docs/rendering.md`): **Risoluzione interna 1×–4×** (il mondo disegnato a
+  k × 640×480 con posizioni sub-pixel, menu e cursore scalati nitidi), **Movimento fluido** (posizioni
+  di sprite, proiettili e camera tra un tick e l'altro, a 60/120 fps), **Zoom della vista** 0,5×–2×
+  (analogico con i grilletti), **Thread di disegno**. La simulazione non cambia.
 - Opzioni audio: **Volume musica** e **Volume effetti**.
 - Comandi (dettagli e motivazioni in `docs/controls.md`): cursore virtuale o schema diretto
   (twin-stick) da opzione core, touchscreen (tocco = click sinistro, pressione lunga o due dita =

@@ -5,7 +5,9 @@
 // calls, and the sound requests and effect-channel operations of the frame (SoundChannels).
 // tools/oracle/compare_traces.py compares the two traces (docs/trace-oracle.md).
 //
-//   game_trace --data DIR --demo N -o OUT.jsonl[.gz] [--frames N] [--full-at F,F,...]
+//   game_trace --data DIR --demo N -o OUT.jsonl[.gz] [--frames N] [--full-at F,F,...] [--present K,ZOOM]
+//   --present: draw every frame at internal resolution K with zoom ZOOM and smooth motion
+//   (issue #20): the simulation, and so the trace, must not change.
 //
 // The trace contains game data: write it outside the repository.
 
@@ -140,10 +142,12 @@ struct Options {
     std::string out;
     std::size_t frames = 0;
     std::set<std::size_t> fullAt;
+    int presentScale = 0;    // --present: internal resolution (0 = no drawing, the default)
+    float presentZoom = 1;
 };
 
 int usage() {
-    std::fprintf(stderr, "usage: game_trace --data DIR --demo N -o OUT.jsonl[.gz] [--frames N] [--full-at F,F,...]\n");
+    std::fprintf(stderr, "usage: game_trace --data DIR --demo N -o OUT.jsonl[.gz] [--frames N] [--full-at F,F,...] [--present K,ZOOM]\n");
     return 2;
 }
 
@@ -159,6 +163,11 @@ int main(int argc, char** argv) {
         else if (a == "--demo") opt.demo = std::stoi(next());
         else if (a == "-o" || a == "--out") opt.out = next();
         else if (a == "--frames") opt.frames = std::stoul(next());
+        else if (a == "--present") {
+            const std::string v = next();
+            opt.presentScale = std::stoi(v);
+            opt.presentZoom = std::stof(v.substr(v.find(',') + 1));
+        }
         else if (a == "--full-at") {
             std::stringstream ss(next());
             std::string item;
@@ -170,13 +179,16 @@ int main(int argc, char** argv) {
     GameResources res{opt.data / "fw.res"};
     SessionConfig cfg;
     cfg.gameDir = opt.data;
-    cfg.render = false;
+    cfg.render = opt.presentScale > 0;
+    cfg.renderScale = std::max(1, opt.presentScale);
+    cfg.smoothMotion = opt.presentScale > 0;
     cfg.log = [](LogLevel l, std::string_view t) {
         if (l >= LogLevel::Warn) std::fprintf(stderr, "[session] %.*s\n", static_cast<int>(t.size()), t.data());
     };
     auto enginePtr = std::make_unique<GameEngine>(res);
     GameEngine& engine = *enginePtr;
     Session session{res.vids(), res.sounds(), std::move(enginePtr), nullptr, nullptr, cfg};
+    session.setZoom(opt.presentZoom);
 
     std::string builtins;
     std::vector<std::string> posted;

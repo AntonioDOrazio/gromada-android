@@ -51,6 +51,11 @@ struct Options {
     int sfxVolume = 100;
     bool viewer = false;   // debug: level viewer instead of the game
     int demo = 0;          // debug: play maps/demoN.dem (0 = none)
+    // presentation (issue #20, docs/rendering.md)
+    int renderScale = 1;   // internal resolution: the picture is k x 640 x 480 (k x 854 x 480)
+    bool smooth = true;    // positions extrapolated between the ticks of the simulation
+    float zoom = 1;        // zoom of the view when the option changes (then L2/R2, A/B)
+    int renderThreads = 0; // threads drawing the picture (0 = automatic)
 };
 
 struct Core {
@@ -105,6 +110,11 @@ void declareOptions() {
         gromada::input::coreOptions[3], gromada::input::coreOptions[4], gromada::input::coreOptions[5],
         gromada::input::coreOptions[6], gromada::input::coreOptions[7], // camera, aim assist (issue #16)
         {"gromada_movie", "Riproduci filmato (Start/A/B per saltare); nessuno|0|1|2|3"},
+        // presentation (issue #20)
+        {"gromada_render_scale", "Risoluzione interna; 1x|2x|3x|4x"},
+        {"gromada_smooth", "Movimento fluido (interpolazione); attivato|disattivato"},
+        {"gromada_zoom", "Zoom della vista; 1x|0.5x|0.75x|1.5x|2x"},
+        {"gromada_render_threads", "Thread di disegno; automatico|1|2|3|4"},
         {nullptr, nullptr},
     };
     static_assert(std::size(gromada::input::coreOptions) == 8, "list every input option above");
@@ -127,16 +137,23 @@ Options readOptions() {
     if (const char* v = getVar("gromada_sfx_volume")) o.sfxVolume = std::clamp(std::atoi(v), 0, 100);
     if (const char* v = getVar("gromada_viewer")) o.viewer = std::strcmp(v, "attivata") == 0;
     if (const char* v = getVar("gromada_demo")) o.demo = std::clamp(std::atoi(v), 0, 3);
+    if (const char* v = getVar("gromada_render_scale")) o.renderScale = std::clamp(std::atoi(v), 1, 4);
+    if (const char* v = getVar("gromada_smooth")) o.smooth = std::strcmp(v, "disattivato") != 0;
+    if (const char* v = getVar("gromada_zoom")) o.zoom = std::clamp(static_cast<float>(std::atof(v)), 0.5f, 2.0f);
+    if (const char* v = getVar("gromada_render_threads")) o.renderThreads = std::clamp(std::atoi(v), 0, 4);
     return o;
 }
 
 retro_system_av_info makeAvInfo(const Options& o) {
     retro_system_av_info info{};
     const int width = o.widescreen ? gromada::Renderer::MaxWidth : 640;
-    info.geometry.base_width = width;
-    info.geometry.base_height = gromada::Renderer::Height;
-    info.geometry.max_width = gromada::Renderer::MaxWidth;
-    info.geometry.max_height = gromada::Renderer::Height;
+    // The viewer draws at 1x; the game at k x (internal resolution, issue #20). The maximum
+    // covers both aspects, so switching the aspect only needs SET_GEOMETRY.
+    const int k = o.viewer ? 1 : o.renderScale;
+    info.geometry.base_width = width * k;
+    info.geometry.base_height = gromada::Renderer::Height * k;
+    info.geometry.max_width = gromada::Renderer::MaxWidth * k;
+    info.geometry.max_height = gromada::Renderer::Height * k;
     info.geometry.aspect_ratio = o.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
     info.timing.fps = o.fps;
     info.timing.sample_rate = AudioRate;
@@ -243,13 +260,18 @@ void applyOptions(bool initial) {
         checkMovieOption();
     if (core->session) {
         core->session->setVolumes(next.musicVolume / 100.0f, next.sfxVolume / 100.0f);
+        core->session->setRenderScale(next.renderScale);
+        core->session->setSmoothMotion(next.smooth);
+        core->session->setRenderThreads(next.renderThreads);
+        if (initial || next.zoom != prev.zoom)
+            core->session->setZoom(next.zoom);
         core->session->setOutputSize(core->renderer.width(), core->renderer.height());
     }
     if (initial)
         return;
 
     auto av = makeAvInfo(next);
-    if (next.fps != prev.fps)
+    if (next.fps != prev.fps || next.renderScale != prev.renderScale || next.viewer != prev.viewer)
         env_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
     else if (next.widescreen != prev.widescreen)
         env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
@@ -441,6 +463,54 @@ std::filesystem::path findSaveDir() {
     return {};
 }
 
+// GROMADA_TRACE_VIEW=<file> (environment): one line per drawn frame with the drawn position
+// of the flagman and of one moving enemy vehicle (world and output pixels) and the view's
+// origin and zoom, to measure how regular the motion on screen is (issue #20, docs/rendering.md).
+void installViewTrace(gromada::game::Session& s) {
+    static FILE* out = [] {
+        const char* path = std::getenv("GROMADA_TRACE_VIEW");
+        return path && *path ? std::fopen(path, "w") : nullptr;
+    }();
+    if (!out)
+        return;
+    static int tracked = 0;
+    static std::map<int, std::pair<float, float>> last;
+    s.setWorldPass([&s](const gromada::game::WorldPass& p) {
+        static long frame = 0;
+        const float k = static_cast<float>(p.renderScale);
+        const gromada::game::DrawnSprite* f = nullptr;
+        const gromada::game::DrawnSprite* v = nullptr;
+        const gromada::game::DrawnSprite* m = nullptr;
+        static int missile = 0;
+        bool missileSeen = false;
+        for (const auto& d : p.sprites)
+            if (!d.child && d.id == missile) missileSeen = true;
+        if (!missileSeen) missile = 0;
+        for (const auto& d : p.sprites) {
+            if (d.child || d.screen) continue;
+            if (d.cls == 17 && !f) f = &d;   // Kassandra
+            if (d.cls == 5 || d.cls == 6 || d.cls == 14 || d.cls == 15) {   // projectiles: follow one that moves
+                static std::map<int, std::pair<float, float>> seen;
+                const auto it = seen.find(d.id);
+                if (!missile && it != seen.end() && (it->second.first != d.worldX || it->second.second != d.worldY)) missile = d.id;
+                seen[d.id] = {d.worldX, d.worldY - d.worldZ};
+                if (d.id == missile) m = &d;
+            }
+            if (d.cls == 2) {                // Vehicle: follow the first one seen moving
+                const auto it = last.find(d.id);
+                if (!tracked && it != last.end() && (it->second.first != d.worldX || it->second.second != d.worldY)) tracked = d.id;
+                last[d.id] = {d.worldX, d.worldY};
+                if (d.id == tracked) v = &d;
+            }
+        }
+        std::fprintf(out, "%ld %.3f %.3f %.3f %.4f %s %.3f %.3f %.3f %.3f %d %.3f %.3f %.3f %.3f %d %.3f %.3f %.3f\n", frame++,
+                     p.renderClock, p.origin.x, p.origin.y, p.zoom, s.currentMap().c_str(), f ? f->fbX / k : -1.f,
+                     f ? f->fbY / k : -1.f, f ? f->worldX : -1.f, f ? f->worldY : -1.f, v ? v->id : 0, v ? v->fbX / k : -1.f,
+                     v ? v->fbY / k : -1.f, v ? v->worldX : -1.f, v ? v->worldY : -1.f, m ? m->id : 0, m ? m->worldX : -1.f,
+                     m ? m->worldY : -1.f, m ? m->worldZ : -1.f);
+    });
+}
+
 void startSession() {
     using namespace gromada::game;
     SessionConfig config;
@@ -448,6 +518,9 @@ void startSession() {
     config.saveDir = core->saveDir;
     config.outputWidth = core->renderer.width();
     config.outputHeight = core->renderer.height();
+    config.renderScale = core->options.renderScale;
+    config.smoothMotion = core->options.smooth;
+    config.renderThreads = core->options.renderThreads;
     config.log = [](LogLevel level, std::string_view text) {
         static constexpr retro_log_level levels[] = {RETRO_LOG_DEBUG, RETRO_LOG_INFO, RETRO_LOG_WARN, RETRO_LOG_ERROR};
         log(levels[static_cast<int>(level)], "%.*s", static_cast<int>(text.size()), text.data());
@@ -458,6 +531,8 @@ void startSession() {
                                               makeGameEngine(*core->resources), &core->mixer,
                                               std::make_unique<VideoMoviePlayer>(), std::move(config));
     core->session->setCursors(&core->cursors);
+    core->session->setZoom(core->options.zoom);
+    installViewTrace(*core->session);
     core->session->setVolumes(core->options.musicVolume / 100.0f, core->options.sfxVolume / 100.0f);
     core->session->start();
     if (core->options.demo)
@@ -487,8 +562,8 @@ void runSession(float dt) {
     sessionPlayer.position = controls.player;
     FrameInfo f;
     f.dt = dt;
-    f.width = s.width();
-    f.height = s.height();
+    f.width = s.logicalWidth();   // the input works on the logical picture (640/854 x 480)
+    f.height = s.logicalHeight();
     f.context = s.inputContext();
     f.player = &sessionPlayer;
     f.weaponMask = controls.weaponMask;

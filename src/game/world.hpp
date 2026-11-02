@@ -99,6 +99,8 @@ public:
     std::vector<Group>& groups() noexcept { return m_groups; }
     [[nodiscard]] const std::vector<Sprite*>& gridUnits() const noexcept { return m_gridUnits; }
     std::vector<SoundRequest>& sounds() noexcept { return m_sounds; }
+    [[nodiscard]] int windStrength() const noexcept { return m_windStrength; }
+    [[nodiscard]] int windDir() const noexcept { return m_windDir; }
     void setWind(int strength, int dir) noexcept { m_windStrength = static_cast<std::int16_t>(strength); m_windDir = static_cast<std::uint8_t>(dir); }
     void setCamera(int x, int y, int w, int h) noexcept { m_camX = x; m_camY = y; m_viewW = w; m_viewH = h; }
     InputRecord& localInput() noexcept { return m_localInput; }

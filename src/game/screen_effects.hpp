@@ -63,6 +63,26 @@ public:
     [[nodiscard]] int effect() const noexcept { return m_effect; }
     [[nodiscard]] int level() const noexcept { return m_level; }
     [[nodiscard]] bool windowOpening() const noexcept { return m_effect == 6 && m_level > 1; }
+    // The colour operation the next endFrame() applies to the picture: {applyOp kind, level},
+    // {0, 0} for none (issue #20: a pipeline drawing the world at a higher resolution applies
+    // it there too).
+    [[nodiscard]] std::pair<int, int> colourOp() const noexcept {
+        const int l = m_level;
+        switch (m_effect) {
+            case 1: return {1, l > 0 ? l : (-l) >> 2};
+            case 2: return {2, l > 0 ? l << 6 : ((-l) & ~3) << 4};
+            case 3: return {2, l > 0 ? l << 3 : ((-l) & ~3) << 1};
+            case 4: return {2, l > 0 ? l : (-l) >> 2};
+            case 5: return {5, l < 0 ? -l : l};
+            default: return {0, 0};
+        }
+    }
+    // eff_openwindow: the window the last endFrame() presented, {left, right, top, bottom}
+    // inclusive; nullopt when the whole picture was presented.
+    [[nodiscard]] std::optional<std::array<int, 4>> window() const noexcept {
+        if (m_clip == m_full) return std::nullopt;
+        return std::array{m_clip.left, m_clip.right, m_clip.top, m_clip.bottom};
+    }
 
     // Effect(e) 0x406e40. `rand` is the shared MSVC rand() (eff_random only).
     template <class Rand>
@@ -148,16 +168,9 @@ private:
 
     // Cases 1..5 of 0x406ea0.
     void stepColour(bool draw, std::uint32_t clock) {
-        const int l = m_level;
         if (draw) {
-            switch (m_effect) {
-                case 1: applyToSurface(1, l > 0 ? l : (-l) >> 2); break;
-                case 2: applyToSurface(2, l > 0 ? l << 6 : ((-l) & ~3) << 4); break;
-                case 3: applyToSurface(2, l > 0 ? l << 3 : ((-l) & ~3) << 1); break;
-                case 4: applyToSurface(2, l > 0 ? l : (-l) >> 2); break;
-                case 5: applyToSurface(5, l < 0 ? -l : l); break;
-                default: break;
-            }
+            const auto [kind, level] = colourOp();
+            if (kind) applyToSurface(kind, level);
         }
         if (clock - m_last >= static_cast<std::uint32_t>(StepMs)) {
             if (m_effect == 5) {

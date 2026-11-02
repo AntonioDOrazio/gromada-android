@@ -80,6 +80,10 @@ di `src/script` (issue #9).
   ancorata al fondo della vista e centrata.
 - Il record di input ha il mouse in coordinate della vista (`schermo + camera` = mondo); i menu
   usano `vista − origine dei menu`. In demo i menu usano le coordinate registrate.
+- Zoom, risoluzione interna e movimento fluido (issue #20): la vista del motore sui livelli è
+  `uscita / zoom` pixel di mondo, l'immagine è k volte la dimensione logica e il record mappa il
+  cursore attraverso l'ultima immagine (`ScreenMapping`); i menu ricevono il cursore logico. Con
+  1×, zoom 1 e movimento fluido spento tutto è come sopra. Vedi `docs/rendering.md`.
 
 ## Builtin
 
