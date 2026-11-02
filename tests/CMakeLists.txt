@@ -35,3 +35,7 @@ gromada_add_test(music_test music_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+
+# Differential oracle (issue #11): reference math vs vectors from the original exe (no game data).
+gromada_add_test(oracle_test oracle_test.cpp)
+target_compile_definitions(oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
