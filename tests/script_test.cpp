@@ -1,6 +1,7 @@
 // Unit tests of the script module on hand-written synthetic snippets (no game data).
 // Every rule of docs/re/runtime.md §1-2 implemented by src/script has a test here.
 #include <algorithm>
+#include <format>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -257,6 +258,23 @@ void testDeclarationsAndStatements() {
         CHECK_EQ(h.geti("n"), 3);
         CHECK_EQ(h.geti("i"), 3);
         CHECK_EQ(h.geti("m"), 4);
+    }
+    {
+        // Limits of the original: 256 variables (checked before each declarator), 128 functions
+        // (user and extern), 256 defines.
+        auto many = [](std::string_view fmt, int n, std::string_view tail) {
+            std::string src;
+            for (int i = 0; i < n; ++i) src += std::vformat(fmt, std::make_format_args(i));
+            return src + std::string{tail};
+        };
+        auto fails = [](const std::string& src) { return errorOf([&] { Script::compileText(src); }).has_value(); };
+        CHECK(!fails(many("int v{};", 256, "main(){}")));
+        CHECK(fails(many("int v{};", 257, "main(){}")));
+        CHECK(!fails(many("F{}(){{}}", 127, "main(){}")));
+        CHECK(fails(many("F{}(){{}}", 128, "main(){}")));
+        CHECK(fails(many("extern E{}() 66;", 100, "") + many("F{}(){{}}", 28, "main(){}")));
+        CHECK(!fails(many("#define D{} 1\n", 256, "main(){}")));
+        CHECK(fails(many("#define D{} 1\n", 257, "main(){}")));
     }
     {
         // A function must be defined before it is called (one-pass compiler).
