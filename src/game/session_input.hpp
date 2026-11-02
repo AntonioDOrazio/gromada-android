@@ -35,6 +35,11 @@ struct KeyRepeat {
     float rate = 15.0f;   // repeats per second
 };
 
+// Size of the game view for InputRecordBuilder::build (0 = unknown).
+struct InputView {
+    int width = 0, height = 0;
+};
+
 class InputRecordBuilder {
 public:
     // GetKey() code of a game key, 0 if the key produces none.
@@ -57,21 +62,43 @@ public:
         }
     }
 
+    // The engine scrolls the view while the mouse is within 5 px of its border (0x415e8d).
+    // `view` (when set) is the view size: a cursor that must not scroll (PcState::edgeScroll
+    // false: touch, aim point of the direct scheme) is kept out of that band in the record.
+    using View = InputView;
+    static constexpr int EdgeBand = 6;
+
     // Builds the record of this frame. `screenX/Y` is the cursor in the coordinates the engine
     // uses for its view (pixels from the top-left corner of the game view), `cameraX/Y` the
     // view origin in the world. `dt` (seconds) drives the key repeat.
-    OriginalInput build(const input::PcState& pc, int screenX, int screenY, int cameraX, int cameraY, float dt) {
+    // A move order of the direct scheme (PcState::moveOrder) is a left click at its target
+    // instead of the cursor, without the right button (Player::Tact would fire at that point).
+    OriginalInput build(const input::PcState& pc, int screenX, int screenY, int cameraX, int cameraY, float dt,
+                        View view = {}) {
         OriginalInput r;
-        r.mouseScreenX = static_cast<std::int16_t>(screenX);
-        r.mouseScreenY = static_cast<std::int16_t>(screenY);
-        r.mouseWorldX = static_cast<std::int16_t>(screenX + cameraX);
-        r.mouseWorldY = static_cast<std::int16_t>(screenY + cameraY);
+        int sx = screenX, sy = screenY;
+        if (pc.moveOrder) {
+            sx = static_cast<int>(std::floor(pc.moveTarget.x)) + (screenX - pc.cursorX());
+            sy = static_cast<int>(std::floor(pc.moveTarget.y)) + (screenY - pc.cursorY());
+        }
+        r.mouseWorldX = static_cast<std::int16_t>(sx + cameraX);
+        r.mouseWorldY = static_cast<std::int16_t>(sy + cameraY);
+        if (view.width > 2 * EdgeBand && view.height > 2 * EdgeBand && !pc.edgeScroll) {
+            sx = std::clamp(sx, EdgeBand, view.width - 1 - EdgeBand);
+            sy = std::clamp(sy, EdgeBand, view.height - 1 - EdgeBand);
+        }
+        r.mouseScreenX = static_cast<std::int16_t>(sx);
+        r.mouseScreenY = static_cast<std::int16_t>(sy);
 
         std::uint16_t bits = 0;
-        if (pc.left.pressed) bits |= OriginalInput::LClick;
-        if (pc.left.down) bits |= OriginalInput::LDown;
-        if (pc.right.pressed) bits |= OriginalInput::RClick;
-        if (pc.right.down) bits |= OriginalInput::RDown;
+        if (pc.moveOrder) {
+            bits |= OriginalInput::LClick | OriginalInput::LDown;
+        } else {
+            if (pc.left.pressed) bits |= OriginalInput::LClick;
+            if (pc.left.down) bits |= OriginalInput::LDown;
+            if (pc.right.pressed) bits |= OriginalInput::RClick;
+            if (pc.right.down) bits |= OriginalInput::RDown;
+        }
         if (pc.key(input::Key::Left).down) bits |= OriginalInput::Left;
         if (pc.key(input::Key::Right).down) bits |= OriginalInput::Right;
         if (pc.key(input::Key::Up).down) bits |= OriginalInput::Up;

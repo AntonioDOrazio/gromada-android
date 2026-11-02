@@ -34,6 +34,7 @@
 #include "game/engine_api.hpp"
 #include "game/session_demo.hpp"
 #include "game/session_files.hpp"
+#include "game/session_controls.hpp"
 #include "game/session_input.hpp"
 #include "game/session_ui.hpp"
 #include "input/cursor_file.hpp"
@@ -175,7 +176,8 @@ public:
             m_msDebt -= elapsed;
             const auto vp = viewPointer(pc);
             const auto& cam = m_engine->camera();
-            const OriginalInput rec = m_inputBuilder.build(pc, vp.first, vp.second, cam.x, cam.y, static_cast<float>(dtSeconds));
+            const OriginalInput rec = m_inputBuilder.build(pc, vp.first, vp.second, cam.x, cam.y, static_cast<float>(dtSeconds),
+                                                           m_ui.hasMenu() ? InputRecordBuilder::View{} : InputRecordBuilder::View{m_viewW, m_outH});
             tick(rec, elapsed, dtSeconds);
         }
         runOps();
@@ -212,6 +214,45 @@ public:
             return std::nullopt;
         const auto& cam = m_engine->camera();
         return input::Vec2{static_cast<float>(x->toInt() - cam.x + m_viewX), static_cast<float>(y->toInt() - cam.y)};
+    }
+
+    // Everything the input mapper needs about the game this frame (issue #16): player and
+    // targets on the output, weapon range, selectable and selected weapon. See
+    // session_controls.hpp.
+    [[nodiscard]] ControlsFrame controlsFrame() {
+        ControlsFrame c;
+        if (!m_engine || !m_mapLoaded || m_demo)
+            return c;
+        const PlayerAim aim = m_engine->playerAim();
+        const auto& cam = m_engine->camera();
+        const auto toScreen = [&](int x, int y) {
+            return input::Vec2{static_cast<float>(x - cam.x + m_viewX), static_cast<float>(y - cam.y)};
+        };
+        if (aim.valid) {
+            c.player = toScreen(aim.flagmanX, aim.flagmanY);
+            c.flagmanX = aim.flagmanX;
+            c.flagmanY = aim.flagmanY;
+            c.weaponRange = static_cast<float>(aim.weaponRange);
+            for (const auto& t : aim.targets) {
+                c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
+                c.targetHp += t.hp;
+            }
+            c.targetCount = static_cast<int>(aim.targets.size());
+        } else {
+            c.player = playerScreenPosition(); // engines without the query
+        }
+        if (c.player && m_vm && m_vm->hasGlobal("weapon") && m_vm->hasGlobal("nweapon")) {
+            const WeaponSlots w = currentWeapons();
+            c.weaponMask = w.mask;
+            c.currentWeapon = w.current;
+        }
+        return c;
+    }
+    // The view follows the player (direct scheme, touch; core option). Off during demos,
+    // menus and ScrollLock(1).
+    void setCameraFollow(bool on) {
+        if (on != m_followOn) m_follow.reset();
+        m_followOn = on;
     }
 
     // ---- inspection (tests, tools, logs) -------------------------------------------------------
@@ -444,12 +485,14 @@ private:
 
         m_engine->tactPlayers();
         m_engine->tactGroupAi();
+        followCamera(rec, dtSeconds);
         m_engine->updateCamera();
         playSounds();
 
         if (m_config.render) {
             m_engine->drawScreenEffects(fb);
             drawTextEntryCandidate(fb);
+            drawWeaponHud(fb, dtSeconds);
             present();
         }
     }
@@ -940,6 +983,66 @@ private:
             }
     }
 
+    // ---- controls (issue #16, session_controls.hpp) -----------------------------------------------
+    WeaponSlots currentWeapons() {
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        const int flagman = f ? f->toInt() : 0;
+        return weaponSlots([&](std::string_view name, int i) { return globalInt(name, i); }, [&](int index) {
+            const std::array<script::Value, 4> a{script::Value{flagman}, script::Value{64}, script::Value{index}, script::Value{0}};
+            const auto v = flagman ? m_engine->callBuiltin(67, a) : std::nullopt; // Action(act_getammo)
+            return v ? v->toInt() : 0;
+        });
+    }
+
+    void followCamera(const OriginalInput& rec, double dt) {
+        if (!m_followOn || m_demo || m_scrollLock || m_ui.hasMenu())
+            return;
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        if (!f || f->toInt() == 0)
+            return;
+        const std::array<script::Value, 1> unit{*f};
+        const auto x = m_engine->callBuiltin(109, unit), y = m_engine->callBuiltin(110, unit);
+        if (!x || !y)
+            return;
+        constexpr int band = 5; // the engine's edge scroll (0x415e8d)
+        const bool edge = rec.mouseScreenX <= band || rec.mouseScreenY <= band || rec.mouseScreenX >= m_viewW - 1 - band ||
+                          rec.mouseScreenY >= m_outH - 1 - band;
+        m_follow.update(m_engine->camera(), x->toInt(), y->toInt(), static_cast<float>(dt), edge);
+    }
+
+    // The selected weapon for a moment after a change, when the status bar is hidden.
+    void drawWeaponHud(FramebufferRef fb, double dt) {
+        if (m_demo || !m_vm || !m_vm->hasGlobal("nweapon") || !m_vm->hasGlobal("weapon")) {
+            m_weaponHud.reset();
+            return;
+        }
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        if (!f || f->toInt() == 0) {
+            m_weaponHud.reset();
+            return;
+        }
+        const WeaponSlots w = currentWeapons();
+        const int requested = m_pc.weaponPending ? m_pc.weaponSlot : w.current;
+        if (!m_weaponHud.update(w.current, requested, static_cast<float>(dt)) || m_stateBar || m_ui.hasMenu())
+            return;
+        const int head = w.nvid[static_cast<std::size_t>(std::clamp(requested, 0, 3))];
+        if (!head)
+            return;
+        const std::array<script::Value, 1> nvid{script::Value{head}};
+        const auto name = m_engine->callBuiltin(124, nvid); // GetVidName
+        // ammunition index of the head as the engine counts it (act_coor_attack)
+        const int index = head < 0x5d ? head - 0x58 : head < 0xcf ? head - 0xca : head == 0xcf ? 4 : head - 0xcf;
+        const std::array<script::Value, 4> a{*f, script::Value{64}, script::Value{index}, script::Value{0}};
+        const auto ammoValue = m_engine->callBuiltin(67, a);
+        const int ammo = ammoValue ? ammoValue->toInt() : -1;
+        const std::string text = WeaponHud::label(requested, name ? name->toString() : std::string{}, ammo,
+                                                  requested != w.current);
+        m_ui.fonts().drawText(text, ui::vids::Font, 12, m_outH - 24, fb);
+    }
+
     [[nodiscard]] bool textEntry() const {
         // PLAYER.INI: reset_name == 1 while the player types the profile name.
         return m_vm && iequalsSuffix(m_map, "player.map") && globalInt("reset_name") == 1;
@@ -990,6 +1093,9 @@ private:
     std::unique_ptr<script::Interpreter> m_vm;
     std::optional<script::GlobalSnapshot> m_carry; // cells carried across map loads
     InputRecordBuilder m_inputBuilder;
+    FollowCamera m_follow;     // issue #16
+    bool m_followOn = false;
+    WeaponHud m_weaponHud;
     const input::CursorSet* m_cursors = nullptr;
 
     std::string m_map;

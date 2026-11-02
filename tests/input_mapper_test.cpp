@@ -40,6 +40,12 @@ PcState run(Mapper& m, int fps, float seconds, const std::function<RawInput(floa
     return s;
 }
 
+RawInput touch(std::initializer_list<Vec2> fingers) {
+    RawInput in;
+    for (Vec2 p : fingers) in.touches[in.touchCount++] = {p.x, p.y};
+    return in;
+}
+
 void testButtons() {
     Mapper m;
     auto s = m.update(padWith({pad::A}), frame());
@@ -171,20 +177,51 @@ void testDirect() {
     f.player = &player;
 
     Mapper m(st);
-    const Vec2 start = m.update(RawInput{}, f).cursor;
+    auto s = m.update(RawInput{}, f);
+    // Aim point: straight up at the default range (160 in the game metric = 106.7 px up).
+    CHECK(!s.moveOrder && s.cursor.x == 100 && near(s.cursor.y, 200 - 160 / 1.5f));
+    CHECK(!s.edgeScroll); // the aim point never scrolls the view
     auto stick = [](Vec2 l, Vec2 r = {}) { RawInput in; in.leftStick = l; in.rightStick = r; return in; };
 
-    auto s = m.update(stick({1, 0}), f);
-    CHECK(s.key(Key::Right).down && !s.key(Key::Up).down && !s.key(Key::Down).down);
+    // Left stick: a move order (left click) 120 px ahead, no arrow keys; the turret follows.
+    s = m.update(stick({1, 0}), f);
+    CHECK(s.moveOrder && s.moveTarget == (Vec2{220, 200}));
+    CHECK(!s.left.down && !s.key(Key::Right).down && !s.key(Key::Up).down);
     CHECK(near(s.move.x, 1) && near(s.move.y, 0));
-    CHECK(s.cursor == start); // the left stick never moves the cursor
-    s = m.update(stick({0.7f, 0.7f}), f);
-    CHECK(s.key(Key::Right).down && s.key(Key::Down).down);
-    s = m.update(stick({0.9f, 0.2f}), f); // 12.5 degrees: still pure right
-    CHECK(s.key(Key::Right).down && !s.key(Key::Down).down);
+    CHECK(s.cursor == (Vec2{260, 200})); // aim follows the movement
+    s = m.update(stick({1, 0}), f);
+    CHECK(!s.moveOrder); // same direction: no new order before orderInterval
+    s = m.update(stick({0.7f, 0.7f}), f); // turned 45 degrees: new order at once
+    CHECK(s.moveOrder && near(s.moveTarget.x, 100 + 120 * 0.70710678f) && near(s.moveTarget.y, 200 + 120 * 0.70710678f));
+    s = m.update(stick({0.9f, 0.85f}), f); // 2 degrees: no
+    CHECK(!s.moveOrder);
+    // Held: renewed every orderInterval (0.2 s), whatever the frame rate.
+    int orders = 0;
+    for (int i = 0; i < 12; ++i) orders += m.update(stick({0.7f, 0.7f}), f).moveOrder;
+    CHECK_EQ(orders, 1);
+    // Near the screen border the order stays on screen (but at least minOrderDistance ahead).
+    player.pos = Vec2{600, 200};
+    s = m.update(stick({1, 0}), f);
+    CHECK(s.moveOrder && s.moveTarget == (Vec2{648, 200}));
+    player.pos = Vec2{560, 200};
+    s = m.update(stick({1, 0}), f);
+    for (int i = 0; i < 12 && !s.moveOrder; ++i) s = m.update(stick({1, 0}), f);
+    CHECK(s.moveOrder && s.moveTarget == (Vec2{631, 200}));
+    // Released: one order at the player's feet (stop), then nothing.
     s = m.update(stick({0, -0.3f}), f); // under the move threshold
-    CHECK(!s.key(Key::Up).down && s.move == Vec2{});
-    CHECK(s.key(Key::Right).released);
+    CHECK(s.moveOrder && s.moveTarget == (Vec2{563, 200}) && s.move == Vec2{});
+    s = m.update(stick({}), f);
+    CHECK(!s.moveOrder);
+
+    // A real click wins the frame: the order waits for the next one.
+    player.pos = Vec2{100, 200};
+    s = m.update(stick({1, 0}, {0, -1}), f); // fire pressed in the same frame
+    CHECK(!s.moveOrder && s.right.pressed);
+    s = m.update(stick({1, 0}, {0, -1}), f);
+    CHECK(s.moveOrder && s.right.down);
+    s = m.update(stick({}), f);
+    CHECK(s.moveOrder && s.right.released); // stop
+    m.update(stick({}), f);
 
     // Right stick half way: aim only.
     s = m.update(stick({}, {0.5f, 0}), f);
@@ -193,7 +230,7 @@ void testDirect() {
     // All the way: aim and fire (right button held at the aim point).
     s = m.update(stick({}, {0, -1}), f);
     CHECK(s.aiming && s.right.pressed);
-    CHECK(s.cursor == (Vec2{100, 40}));
+    CHECK(s.cursor.x == 100 && near(s.cursor.y, 200 - 160 / 1.5f));
     s = m.update(stick({}, {0, -1}), f);
     CHECK(s.right.down && !s.right.pressed);
     // Released: no fire, the aim point stays and travels with the player.
@@ -201,31 +238,160 @@ void testDirect() {
     CHECK(!s.aiming && s.right.released);
     player.pos = Vec2{300, 250};
     s = m.update(stick({}), f);
-    CHECK(s.cursor == (Vec2{300, 90}));
-    // B attacks at the aim point; aim distance can come from the engine.
+    CHECK(s.cursor.x == 300 && near(s.cursor.y, 250 - 160 / 1.5f));
+    // B attacks at the aim point; the range comes from the engine (game metric).
     f.aimDistance = 50;
     s = m.update(stick({}, {-1, 0}), f);
     CHECK(s.cursor == (Vec2{250, 250}) && s.right.down);
+    // An aim point beyond the screen is pulled in along the same line (exact direction).
+    f.aimDistance = 600;
+    s = m.update(stick({}, {1, 0.5f}), f);
+    CHECK(s.cursor.x <= 639 && near((s.cursor.y - 250) / (s.cursor.x - 300), 0.5f));
+    f.aimDistance = 50;
     // No player position: aim from the screen center.
     player.pos.reset();
     s = m.update(stick({}, {1, 0}), f);
     CHECK(s.cursor == (Vec2{370, 240}));
-    // D-pad: arrows and analog move vector.
+    // D-pad: arrows (tank controls of the original) and analog move vector, no orders.
     s = m.update(padWith({pad::Down}), f);
-    CHECK(s.key(Key::Down).down && near(s.move.y, 1));
+    CHECK(s.key(Key::Down).down && near(s.move.y, 1) && !s.moveOrder);
+
+    // Touch re-aims at the finger and the point then travels with the player.
+    player.pos = Vec2{100, 200};
+    m.update(touch({{0.25f, 0.5f}}), f);
+    s = m.update(RawInput{}, f); // released: tap = left click there
+    CHECK(s.left.pressed && s.cursor == (Vec2{160, 240}));
+    player.pos = Vec2{110, 200};
+    s = m.update(RawInput{}, f);
+    CHECK(s.cursor == (Vec2{170, 240}) && !s.edgeScroll);
+    s = m.update(stick({1, 0}), f); // driving: the aim follows the movement again
+    CHECK(s.cursor == (Vec2{160, 200}));
 
     // Menu context: direct scheme falls back to the cursor (menus need a pointer).
     FrameInfo menu = f;
     menu.context = Context::Menu;
     const Vec2 before = m.update(RawInput{}, menu).cursor;
     s = m.update(stick({1, 0}), menu);
-    CHECK(s.cursor.x > before.x && !s.key(Key::Right).down);
+    CHECK(s.cursor.x > before.x && !s.key(Key::Right).down && !s.moveOrder && s.edgeScroll);
 }
 
-RawInput touch(std::initializer_list<Vec2> fingers) {
-    RawInput in;
-    for (Vec2 p : fingers) in.touches[in.touchCount++] = {p.x, p.y};
-    return in;
+// Move orders are timed in seconds: the same stick input gives the same orders at 60 and 120 fps.
+void testDirectFrameRate() {
+    Settings st;
+    st.scheme = Scheme::Direct;
+    FixedPlayer player;
+    player.pos = Vec2{320, 240};
+    auto count = [&](int fps) {
+        Mapper m(st);
+        FrameInfo f = frame(fps);
+        f.player = &player;
+        std::vector<float> times;
+        const int frames = fps * 2;
+        for (int i = 0; i < frames; ++i) {
+            RawInput in;
+            const float t = static_cast<float>(i) / fps;
+            if (t < 1.5f) in.leftStick = t < 0.7f ? Vec2{1, 0} : Vec2{0, 1};
+            if (m.update(in, f).moveOrder) times.push_back(t);
+        }
+        return times;
+    };
+    const auto a = count(60), b = count(120);
+    CHECK_EQ(a.size(), b.size());
+    for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+        CHECK(std::abs(a[i] - b[i]) <= 1.0f / 60 + 1e-4f);
+    // start, renewals every 0.2 s, the turn at 0.7 s, renewals, stop at 1.5 s
+    CHECK(a.size() >= 8 && a.size() <= 10);
+    CHECK(near(a.back(), 1.5f, 0.02f));
+}
+
+void testAimAssist() {
+    Settings st;
+    st.scheme = Scheme::Direct;
+    FixedPlayer player;
+    player.pos = Vec2{320, 240};
+    const AimTarget targets[] = {
+        {{320, 80}, {320, 100}},  // up, 140 px (210 in the game metric)
+        {{420, 220}, {420, 240}}, // right, 100 px
+        {{320, -20}, {320, 0}},   // up, off screen: never
+        {{100, 470}, {100, 480}}, // down-left, 240/360: out of range
+    };
+    FrameInfo f = frame();
+    f.player = &player;
+    f.targets = targets;
+    f.aimDistance = 280;
+    Mapper m(st);
+    auto aim = [&](Vec2 r) { RawInput in; in.rightStick = r; return m.update(in, f); };
+    auto s = aim({0, -1});
+    CHECK(s.aimLocked && s.cursor == (Vec2{320, 80}));
+    s = aim({1, 0.3f}); // 17 degrees off: still the target on the right
+    CHECK(s.aimLocked && s.cursor == (Vec2{420, 220}));
+    s = aim({0.7f, -0.7f}); // 45 degrees from both: no lock, weapon range along the stick
+    CHECK(!s.aimLocked && near(s.cursor.x - 320, 240 - s.cursor.y));
+    s = aim({-0.6f, 0.8f}); // the one down-left is out of range
+    CHECK(!s.aimLocked);
+    f.aimDistance = 0; // range unknown: any distance
+    s = aim({-0.4f, 0.9f});
+    CHECK(s.aimLocked && s.cursor == (Vec2{100, 470}));
+    // Released: the lock stays (the aim direction is kept) and B fires there.
+    f.aimDistance = 280;
+    s = aim({0, -0.5f});
+    s = m.update(RawInput{}, f);
+    CHECK(s.aimLocked && !s.right.down);
+    RawInput b;
+    b.set(pad::B);
+    s = m.update(b, f);
+    CHECK(s.aimLocked && s.cursor == (Vec2{320, 80}) && s.right.pressed);
+    // Off: plain range.
+    st.aimAssist = false;
+    m.configure(st);
+    s = aim({0, -1});
+    CHECK(!s.aimLocked && near(s.cursor.y, 240 - 280 / 1.5f));
+    // helpers
+    CHECK(near(gameDistance({-10, 20}), 30) && near(gameDistance({40, 20}), 40));
+    CHECK(near(rayToBorder({100, 100}, {1, 0}, 640, 480, 8), 531));
+    CHECK(near(rayToBorder({100, 100}, {0, -1}, 640, 480, 8), 92));
+}
+
+// L1/R1 follow the weapon the game reports, and repeat the key until the game has switched
+// (the original ignores 1-4 while the turret is loading).
+void testWeaponRequests() {
+    Mapper m;
+    FrameInfo f = frame();
+    f.weaponMask = 0b0011;
+    f.currentWeapon = 0;
+    RawInput r;
+    r.set(pad::R);
+    auto s = m.update(r, f);
+    CHECK(s.weaponSlot == 1 && s.weaponPending && s.key(Key::Num2).pressed);
+    int repeats = 0;
+    for (int i = 0; i < 20; ++i) repeats += m.update(RawInput{}, f).key(Key::Num2).pressed; // 0.33 s refused
+    CHECK_EQ(repeats, 2); // every 0.12 s
+    f.currentWeapon = 1; // switched
+    s = m.update(RawInput{}, f);
+    CHECK(s.weaponSlot == 1 && !s.weaponPending);
+    for (int i = 0; i < 15; ++i) CHECK(!m.update(RawInput{}, f).key(Key::Num2).pressed);
+    // The game goes back to weapon 1 by itself (no ammunition): the mapper follows.
+    f.currentWeapon = 0;
+    f.weaponMask = 0b0001;
+    s = m.update(RawInput{}, f);
+    CHECK(s.weaponSlot == 0 && !s.weaponPending);
+    s = m.update(r, f); // only weapon 1: a request for it, granted at once
+    s = m.update(RawInput{}, f);
+    CHECK(s.weaponSlot == 0 && !s.weaponPending);
+    // Two quick presses go two steps from the request, not from the current weapon.
+    f.weaponMask = 0b1111;
+    m.update(r, f);
+    m.update(RawInput{}, f);
+    s = m.update(r, f);
+    CHECK(s.weaponSlot == 2 && s.key(Key::Num3).pressed && s.weaponPending);
+    // Never granted: given up after weaponTimeout, back to the game's weapon.
+    for (int i = 0; i < 100; ++i) s = m.update(RawInput{}, f);
+    CHECK(s.weaponSlot == 0 && !s.weaponPending);
+    // Unknown (no flagman): no tracking.
+    f.currentWeapon = -1;
+    m.update(RawInput{}, f);
+    s = m.update(r, f);
+    CHECK(s.weaponSlot == 1 && !s.weaponPending);
 }
 
 void testTouch() {
@@ -382,6 +548,9 @@ int main() {
     testWeapons();
     testCursorStick();
     testDirect();
+    testDirectFrameRate();
+    testAimAssist();
+    testWeaponRequests();
     testTouch();
     testMouse();
     testTextEntry();

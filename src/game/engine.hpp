@@ -150,6 +150,7 @@ public:
     [[nodiscard]] int clock() const override { return static_cast<int>(m_world.clock()); }
     [[nodiscard]] Camera& camera() override { return m_camera; }
     [[nodiscard]] CursorKind cursorAt(int screenX, int screenY) const override;
+    [[nodiscard]] PlayerAim playerAim() const override;
     [[nodiscard]] std::vector<SoundEvent> takeSounds() override {
         std::vector<SoundEvent> out;
         auto& s = m_world.sounds();
@@ -268,6 +269,33 @@ inline CursorKind GameEngine::cursorAt(int screenX, int screenY) const {
     return CursorKind::Move;
 }
 
+// Controls query (issue #16): the units FindTarget (0x40c970) would accept for the flagman's
+// current weapon, wherever they are, with the point that selects them under the cursor
+// (unitAt's box centre), so that a right click there attacks them.
+inline PlayerAim GameEngine::playerAim() const {
+    PlayerAim out;
+    auto& w = const_cast<World&>(m_world);
+    const Player& p = w.players()[0];
+    Sprite* f = w.byId(p.flagman);
+    if (!f || p.type != 1 || !f->alive) return out;
+    out.valid = true;
+    out.flagmanX = f->x;
+    out.flagmanY = f->y;
+    const Weapon& wp = w.weaponOf(*f);
+    out.weaponRange = static_cast<std::int16_t>(wp.weaponRange);
+    const auto tcat = static_cast<std::uint8_t>(wp.targetCategory);
+    const int myArmy = w.action(*f, act::getarmy, 0, 0);
+    for (Sprite* u : w.gridUnits()) {
+        if (u == f || !u->alive || (u->state & st::Invisible)) continue;
+        const VidInfo& uv = w.vidOf(*u);
+        if (!(uv.category & tcat)) continue;
+        const int ua = w.action(*u, act::getarmy, 0, 0);
+        if (ua == 2 || ua == myArmy) continue;
+        out.targets.push_back({World::idOf(u), u->x, u->y - u->z - (uv.sizeZ >> 1), u->x, u->y, u->hp});
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------- camera
 // 0x415e8d edge scroll and auto-scroll, 0x416004 leash around the flagman.
 inline void GameEngine::scrollCamera() {
@@ -289,10 +317,13 @@ inline void GameEngine::scrollCamera() {
         m_camera.x = static_cast<std::int16_t>(m_camera.x + ((dt * m_scrollVX) >> 10));
         m_camera.y = static_cast<std::int16_t>(m_camera.y + ((dt * m_scrollVY) >> 10));
         if (f) {
-            if (m_camera.x < f->x - 586) m_camera.x = f->x - 586;
-            if (m_camera.y < f->y - 440) m_camera.y = f->y - 440;
-            if (m_camera.x + w > f->x + 586) m_camera.x = f->x - w + 586;
-            if (m_camera.y + h > f->y + 440) m_camera.y = f->y - h + 440;
+            // 586 x 440 = a 640 x 480 view minus 54 x 40: the flagman stays at least 54 x 40 px
+            // inside the view. Wider views (16:9) keep the same margin (issue #16).
+            const int lx = std::max(586, w - 54), ly = std::max(440, h - 40);
+            if (m_camera.x < f->x - lx) m_camera.x = f->x - lx;
+            if (m_camera.y < f->y - ly) m_camera.y = f->y - ly;
+            if (m_camera.x + w > f->x + lx) m_camera.x = f->x - w + lx;
+            if (m_camera.y + h > f->y + ly) m_camera.y = f->y - h + ly;
         }
     }
 }
