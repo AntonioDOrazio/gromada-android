@@ -86,6 +86,7 @@ public:
         setOutputSize(m_config.outputWidth, m_config.outputHeight);
         m_builtins = script::knownBuiltinRegistry();
         m_sfxSink.mixer = m_mixer;
+        m_sfxSink.session = this;
         applyVolumes();
     }
 
@@ -312,11 +313,13 @@ public:
         case script::BuiltinId::PlaySFX: queueSfx(argInt(args, 0)); return Value{0};
         case script::BuiltinId::StopSFX:
             m_sfx.stopAll(m_sfxSink);
-            if (m_mixer) m_mixer->stopSfx();
             return Value{0};
         case script::BuiltinId::StopSFXOne: m_sfx.stop(m_sfxSink, argInt(args, 0)); return Value{0};
         case script::BuiltinId::PlayAudio: playAudio({argInt(args, 0), argInt(args, 1), argInt(args, 2), argInt(args, 3)}); return Value{0};
-        case script::BuiltinId::StopMusic: stopMusic(); return Value{0};
+        case script::BuiltinId::StopMusic: // also stops the PlayWAV slot (0x412e00 -> 0x408d80)
+            stopMusic();
+            m_sfx.stop(m_sfxSink, static_cast<int>(m_sounds.size() + m_wavs.size()));
+            return Value{0};
         case script::BuiltinId::SetSound: m_scriptSfx = std::clamp(argInt(args, 0), 0, 100); applyVolumes(); return Value{0};
         case script::BuiltinId::SetMusic: setMusic(std::clamp(argInt(args, 0), 0, 100)); return Value{0};
         case script::BuiltinId::PlayWAV: return Value{playWav(argString(args, 0))};
@@ -821,7 +824,10 @@ private:
     // gromada::Mixer as the SoundChannels sink (no mixer: nothing plays, nothing is "playing").
     struct MixerSink final : SoundSink {
         Mixer* mixer = nullptr;
-        std::uint32_t play(const SoundData& s, float volume, float pan, bool loop) override {
+        Session* session = nullptr;
+        std::uint32_t play(int nsfx, const SoundData& s, float volume, float pan, bool loop) override {
+            if (loop && session) // rare: a looping sound (vehicle engine) starts
+                session->log(LogLevel::Debug, std::format("sfx {} loop start", nsfx));
             return mixer ? mixer->playSfx(s, volume, pan, loop) : 0;
         }
         bool playing(std::uint32_t v) const override { return mixer && mixer->sfxPlaying(v); }

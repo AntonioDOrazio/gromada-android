@@ -125,7 +125,7 @@ private:
         const float master = m_sfxVolume * 0.6f; // headroom: several voices at once
         for (auto& v : m_voices) {
             for (std::size_t i = 0; i < frames; ++i) {
-                if (v.loop && v.pos >= static_cast<double>(v.frames))
+                while (v.loop && v.pos >= static_cast<double>(v.frames))
                     v.pos -= static_cast<double>(v.frames); // seamless wrap of looping sounds
                 const auto i0 = static_cast<std::size_t>(v.pos);
                 if (i0 >= v.frames) break;

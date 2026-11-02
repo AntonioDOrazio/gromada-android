@@ -22,7 +22,7 @@ class SoundSink {
 public:
     virtual ~SoundSink() = default;
     // volume 0..1, pan -1..1 (gromada::Mixer convention). Returns a voice id, 0 = failed.
-    virtual std::uint32_t play(const SoundData& sound, float volume, float pan, bool loop) = 0;
+    virtual std::uint32_t play(int nsfx, const SoundData& sound, float volume, float pan, bool loop) = 0;
     virtual bool playing(std::uint32_t voice) const = 0;
     virtual void update(std::uint32_t voice, float volume, float pan) = 0;
     virtual void stop(std::uint32_t voice) = 0;
@@ -77,22 +77,26 @@ public:
         for (auto& q : m_queue) q.nsfx = -1;
     }
 
-    // StopSFX(): every channel stops.
+    // StopSFX() (0x409550): every playing channel stops, except the one playing the last
+    // effect number (the PlayWAV slot). The queue of this frame is kept; the channels keep
+    // their sound and start time (50 ms guard).
     void stopAll(SoundSink& sink) {
-        clearQueue();
-        for (auto& c : m_channels) {
-            if (c.voice) sink.stop(c.voice);
-            c = {};
-        }
-    }
-
-    // StopSFX(nsfx) (unreachable from the scripts, kept for completeness).
-    void stop(SoundSink& sink, int nsfx) {
+        const int last = m_count();
         for (auto& c : m_channels)
-            if (c.nsfx == nsfx && c.voice) {
+            if (c.active && c.nsfx != last) {
                 sink.stop(c.voice);
                 c.active = false;
                 c.voice = 0;
+            }
+    }
+
+    // StopSFX(nsfx) (0x408d80, unreachable from the scripts) and StopMusic() (the PlayWAV
+    // slot): the channels playing nsfx stop and are released (0x408bf0: no sound, no time).
+    void stop(SoundSink& sink, int nsfx) {
+        for (auto& c : m_channels)
+            if (c.active && c.nsfx == nsfx) {
+                sink.stop(c.voice);
+                c = {};
             }
     }
 
@@ -128,7 +132,8 @@ public:
             }
             ++pending;
         }
-        // 3. looping sounds not requested for 500 ms stop (the last effect number is exempt)
+        // 3. looping sounds not requested for 500 ms stop (the last effect number is exempt);
+        //    the channel is not counted as free before the next frame
         for (auto& c : m_channels) {
             if (!c.active)
                 continue;
@@ -138,7 +143,7 @@ public:
             if (clock - c.time > LoopKeepAliveMs) {
                 sink.stop(c.voice);
                 c.active = false;
-                c.voice = 0; // (the original does not count it as free in this frame)
+                c.voice = 0;
             }
         }
         // 4. more requests than free channels: drop the weakest ones
@@ -159,7 +164,7 @@ public:
                 const SoundData* s = m_lookup(q.nsfx);
                 if (c->voice)
                     sink.stop(c->voice);
-                c->voice = sink.play(*s, volumeOf(q.attenuation), panOf(q.pan), s->kind == 0);
+                c->voice = sink.play(q.nsfx, *s, volumeOf(q.attenuation), panOf(q.pan), s->kind == 0);
                 c->nsfx = q.nsfx;
                 c->active = c->voice != 0;
                 c->time = clock;
@@ -170,6 +175,9 @@ public:
 
     [[nodiscard]] int activeChannels() const {
         return static_cast<int>(std::ranges::count_if(m_channels, [](const Channel& c) { return c.active; }));
+    }
+    [[nodiscard]] int pendingRequests() const {
+        return static_cast<int>(std::ranges::count_if(m_queue, [](const Request& q) { return q.nsfx >= 0; }));
     }
 
 private:
