@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     std::string events;
     bool player = true, quiet = false;
     int width = 640, height = 480;
-    int spawnX = -1, spawnY = -1;
+    int spawnX = -1, spawnY = -1, camX = -1, camY = -1;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
         else if (a == "--trace") traceEvery = std::stoi(next());
         else if (a == "--input") events = next();
         else if (a == "--no-player") player = false;
+        else if (a == "--camera") { const auto v = next(); const auto c = v.find(','); camX = std::stoi(v.substr(0, c)); camY = std::stoi(v.substr(c + 1)); }
         else if (a == "--spawn") { const auto v = next(); const auto c = v.find(','); spawnX = std::stoi(v.substr(0, c)); spawnY = std::stoi(v.substr(c + 1)); }
         else if (a == "--quiet") quiet = true;
         else if (a == "--size") { const auto s = next(); const auto x = s.find('x'); width = std::stoi(s.substr(0, x)); height = std::stoi(s.substr(x + 1)); }
@@ -165,6 +166,10 @@ int main(int argc, char** argv) {
         call(126, {px, py});                                    // SetPosition
         call(128, {1});                                         // SetAutoScroll(1)
     }
+    if (camX >= 0) {   // fixed camera centred on a point
+        call(126, {camX, camY});
+        call(128, {0});
+    }
     const auto evs = parseEvents(events);
     if (std::getenv("ENGINE_TRACE_DAMAGE"))
         w.damageHook = [&](const Sprite& t, int amount, int src) {
@@ -178,7 +183,6 @@ int main(int argc, char** argv) {
     FramebufferRef fb{pixels.data(), height, width};
 
     const int startClock = engine.clock();
-    double acc = 0;
     long frames = 0;
     std::vector<double> frameTimes;
     double simMs = 0, simMax = 0, drawMs = 0;
@@ -193,7 +197,6 @@ int main(int argc, char** argv) {
     while (t < total) {
         const int dt = static_cast<int>(std::floor(t + step) - std::floor(t));
         t += step;
-        acc += dt;
         const int now = engine.clock() - startClock;
 
         OriginalInput in;

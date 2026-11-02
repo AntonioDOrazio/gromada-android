@@ -6,6 +6,8 @@
 // Header-only; include once per binary (it pulls libgromada's implementations).
 
 #include "core/std.hpp"
+#include <cstring>
+#include <unordered_map>
 #include "game/engine_api.hpp"
 #include "game/world.hpp"
 #include "libgromada/libgromada_all.hpp"

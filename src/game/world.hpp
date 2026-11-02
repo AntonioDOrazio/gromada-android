@@ -5,6 +5,7 @@
 // The per-class Action() functions live in world_actions.hpp. Header-only.
 
 #include "core/std.hpp"
+#include <functional>
 #include "game/fixed_math.hpp"
 #include "game/rng.hpp"
 #include "game/sprite.hpp"
@@ -1290,7 +1291,7 @@ private:
         s->prev = prev;
         if (s->next) s->next->prev = s;
         prev->next = s;
-        if (m_iterNext == s->next && m_iterNext) m_iterNext = s;
+        if (m_iterNext == s->next) m_iterNext = s;   // 0x40be3f (also at the tail: the new sprite is visited)
     }
     void listRemove(Sprite* s) {
         if (m_iterNext == s) m_iterNext = s->next;
