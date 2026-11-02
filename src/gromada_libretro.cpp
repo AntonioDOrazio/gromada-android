@@ -647,7 +647,7 @@ RETRO_API void retro_set_controller_port_device(unsigned, unsigned) {}
 RETRO_API void retro_get_system_info(retro_system_info* info) {
     *info = {};
     info->library_name = "Gromada";
-    info->library_version = "0.3.0-session";
+    info->library_version = "0.4.0";
     info->valid_extensions = "exe|res";
     info->need_fullpath = true;
     info->block_extract = true;
