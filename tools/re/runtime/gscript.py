@@ -782,8 +782,9 @@ def analyze(c):
 
 
 def check(root):
-    files = sorted(set(glob.glob(os.path.join(root, 'maps', '*.ini')) + glob.glob(os.path.join(root, 'maps', '*.INI'))
-                       + glob.glob(os.path.join(root, 'maps', 'levels', '*.INI')) + glob.glob(os.path.join(root, 'maps', 'net', '*.INI'))))
+    # every .ini whatever the letter case (levels/18.ini is lowercase)
+    files = sorted(f for d in (('maps',), ('maps', 'levels'), ('maps', 'net'))
+                   for f in glob.glob(os.path.join(root, *d, '*')) if f.lower().endswith('.ini'))
     ok = 0
     allnotes = {}
     for f in files:
