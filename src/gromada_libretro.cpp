@@ -99,10 +99,11 @@ void declareOptions() {
         // input (issue #4): scheme, cursor speed/acceleration/precision, touch/mouse, keyboard
         gromada::input::coreOptions[0], gromada::input::coreOptions[1], gromada::input::coreOptions[2],
         gromada::input::coreOptions[3], gromada::input::coreOptions[4], gromada::input::coreOptions[5],
+        gromada::input::coreOptions[6], gromada::input::coreOptions[7], // camera, aim assist (issue #16)
         {"gromada_movie", "Riproduci filmato (Start/A/B per saltare); nessuno|0|1|2|3"},
         {nullptr, nullptr},
     };
-    static_assert(std::size(gromada::input::coreOptions) == 6, "list every input option above");
+    static_assert(std::size(gromada::input::coreOptions) == 8, "list every input option above");
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, const_cast<retro_variable*>(vars));
 }
 
@@ -180,14 +181,15 @@ void applyInputOptions() {
     static std::vector<retro_input_descriptor> desc;
     const auto game = gromada::input::inputDescriptors(core->input.settings().scheme);
     desc.assign(game.begin(), game.end());
-    desc.insert(desc.end(), {
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y, "Anteprima: scorrimento veloce"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2, "Anteprima: livello precedente"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Anteprima: livello successivo"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Anteprima: effetto sonoro precedente"},
-        {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Anteprima: effetto sonoro successivo"},
-        {0, 0, 0, 0, nullptr},
-    });
+    if (core->options.viewer)
+        desc.insert(desc.end(), {
+            {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y, "Anteprima: scorrimento veloce"},
+            {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2, "Anteprima: livello precedente"},
+            {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Anteprima: livello successivo"},
+            {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Anteprima: effetto sonoro precedente"},
+            {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Anteprima: effetto sonoro successivo"},
+        });
+    desc.push_back({0, 0, 0, 0, nullptr});
     env_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc.data());
 }
 
@@ -458,24 +460,57 @@ void startSession() {
         core->session->playDemo(core->options.demo);
 }
 
-// The direct control scheme aims from the player's position on screen.
+// The game as the controls see it (issue #16): player and targets on screen, weapons.
 struct SessionPlayer final : gromada::input::PlayerPosition {
-    [[nodiscard]] std::optional<gromada::input::Vec2> screenPosition() const override {
-        return core && core->session ? core->session->playerScreenPosition() : std::nullopt;
-    }
+    std::optional<gromada::input::Vec2> position;
+    [[nodiscard]] std::optional<gromada::input::Vec2> screenPosition() const override { return position; }
 } sessionPlayer;
+
+// GROMADA_TRACE=<n> (environment): one log line every n frames with the player, camera,
+// weapons and targets, for the automated gameplay tests (tests/controls_e2e.sh).
+int traceEvery() {
+    static const int every = [] {
+        const char* v = std::getenv("GROMADA_TRACE");
+        return v ? std::max(0, std::atoi(v)) : 0;
+    }();
+    return every;
+}
 
 void runSession(float dt) {
     using namespace gromada::input;
     auto& s = *core->session;
+    const gromada::game::ControlsFrame controls = s.controlsFrame();
+    sessionPlayer.position = controls.player;
     FrameInfo f;
     f.dt = dt;
     f.width = s.width();
     f.height = s.height();
     f.context = s.inputContext();
     f.player = &sessionPlayer;
-    const PcState& pc = core->input.update(pollRaw(input_state_cb, core->input.settings()), f);
+    f.weaponMask = controls.weaponMask;
+    f.currentWeapon = controls.currentWeapon;
+    f.aimDistance = controls.weaponRange;
+    f.targets = controls.targets;
+    const Settings& set = core->input.settings();
+    const PcState& pc = core->input.update(pollRaw(input_state_cb, set), f);
+    s.setCameraFollow(set.camera == CameraFollow::Always ||
+                      (set.camera == CameraFollow::Auto && (set.scheme == Scheme::Direct || pc.source == PointerSource::Touch)));
     s.runFrame(pc, dt);
+    static long frame = 0;
+    if (const int every = traceEvery(); every > 0 && frame++ % every == 0) {
+        const auto& cam = s.engine().camera();
+        Vec2 nearest{-9999, -9999}; // closest target, ground point relative to the player
+        if (controls.player)
+            for (const auto& t : controls.targets)
+                if ((t.ground - *controls.player).length() < (nearest).length())
+                    nearest = t.ground - *controls.player;
+        log(RETRO_LOG_INFO, "trace map=%s ctx=%d flagman=%d,%d cam=%d,%d cursor=%d,%d weapon=%d mask=%u pending=%d "
+            "targets=%d hp=%d order=%d locked=%d nearest=%d,%d", s.currentMap().c_str(), static_cast<int>(f.context),
+            controls.player ? controls.flagmanX : -1, controls.player ? controls.flagmanY : -1, cam.x, cam.y,
+            pc.cursorX(), pc.cursorY(), controls.currentWeapon, static_cast<unsigned>(controls.weaponMask),
+            pc.weaponPending ? pc.weaponSlot : -1, controls.targetCount, controls.targetHp, pc.moveOrder ? 1 : 0,
+            pc.aimLocked ? 1 : 0, static_cast<int>(nearest.x), static_cast<int>(nearest.y));
+    }
     if (s.exitRequested()) {
         // Exit() from the scripts (credits): close the content; without that, start over.
         if (!env_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr)) {

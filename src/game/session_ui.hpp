@@ -14,9 +14,15 @@
 //  - drawing: layer by layer (0..15); inside a layer by y, then z, then x, then creation
 //    (the world lists' insertion order, docs/re/engine.md §9.2); texts are sprites of their
 //    font's layer (14 for V_FONT);
-//  - animations: one frame per vid frameDuration (screen objects run during Pause()); a vid
-//    with a birth animation starts in act_birth and then stands; act_death removes the object
-//    at the end of its animation; the action's sound plays once when the action starts.
+//  - animations as SpriteTact 0x409a20 on the game clock (screen sprites tick during Pause()):
+//    one frame when clock - lastTact >= the vid's frameDuration, checked once per frame
+//    (no catch-up, lastTact = clock); at the end of act_birth the object stands, at the end
+//    of act_death it is removed, other actions loop; the action's sound plays at the first
+//    tick after ChangeAction (SoundDone; ChangeAction re-arms it even when nothing changes;
+//    the end of a cycle re-arms it except for Image objects), positional (takeScreenSounds); a clicked button is
+//    made due at once (lastTact -= 1000, 0x40c2c4); Init (0x40bf30) starts a standing
+//    animation of more than 2 frames (any length > 1 for other classes) at a random frame
+//    (shared rand(), so menus consume the engine's random numbers like the original).
 // Handles: every object/text handle has bit 30 set (SessionHandleBase) so the session can
 // recognise them when a script passes them to Action/GetX/GetY/GetUnitVid; engine unit
 // handles must stay below it.
@@ -26,6 +32,7 @@
 #include "core/std.hpp"
 #include "libgromada/libgromada_all.hpp"
 #include "ui/ui.hpp"
+#include "game/hicolor.hpp"
 
 namespace gromada::game {
 
@@ -56,11 +63,8 @@ struct ScreenObject {
     bool button = false;      // in the menu list (vid class 10)
     std::uint64_t seq = 0;    // creation order
     int frame = 0;            // frame inside the current animation
-    float clockMs = 0;        // time towards the next frame
-    // game-clock model (update() with a clock): the original's sprite tick (0x409a20)
-    bool started = false;     // lastTact set: ticks from the frame after its creation
-    std::uint32_t lastTact = 0;
-    bool soundDone = false;   // state & 0x200: the action's sound has been played
+    std::uint32_t lastTact = 0; // game clock of the last animation tick (+0x1e)
+    bool soundDone = false;     // state & 0x200
 };
 
 // Result of the last menu update (read by MenuVid/MenuDir/MenuSelectVid in the next frame).
@@ -102,6 +106,12 @@ public:
         o.button = v.type == ObjectClass::Image;
         o.seq = m_seq++;
         startAction(o);
+        o.lastTact = m_clock;
+        if (o.action == act::Stand && m_rand) {   // 0x40c0b2
+            const int span = animationLength(o) - 1;
+            if (span > 0 && !(o.button && span <= 1))
+                o.frame = m_rand() % (span + 1);
+        }
         m_objects.push_back(o);
         if (o.button && list == UiList::Menu)
             insertMenu(o.handle, o.layer);
@@ -183,7 +193,8 @@ public:
         }
     }
 
-    // ChangeAction(act, dir) of the original: a no-op when nothing changes.
+    // ChangeAction(act, dir) of the original: only re-arms the action's sound when nothing
+    // changes.
     bool changeAction(int handle, int action, int dirIndex = -1) {
         ScreenObject* o = findMutable(handle);
         if (!o)
@@ -193,8 +204,7 @@ public:
             dirIndex = o->dirIndex;
         dirIndex = v.directionsCount ? std::clamp(dirIndex, 0, v.directionsCount - 1) : 0;
         if (action == o->action && dirIndex == o->dirIndex) {
-            if (m_tickModel)
-                o->soundDone = false; // 0x40b3e0 clears the "sound played" bit before returning
+            o->soundDone = false; // 0x40b3e0 clears the "sound played" bit before returning
             return true;
         }
         o->action = std::clamp(action, 0, 15);
@@ -256,6 +266,8 @@ public:
                     m_menuState.click = true;
                     bits = 0;
                     changeAction(h, (before & 1) ? act::MenuPressUp : act::MenuPressDown);
+                    if (ScreenObject* p = findMutable(h))
+                        p->lastTact -= 1000;   // ticks at once (0x40c2c4)
                     return true;
                 }
             }
@@ -268,6 +280,20 @@ public:
     }
 
     [[nodiscard]] const MenuState& menuState() const noexcept { return m_menuState; }
+    // The shared rand() (Init's random start frame) and the current game clock (creation time).
+    void setRandom(std::function<int()> rand) { m_rand = std::move(rand); }
+    void setClock(std::uint32_t clock) noexcept { m_clock = clock; }
+    // A new map: its clock starts from the map's timer (no rewind of the objects).
+    void resetClock(std::uint32_t clock) noexcept { m_clock = m_updateClock = clock; }
+    // SetDirection 0x40b610: new direction, SetAnimation restarts at the first frame.
+    void setDirection(int handle, int dirIndex) {
+        ScreenObject* o = findMutable(handle);
+        if (!o)
+            return;
+        const Vid& v = m_vids[o->nvid];
+        o->dirIndex = v.directionsCount ? std::clamp(dirIndex, 0, v.directionsCount - 1) : 0;
+        o->frame = 0;
+    }
     void resetMenuState() { m_menuState = {}; }
 
     [[nodiscard]] bool hit(const ScreenObject& o, int mx, int my) const {
@@ -308,66 +334,55 @@ public:
     [[nodiscard]] const std::string& message() const noexcept { return m_message; }
 
     // ---- time --------------------------------------------------------------------------------
-    // Advances animations and typewriters by dt seconds; returns the sound effects requested
-    // (fw.res 1-based indices, like PlaySFX). With `clock` (the game clock of the frame) the
-    // typewriters tick like the original's text sprites instead (TextManager::tick) and their
-    // sounds, positional, come from takeScreenSounds().
-    std::vector<int> update(float dt, std::optional<std::uint32_t> clock = std::nullopt) {
+    // Advances animations and typewriters on the game clock (GetTime()); returns the
+    // non-positional sound effects requested. The sounds of the objects' actions and of the
+    // typewriters are screen sprites' sounds, positional: takeScreenSounds().
+    std::vector<int> update(float dt, std::uint32_t clock) {
         std::vector<int> sounds = std::exchange(m_sounds, {});
-        const float ms = dt * 1000.0f;
+        // Pause(0) brings the clock back: shift the timers with it (0x40ac70).
+        const auto back = static_cast<std::int32_t>(clock - m_updateClock);
+        if (back < 0)
+            for (auto& o : m_objects)
+                o.lastTact += static_cast<std::uint32_t>(back);
+        m_clock = m_updateClock = clock;
         std::vector<int> dead;
-        m_tickModel = clock.has_value();
         for (auto& o : m_objects) {
             const Vid& v = m_vids[o.nvid];
             const auto* g = std::get_if<Vid::Graphics>(&v.graphicsData);
-            if (!g || !*g || (*g)->frameDuration == 0)
+            if (!g || !*g)
                 continue;
-            if (clock) {
-                // One tick per frame when frameDuration has elapsed; the pending sound of the
-                // action plays first, positional (screen sprite), then the next frame.
-                if (!o.started) {
-                    o.started = true;
-                    o.lastTact = *clock;
-                    continue;
-                }
-                if (*clock - o.lastTact < (*g)->frameDuration)
-                    continue;
-                if (!o.soundDone) {
-                    o.soundDone = true;
-                    if (const int nsfx = v.nsfx[static_cast<std::size_t>(o.action)])
-                        m_screenSounds.push_back({nsfx, o.x, o.y});
-                }
-                o.lastTact = *clock;
-                if (++o.frame >= animationLength(o)) {
-                    o.frame = 0;
-                    if (!o.button)
-                        o.soundDone = false;   // a new cycle sounds again (not for Image, 0x40a20f)
-                    if (o.action == act::Death) { dead.push_back(o.handle); continue; }
-                    if (o.action == act::Birth) { o.action = act::Stand; startAction(o); }
-                }
+            if (clock - o.lastTact < (*g)->frameDuration)
+                continue;
+            if (!o.soundDone) {
+                o.soundDone = true;
+                // positional from the centre of the screen (screen sprite, 0x409ab4): see
+                // takeScreenSounds()
+                if (const int nsfx = v.nsfx[static_cast<std::size_t>(o.action)])
+                    m_screenSounds.push_back({nsfx, o.x, o.y});
+            }
+            const int len = animationLength(o);
+            if (++o.frame >= len && o.action == act::Death) {
+                dead.push_back(o.handle);
                 continue;
             }
-            const float period = (*g)->frameDuration;
-            o.clockMs += ms;
-            while (o.clockMs >= period) {
-                o.clockMs -= period;
-                const int len = animationLength(o);
-                if (++o.frame >= len) {
-                    o.frame = 0;
-                    if (o.action == act::Death) { dead.push_back(o.handle); break; }
-                    if (o.action == act::Birth) { o.action = act::Stand; startAction(o); }
-                }
+            if (o.frame >= len && o.action == act::Birth) {
+                o.action = act::Stand;
+                startAction(o);
+            }
+            o.lastTact = clock;
+            if (o.frame >= len) {
+                o.frame = 0;
+                if (!o.button)
+                    o.soundDone = false;   // a new cycle sounds again, not for Image (0x40a20f)
             }
         }
         for (const int h : dead)
             destroy(h);
-        if (clock) {
-            m_texts.tick(*clock);
-            for (const auto& t : m_texts.takeScreenSounds())
-                m_screenSounds.push_back(t);
-        } else {
-            m_texts.update(dt);
-        }
+        // The typewriters tick like the original's STEXT sprites (TextManager::tick, issue #13).
+        (void)dt;
+        m_texts.tick(clock);
+        for (const auto& t : m_texts.takeScreenSounds())
+            m_screenSounds.push_back(t);
         for (const int s : m_texts.takeSounds())
             sounds.push_back(s);
         for (const int s : std::exchange(m_sounds, {}))
@@ -375,7 +390,8 @@ public:
         return sounds;
     }
 
-    // Positional sounds of the screen sprites (menus, texts) of the last update() with a clock.
+    // Positional sounds of the screen sprites (menu objects, texts) of the last update(), with
+    // their position on the script's screen (issue #13: verified on the demos).
     std::vector<ui::ScreenSound> takeScreenSounds() { return std::exchange(m_screenSounds, {}); }
 
     // ---- drawing -----------------------------------------------------------------------------
@@ -416,8 +432,8 @@ public:
             const int top = originY + o.y - ((*g)->height >> 1) - o.z;
             if ((*g)->dataFormat == 7)
                 ui::applyLensFrame((*g)->frames[*frame], left, top, fb);
-            else
-                DrawSprite((*g)->frames[*frame], left, top, fb);
+            else   // the 16-bit renderer of the original (alpha of the status bar and the glass)
+                hicolor::drawFrame((*g)->frames[*frame], left, top, fb);
         }
         if (list == UiList::StateBar && !m_message.empty())
             m_fonts.drawText(m_message, ui::vids::Font, originX + MessageX, originY + MessageY, fb);
@@ -437,8 +453,9 @@ public:
         return std::min(range->first + static_cast<std::size_t>(std::max(o.frame, 0)), range->second);
     }
 
-    // Position of the Message text on the status bar (hypothesis: left part of the bar).
-    static constexpr int MessageX = 24, MessageY = 452;
+    // Position of the Message text: the font unit StateBar(1) creates is moved to the bar's
+    // (266) position + (-299, +225) (0x416dc2), i.e. (21, 465) on statebar.men.
+    static constexpr int MessageX = 320 - 299, MessageY = 240 + 225;
 
 private:
     [[nodiscard]] bool validVid(int nvid) const noexcept {
@@ -456,16 +473,10 @@ private:
         return std::max<int>(1, v.animationLengths[static_cast<std::size_t>(a)]);
     }
 
-    // SetAnimation: restart at the first frame; the action's sound plays once.
-    void startAction(ScreenObject& o, bool sound = true) {
+    // ChangeAction + SetAnimation: restart at the first frame, re-arm the action's sound.
+    void startAction(ScreenObject& o) {
         o.frame = 0;
-        o.clockMs = 0;
         o.soundDone = false;
-        if (m_tickModel)
-            return;   // the sound plays at the next tick (update() with a clock)
-        const Vid& v = m_vids[o.nvid];
-        if (sound && v.nsfx[static_cast<std::size_t>(o.action)])
-            m_sounds.push_back(v.nsfx[static_cast<std::size_t>(o.action)]);
     }
 
     void insertMenu(int handle, int layer) {
@@ -486,8 +497,9 @@ private:
     std::map<int, std::uint64_t> m_textSeq;
     MenuState m_menuState;
     std::vector<int> m_sounds;
+    std::function<int()> m_rand;
+    std::uint32_t m_clock = 0, m_updateClock = 0;
     std::vector<ui::ScreenSound> m_screenSounds;
-    bool m_tickModel = false;  // update() runs with the game clock (the original's sprite ticks)
     std::string m_message;
     int m_nextObject = 1;
     std::uint64_t m_seq = 0;

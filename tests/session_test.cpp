@@ -263,7 +263,7 @@ void testSaveFiles() {
 }
 
 void testMenuList() {
-    const auto vids = makeVids();
+    auto vids = makeVids();
     SessionUi ui{vids};
     const int console = ui.create(3, 0, 320, 240);   // layer 12
     const int b1 = ui.create(1, 0, 100, 300);         // layer 12, newer: before the console
@@ -325,17 +325,38 @@ void testMenuList() {
     CHECK_EQ(ui.menuAction(1, 3, act::Destroy), 1);
     CHECK(ui.find(b2) == nullptr);
     CHECK_EQ(ui.menuList().size(), std::size_t{3});
-    // Birth then stand; death removes the object at the end of its animation.
+    // Animations on the game clock (SpriteTact): one frame per tick when 71 ms have passed,
+    // at most one per frame; birth then stand; death removes the object at its end.
     const int born = ui.create(5, 0, 320, 240);
     CHECK_EQ(ui.find(born)->action, act::Birth);
-    ui.update(0.15f);
+    ui.update(0.f, 70);
+    CHECK_EQ(ui.find(born)->frame, 0);
+    ui.update(0.f, 71);
+    CHECK_EQ(ui.find(born)->frame, 1);
+    ui.update(0.f, 1000);   // no catch-up
     CHECK_EQ(ui.find(born)->action, act::Stand);
-    const int noise = ui.create(4, 0, 50, 50);
+    const int noise = ui.create(4, 0, 50, 50);   // created at 1000
     ui.objectAction(noise, act::ChangeAction, act::Death, 0);
-    ui.update(0.1f);
+    ui.update(0.f, 1071);
+    ui.update(0.f, 1142);
     CHECK(ui.find(noise) != nullptr);
-    ui.update(0.2f);
+    ui.update(0.f, 1212);
+    CHECK(ui.find(noise) != nullptr);
+    ui.update(0.f, 1213);
     CHECK(ui.find(noise) == nullptr);
+    // Pause(0) brings the clock back: the timers move with it.
+    CHECK_EQ(ui.find(born)->lastTact, 1213u);
+    ui.update(0.f, 1250);
+    ui.update(0.f, 250);    // rewind by 1000
+    CHECK_EQ(ui.find(born)->lastTact, 213u);
+    // Init: a standing Image of 3+ frames starts at a random frame (shared rand()).
+    int calls = 0;
+    ui.setRandom([&] { ++calls; return 2; });
+    vids[1].animationLengths[0] = 3;
+    const int phased = ui.create(1, 0, 600, 20);
+    CHECK_EQ(calls, 1);
+    CHECK_EQ(ui.find(phased)->frame, 2);
+    vids[1].animationLengths[0] = 1;
     // FreeMenu.
     ui.freeList(UiList::Menu);
     CHECK(!ui.hasMenu());
@@ -349,13 +370,20 @@ void testTexts() {
     const int t = ui.print(10, 10, "HELLO WORLD", 127);
     CHECK(isTextHandle(t));
     CHECK_EQ(ui.text(t)->visible, std::size_t{11});
-    // Action(t, act_settextcount, 0, 0): the typewriter starts (one step per 71 ms).
+    // Action(t, act_settextcount, 0, 0): the typewriter starts, one step per tick of the text
+    // sprite (71 ms of game clock); each step's sound at the next tick, from its position.
     ui.objectAction(t, act::SetTextCount, 0, 0);
     CHECK_EQ(ui.text(t)->visible, std::size_t{0});
-    const auto sounds = ui.update(0.075f);
+    ui.update(0.f, 0);                  // the frame of the creation: no tick
+    CHECK_EQ(ui.text(t)->visible, std::size_t{0});
+    ui.update(0.f, 71);
     CHECK_EQ(ui.text(t)->visible, std::size_t{1});
-    CHECK(!sounds.empty() && sounds[0] == 23);
-    ui.update(1.0f);
+    CHECK(ui.takeScreenSounds().empty());
+    ui.update(0.f, 142);
+    CHECK_EQ(ui.text(t)->visible, std::size_t{2});
+    const auto sounds = ui.takeScreenSounds();
+    CHECK(sounds.size() == 1 && sounds[0].nsfx == 23 && sounds[0].x == 10 && sounds[0].y == 10);
+    for (std::uint32_t c = 213; c < 71 * 20; c += 71) ui.update(0.f, c);
     CHECK(!ui.text(t)->typing());
     CHECK_EQ(ui.position(t).value()[0], 10);
     // Destroy through Action and DeleteText.

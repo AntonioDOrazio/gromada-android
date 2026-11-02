@@ -88,7 +88,9 @@ Il DirectSound finto: `CreateSoundBuffer`/`DuplicateSoundBuffer` restituiscono b
 (il duplicato di un buffer nullo è rifiutato come fa DirectSound: `0x408a2b` prova anche il canale
 che sta allocando), `Lock` dà un'area di appoggio (la copia dei campioni gira davvero). Un buffer
 "suona" per `byte·1000 / byteAlSecondo` ms di **orologio di gioco** dopo `Play` (i buffer in loop
-fino a `Stop`): `game_trace` usa lo stesso modello per il nostro pianificatore (`TraceSink`),
+fino a `Stop`): `game_trace` usa lo stesso modello per il nostro pianificatore (`TraceSink`, un
+`SoundSink` per canale come il DirectSound finto; le richieste arrivano da
+`SoundChannels::requestObserver`),
 così i due vedono gli stessi canali liberi. `SetPan` + `SetVolume` (+ `Play`) diventano una sola
 operazione; si registrano solo gli `Stop` udibili (l'originale ripete `Stop` a ogni frame sui
 canali inattivi che contengono un suono in loop: `0x409052` non controlla il flag attivo).

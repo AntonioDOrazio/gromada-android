@@ -7,6 +7,10 @@ namespace gromada::game {
 
 inline int World::action(Sprite& s, int a, int v1, int v2) {
     if (!s.alive) return 0;
+    if (actionHook) {
+        int ret = 0;
+        if (actionHook(s, a, v1, v2, ret)) return ret;
+    }
     switch (s.cls) {
         case cls::Terrain:
         case cls::Static: return actionMaterial(s, a, v1, v2);
@@ -156,9 +160,14 @@ inline int World::actionVehicle(Sprite& s, int a, int v1, int v2) {
             s.attackX = static_cast<std::int16_t>(v1);
             s.state |= st::Attack;
             s.target = 0;
-            // 0x40eadb: weapons that can hit aircraft (targetCategory & Avia) aim 80 px higher
-            if (static_cast<std::uint8_t>(weaponOf(s).targetCategory) & cat::Avia) { s.attackZ = 80; s.attackY = static_cast<std::int16_t>(v2 + 80); }
-            else { s.attackZ = 19; s.attackY = static_cast<std::int16_t>(v2); }
+            // anti-aircraft weapons (targetCategory & Avia, 0x40eadb) aim 80 px higher
+            if (static_cast<std::uint8_t>(weaponOf(s).targetCategory) & cat::Avia) {
+                s.attackZ = 80;
+                s.attackY = static_cast<std::int16_t>(v2 + 80);
+            } else {
+                s.attackZ = 19;
+                s.attackY = static_cast<std::int16_t>(v2);
+            }
             return 0;
         case act::additem: addItem(s, v1); return 0;
         case act::askitem: return askItem(s, v1);
@@ -622,10 +631,8 @@ inline int World::actionProjectile(Sprite& s, int a, int v1, int v2) {
             if (s.state & st::Move) {
                 std::uint8_t d = getDirection(s.x, s.y, s.goX, s.goY).dir();
                 if (s.speed < 0) d = static_cast<std::uint8_t>(d + 0x80);
-                // 0x40f7ed: while turning (TurnTo == 0) the rotation action stays; act_go only
-                // once aligned (issue #13, demo2: a projectile in l_rotate)
-                if (!turnTo(s, d)) s.frame = static_cast<std::int16_t>(s.lastFrame + 1);
-                else if (s.action != act::go) changeAction(s, act::go, -1);
+                if (!turnTo(s, d)) { s.frame = static_cast<std::int16_t>(s.lastFrame + 1); return 0; }   // 0x40f7f6
+                if (s.action != act::go) changeAction(s, act::go, -1);
             }
             return 0;
         case act::init:
@@ -642,7 +649,9 @@ inline int World::actionProjectile(Sprite& s, int a, int v1, int v2) {
         case act::attack: {
             Sprite* t = byId(v1);
             if (!v.speedX || !t) return 0;
-            setDirection(s, getDirection(s.x, s.y, t->x, t->y).raw);
+            // 0x40f917: the original computes the facing towards (v1, v2), i.e. towards the target's
+            // *address*: a heap pointer, far to the east (D15).
+            setDirection(s, getDirection(s.x, s.y, kPointerX, v2).raw);
             int tz = t->z ? t->z : vidOf(*t).sizeZ;
             if (tz < 0) tz = 0;
             setDestination(s, t->x, t->y, tz);

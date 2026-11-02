@@ -528,6 +528,7 @@ void testPlayerTurret() {
     World& w = e.world();
     Sprite* f = w.createUnit(0, 1500, 1500, 0, 0, 0, nullptr);   // facing north
     w.players()[0].flagman = f->id;
+    e.setClock(w.clock());                       // frame-locked: one turret step per call
     Sprite* head = f->child;
     CHECK(head != nullptr);
     auto aimAt = [&](int x, int y, int frames) {
@@ -549,6 +550,7 @@ void testPlayerTurret() {
     World& w2 = e2.world();
     Sprite* f2 = w2.createUnit(0, 1500, 1500, 0, 0, 0, nullptr);
     w2.players()[0].flagman = f2->id;
+    e2.setClock(w2.clock());                     // frame-locked (demo playback): one step per call
     for (int i = 0; i < 20; ++i) {
         OriginalInput in;
         in.mouseWorldX = 1700;

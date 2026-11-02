@@ -45,8 +45,18 @@ struct PcState {
     std::string text;                   // characters typed this frame (ASCII)
     Vec2 move;                          // analog movement intent, |move| <= 1 (direct scheme, d-pad)
     bool aiming = false;                // direct scheme: right stick held, cursor = aim point
+    bool aimLocked = false;             // direct scheme: the aim assist put the cursor on a target
+    // Direct scheme: a left click at `moveTarget` this frame (move order of the left stick).
+    // The cursor stays where it is drawn (the aim point); only the input record of this
+    // frame carries the order. `moveTarget` may lie outside the screen.
+    bool moveOrder = false;
+    Vec2 moveTarget;
+    // False when the cursor must not scroll the view at the screen edges: touch (a tap near
+    // the border is not a request to scroll) and the aim point of the direct scheme.
+    bool edgeScroll = true;
     char textCandidate = 'A';           // name entry with the pad: character under selection
     int weaponSlot = 0;                 // 0..3, last weapon requested (keys 1-4)
+    bool weaponPending = false;         // weaponSlot asked for, the game has not switched yet
     PointerSource source = PointerSource::Pad;
 
     [[nodiscard]] const ButtonState& key(Key k) const { return keys[static_cast<std::size_t>(k)]; }

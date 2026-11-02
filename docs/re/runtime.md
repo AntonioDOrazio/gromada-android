@@ -567,52 +567,76 @@ al marcatore di fine, con il numero di globali calcolato dal compilatore replica
   poi ripreso sulla traccia corrente (0x4095c0/0x4095e0, confidenza media). Menu: `PlayMusic(10,10,10,10)`.
 - `StopMusic()` ferma il CD. Volumi con `SetSound`/`SetMusic` 0–100 lineari (0 disattiva).
 - Effetti: `PlaySFX(n)` con n indice **da 0** degli effetti di `fw.res` (0x408730 carica il suono *i* nel
-  descrittore *i*); il suono 0 è un segnaposto muto e non è suonabile (`nsfx > 0` in 0x408dd0).
+  descrittore *i*, verificato in emulazione su `fw.res`: `docs/oracle.md` §8); il suono 0 esiste
+  (tipo 1, 3672 byte a 11025 Hz) ma non è suonabile (`nsfx > 0` in 0x408dd0).
 
-### 9.1 Sistema degli effetti sonori (DirectSound, issue #17)
+### 9.1 Sistema degli effetti sonori (DirectSound, issue #17, verificato dall'oracolo #18)
 
 Oggetto audio: `+0` numero di effetti `N` (il numero `N` è lo slot di `PlayWAV`), `+4` tabella
 dei descrittori (27 byte per effetto, indice = nsfx: `+0` buffer, `+8` **byte di tipo**), `+8`
 coda di 32 richieste da 16 byte (`+0` nsfx, −1 = libera; `+8` pan; `+0xc` attenuazione), `+0x210`
-8 canali da 16 byte (`+0` attivo, `+4` buffer DirectSound, `+8` nsfx, `+0xc` istante), `+0x2a4`
-audio disattivato (tutte le funzioni escono subito). Unità DirectSound: centesimi di dB, pan > 0
-attenua il canale sinistro. Orologio: `curclock` (0x42bf94, ms di gioco, fermo in pausa).
+8 canali da 16 byte (`+0` attivo, `+4` buffer DirectSound, `+8` nsfx, `+0xc` istante), `+0x20c`
+`IDirectSound`, `+0x2a4` audio disattivato (tutte le funzioni escono subito). Il costruttore
+0x4080c0 mette nsfx = −1 nella coda e azzera solo i buffer dei canali: gli altri campi dei canali
+restano 0 (`.bss`), quindi un canale mai usato ha nsfx 0. Unità DirectSound: centesimi di dB,
+pan > 0 attenua il canale sinistro. Orologio: `curclock` (0x42bf94, ms di gioco, fermo in pausa).
+
+Metodi COM chiamati (offset di vtable verificati dall'oracolo, `docs/oracle.md` §8):
+`IDirectSound` `+0x0c` CreateSoundBuffer, `+0x14` DuplicateSoundBuffer; `IDirectSoundBuffer`
+`+0x08` Release, `+0x24` GetStatus, `+0x2c` Lock, `+0x30` Play, `+0x3c` SetVolume, `+0x40` SetPan,
+`+0x48` Stop, `+0x4c` Unlock. `SetCurrentPosition` non è mai usata: un buffer fermato con `Stop`
+riparte da dove era (comportamento di DirectSound), uno arrivato in fondo riparte dall'inizio.
 
 - **Byte di tipo**: in `fw.res` è il byte che precede ogni suono (prima dell'offset a 32 bit).
   0 = ciclico (`DSBPLAY_LOOPING`), 100 = non posizionale (attenuazione forzata a 0), altri valori
-  (1, 40, 50, 90) = singolo. In `fw.res` i ciclici sono 15, 18, 30, 32 e 41..47 (motori dei
-  veicoli: 42 ruote BULL, 43 cingoli ELEPHANT, 44 PEGASUS, ...). `PlayWAV` (0x408c50) carica il
-  file nello slot `N`, gli dà tipo 0 e lo accoda subito; se lo stesso file è già in corso non fa
-  nulla.
+  (1, 40, 50, 90) = singolo. In `fw.res` (N = 47) i ciclici sono 14, 17, 29, 31 e 40..46 (motori
+  dei veicoli: 43 cingoli ELEPHANT, ...); 47 è lo slot `PlayWAV`. Tabella completa (tipo, formato,
+  CRC32) in `tests/data/oracle/sound_table.json`, generata eseguendo 0x408730 su `fw.res`.
+- **`PlayWAV`** (0x408c50, `file`): per ogni canale con nsfx = N: se è attivo, ha un buffer e `file`
+  è uguale (`strcmp`, maiuscole distinte) all'ultimo aperto (0x42e390) restituisce N senza fare
+  altro; altrimenti lo rilascia (0x408bf0). Poi libera i dati dello slot N, apre il file (`rb`;
+  se non si apre: log e ritorno 0, slot vuoto), lo carica con 0x408570 (un file non WAV lascia lo
+  slot vuoto), dà allo slot **tipo 0** (ciclico), lo accoda con `(N, 0, 0)`, ricorda il nome e
+  restituisce N. Lo slot è escluso da `StopSFX()` e dalla scadenza dei 500 ms: suona in loop
+  finché `StopMusic()` (0x408d80 con N) o un altro `PlayWAV`. Nel gioco è usato solo in un
+  commento di `music.ini` (musica da WAV al posto del CD).
 - **Coda** 0x408dd0 `(nsfx, pan, att)`: nsfx fuori da 1..N → log `SND:PlaySFX:Incorrect nsfx`;
-  `att < −2000` → scartata (prima della forzatura del tipo 100); pan limitato a ±10000; tipo 100
-  → `att = 0`. Effetti **non ciclici**: se in coda c'è già lo stesso nsfx si fondono:
-  `pan = ((a1+10000)·p1 + (a2+10000)·p2) / (a1+a2+20000)` (divisione intera, troncata),
-  `att = min(a1+a2+10000, 0)` (quindi in pratica volume pieno). I ciclici non si fondono. Coda
-  piena → richiesta persa.
+  nsfx = N senza WAV caricato → ignorata senza log; `att < −2000` → scartata (prima della
+  forzatura del tipo 100; le attenuazioni positive non sono limitate); pan limitato a ±10000;
+  tipo 100 → `att = 0`. Effetti **non ciclici**: se in coda c'è già lo stesso nsfx si fondono:
+  `pan = ((a1+10000)·p1 + (a2+10000)·p2) / (a1+a2+20000)` (aritmetica a 32 bit, divisione intera
+  troncata, saltata se il divisore è 0), `att = min(a1+a2+10000, 0)` (quindi in pratica volume
+  pieno). I ciclici non si fondono. Coda piena → richiesta persa.
 - **Scelta del canale** 0x408910 `(nsfx)`: il primo canale che contiene nsfx con
-  `clock − istante ≤ 50` → nessun canale (non riparte entro 50 ms, attivo o no); un canale
-  **non attivo** che contiene già nsfx → riusato; altrimenti un canale mai usato (senza buffer),
-  altrimenti uno non attivo qualsiasi (buffer rilasciato con 0x408bf0), altrimenti nessuno. Il
-  buffer è duplicato da un altro canale con lo stesso nsfx o creato dal descrittore.
+  `clock − istante ≤ 50` (senza segno) → nessun canale (non riparte entro 50 ms, attivo o no); un
+  canale **non attivo** che contiene già nsfx → riusato **con il suo buffer** (nessun
+  caricamento: `Play` riprende dalla posizione in cui era stato fermato); altrimenti un canale
+  senza buffer, altrimenti uno non attivo qualsiasi (rilasciato con 0x408bf0), altrimenti nessuno.
+  Il buffer è duplicato (`DuplicateSoundBuffer`) dal primo canale con lo stesso nsfx, provando i
+  canali in ordine (anche quello scelto, il cui buffer nullo dà errore), altrimenti creato dal
+  descrittore (`DSBUFFERDESC` con flag `0xe2`) e riempito con Lock/memcpy/Unlock (0x408b30).
 - **Tact** 0x408f20 (una volta per frame):
-  1. canali con buffer attivi ma non più in riproduzione → non attivi; conta i canali liberi
-     (non attivi);
+  1. per i canali con buffer e attivi `GetStatus`: se non suonano più → non attivi; conta i canali
+     liberi (senza buffer, non attivi o appena finiti);
   2. per ogni richiesta di un effetto ciclico già **attivo** su un canale: solo `SetPan`,
      `SetVolume`, istante = clock, richiesta tolta; le altre richieste contano come pendenti;
-  3. canali con effetto ciclico, nsfx ≠ N e `clock − istante > 500` → `Stop`, non attivi (non
-     contano come liberi in questo frame);
-  4. finché pendenti > liberi: scarta la richiesta con attenuazione minore (a parità l'ultima);
+  3. canali con effetto ciclico, nsfx ≠ N e `clock − istante > 500` → non attivi e `Stop`,
+     **anche se già fermi** (`Stop` ripetuto a ogni frame); non contano come liberi in questo frame;
+  4. `pendenti − liberi` volte: scarta la richiesta con attenuazione minore (a parità l'ultima); la
+     ricerca parte dall'elemento 0 della coda, che se libero vale come attenuazione 0 (con sole
+     attenuazioni positive non viene scartato nulla);
   5. per ogni richiesta rimasta: canale da 0x408910; `SetPan`, `SetVolume`,
      `Play(DSBPLAY_LOOPING se tipo 0)`, attivo, istante = clock.
 - `StopSFX()` 0x409550: `Stop` di tutti i canali attivi tranne quello con nsfx = N, non attivi
-  (la coda resta). `StopSFX(n)` 0x408d80: rilascia (0x408bf0: buffer, attivo, nsfx = −1,
+  (la coda resta; il buffer resta al canale e una nuova richiesta dello stesso effetto lo
+  riprende da dove era). `StopSFX(n)` 0x408d80: rilascia (0x408bf0: buffer, attivo, nsfx = −1,
   istante 0) i canali attivi con quel nsfx. `StopMusic()` chiama 0x408d80 con N (lo slot
   `PlayWAV`).
 - Effetto pratico: il motore richiede il suono dell'azione a ogni ciclo d'animazione (0x409a20;
   per un veicolo in moto ~ogni 39 ms, 50 ms a 60 fps); il suono ciclico parte una volta e resta
-  in loop finché il veicolo si muove, poi si ferma 500 ms dopo. Implementazione:
-  `src/game/sound_channels.hpp`.
+  in loop finché il veicolo si muove, poi si ferma 500 ms dopo; se riparte sullo stesso canale
+  riprende dal punto in cui si era fermato. Implementazione: `src/game/sound_channels.hpp` (porta
+  operazione per operazione, verificata con l'originale in emulazione: `docs/oracle.md` §8).
 - Video (0x401110): `PlayAVI` mette in pausa il CD, pulisce lo schermo, apre il file con MCI in una
   finestra figlia centrata alla dimensione nativa, nasconde il cursore e blocca il ciclo di gioco
   finché il video finisce o si preme un tasto/pulsante; poi riprende la musica. Se il file non si
@@ -672,8 +696,8 @@ attenua il canale sinistro. Orologio: `curclock` (0x42bf94, ms di gioco, fermo i
 
 - Comandi del giocatore col mouse (0x415e20) e scelta del cursore 9: descritti a confidenza media;
   da chiudere con la issue dell'input.
-- Effetti `eff_*` (0x406e40, 0x405700), `SetGamma`, `CreateLight`: comportamento del renderer non
-  analizzato in dettaglio.
+- (Chiusa, issue #15) Effetti `eff_*` (0x406e40, 0x406ea0, 0x405700), `SetGamma` (0x4072c0) e
+  `CreateLight` (0x407530: lista mai letta, le luci non si disegnano): `docs/engine.md` §8 e D7.
 - Significato di `obj+0x32d9`/`obj+0x991`/`obj+0x32eb` (solo azzerati e letti: probabilmente
   modalità dell'editor). (Il campo `+8` degli effetti sonori e il canale fermato da `StopMusic`
   sono chiariti in §9.1.)

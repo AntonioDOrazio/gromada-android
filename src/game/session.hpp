@@ -35,6 +35,7 @@
 #include "game/sound_channels.hpp"
 #include "game/session_demo.hpp"
 #include "game/session_files.hpp"
+#include "game/session_controls.hpp"
 #include "game/session_input.hpp"
 #include "game/session_ui.hpp"
 #include "input/cursor_file.hpp"
@@ -88,6 +89,7 @@ public:
         m_sfxSink.mixer = m_mixer;
         m_sfxSink.session = this;
         applyVolumes();
+        m_ui.setRandom([this] { return m_engine ? m_engine->rand() : 0; });
     }
 
     ~Session() override {
@@ -178,7 +180,8 @@ public:
             m_msDebt -= elapsed;
             const auto vp = viewPointer(pc);
             const auto& cam = m_engine->camera();
-            const OriginalInput rec = m_inputBuilder.build(pc, vp.first, vp.second, cam.x, cam.y, static_cast<float>(dtSeconds));
+            const OriginalInput rec = m_inputBuilder.build(pc, vp.first, vp.second, cam.x, cam.y, static_cast<float>(dtSeconds),
+                                                           m_ui.hasMenu() ? InputRecordBuilder::View{} : InputRecordBuilder::View{m_viewW, m_outH});
             tick(rec, elapsed, dtSeconds);
         }
         runOps();
@@ -215,6 +218,45 @@ public:
             return std::nullopt;
         const auto& cam = m_engine->camera();
         return input::Vec2{static_cast<float>(x->toInt() - cam.x + m_viewX), static_cast<float>(y->toInt() - cam.y)};
+    }
+
+    // Everything the input mapper needs about the game this frame (issue #16): player and
+    // targets on the output, weapon range, selectable and selected weapon. See
+    // session_controls.hpp.
+    [[nodiscard]] ControlsFrame controlsFrame() {
+        ControlsFrame c;
+        if (!m_engine || !m_mapLoaded || m_demo)
+            return c;
+        const PlayerAim aim = m_engine->playerAim();
+        const auto& cam = m_engine->camera();
+        const auto toScreen = [&](int x, int y) {
+            return input::Vec2{static_cast<float>(x - cam.x + m_viewX), static_cast<float>(y - cam.y)};
+        };
+        if (aim.valid) {
+            c.player = toScreen(aim.flagmanX, aim.flagmanY);
+            c.flagmanX = aim.flagmanX;
+            c.flagmanY = aim.flagmanY;
+            c.weaponRange = static_cast<float>(aim.weaponRange);
+            for (const auto& t : aim.targets) {
+                c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
+                c.targetHp += t.hp;
+            }
+            c.targetCount = static_cast<int>(aim.targets.size());
+        } else {
+            c.player = playerScreenPosition(); // engines without the query
+        }
+        if (c.player && m_vm && m_vm->hasGlobal("weapon") && m_vm->hasGlobal("nweapon")) {
+            const WeaponSlots w = currentWeapons();
+            c.weaponMask = w.mask;
+            c.currentWeapon = w.current;
+        }
+        return c;
+    }
+    // The view follows the player (direct scheme, touch; core option). Off during demos,
+    // menus and ScrollLock(1).
+    void setCameraFollow(bool on) {
+        if (on != m_followOn) m_follow.reset();
+        m_followOn = on;
     }
 
     // ---- inspection (tests, tools, logs) -------------------------------------------------------
@@ -315,7 +357,10 @@ public:
         case script::BuiltinId::PrintFile: return Value{printFile(argInt(args, 0), argInt(args, 1), argString(args, 2), argInt(args, 3))};
         case script::BuiltinId::DeleteText: m_ui.deleteText(argInt(args, 0)); return Value{0};
         case script::BuiltinId::Message:
-            if (m_stateBar) m_ui.setMessage(argString(args, 0));
+            if (m_stateBar) { // 0x416cf0
+                m_ui.setMessage(argString(args, 0));
+                m_messageClock = static_cast<std::uint32_t>(m_engine->clock());
+            }
             return Value{0};
         case script::BuiltinId::StateBar: setStateBar(argInt(args, 0) != 0); return Value{0};
         // --- audio ---
@@ -429,6 +474,7 @@ private:
         m_engine->beginFrame(elapsedMs);
         m_engine->setInput(rec);
         m_input = rec;
+        m_ui.setClock(static_cast<std::uint32_t>(m_engine->clock()));
         if (m_recorder)
             m_recorder->tick(static_cast<std::uint32_t>(m_engine->clock()), rec);
 
@@ -443,7 +489,6 @@ private:
         // with the camera of that moment, before the scroll and the clamp of the frame's end.
         m_soundCam = m_engine->camera();
         m_engine->tactWorld();
-
         // Menus and texts are sprites of the world in the original: they tick in World::Tact,
         // before the menu update (0x40c1d0) of the frame.
         for (const int s : m_ui.update(static_cast<float>(dtSeconds), static_cast<std::uint32_t>(m_engine->clock())))
@@ -459,16 +504,17 @@ private:
             rec.bits = bits;
             m_engine->setInput(rec);
         }
-        updateStateBar();
-
         m_engine->tactPlayers();
+        stateBarTact(m_config.render ? &fb : nullptr);
         m_engine->tactGroupAi();
+        followCamera(rec, dtSeconds);
         m_engine->updateCamera();
         playSounds();
 
         if (m_config.render) {
             m_engine->drawScreenEffects(fb);
             drawTextEntryCandidate(fb);
+            drawWeaponHud(fb, dtSeconds);
             present();
         }
     }
@@ -551,6 +597,7 @@ private:
             m_engine->loadMap(*mapPath, seed);
             if (demo) // demos start from the recorded clock, not the map's startTimer (0x414e8b)
                 m_engine->setClock(demo->startClock);
+            m_ui.resetClock(static_cast<std::uint32_t>(m_engine->clock()));
         } catch (const std::exception& e) {
             log(LogLevel::Error, std::format("Load({}): {}", name, e.what()));
             return false;
@@ -761,28 +808,84 @@ private:
             loadMenu("maps\\statebar.men", UiList::StateBar);
     }
 
-    // Status bar contents (hypothesis, docs/session.md): hp bar direction = flagman hp scaled
-    // to the bar's directions over maxhp (script global), statebar direction = weapon slot.
-    void updateStateBar() {
-        if (!m_stateBar || m_frames % 4 != 0)
+    // StateBar::Tact 0x416de0, where the original runs it: inside Player::Tact of the local
+    // player (so not while paused), after the world and the menus have been drawn. For each
+    // object of the bar, in list order (statebar.men: 266, 61, 49):
+    //  - 266 (bar, 5 directions), only with a weapon head: the head's vid name and the five
+    //    ammo counters (right-aligned at +391 + 48*i) in font 127 at the Message unit's
+    //    position (266.x - 299, 266.y + 225) - 15, drawn straight into the picture (putcadr);
+    //    direction = weapon index from the head's nvid (0x41700f);
+    //  - 61 (radar): 2x2 dots for the objects within +-464 px (offset / 16 from the radar's
+    //    centre, colours of 0x416e16), direction = towards the nearest enemy (or 0);
+    //  - 49 (hp bar): direction = hp * 127 / maxHP (half of its 79 directions).
+    // SetDirection (0x40b610) restarts the animation, so these objects stay on their first
+    // frame. Message() text goes back to empty 5 s after it was set (0x416e96).
+    void stateBarTact(FramebufferRef* fb) {
+        if (!m_stateBar)
             return;
-        const std::array<script::Value, 1> army{script::Value{0}};
-        const auto f = m_engine->callBuiltin(85, army);
-        const int flagman = f ? f->toInt() : 0;
-        int hp = 0;
-        if (flagman) {
-            const std::array<script::Value, 4> a{script::Value{flagman}, script::Value{65}, script::Value{0}, script::Value{0}};
-            if (const auto v = m_engine->callBuiltin(67, a)) hp = v->toInt();
+        const auto info = m_engine->stateBarInfo();
+        if (!info)
+            return;
+        const auto clock = static_cast<std::uint32_t>(m_engine->clock());
+        if (clock - m_messageClock > 5000) {
+            m_ui.setMessage({});
+            m_messageClock = clock;
         }
-        const int maxhp = std::max(1, globalInt("maxhp"));
-        for (const auto& o : m_ui.objects()) {
+        const int ox = (m_viewW - 640) / 2, oy = m_outH - 480;   // origin of the bar's screen
+        const auto setDir = [&](const ScreenObject& o, int dir) {   // direction byte -> index
+            const int dirs = m_vids[o.nvid].directionsCount;
+            if (dirs <= 0)
+                return;
+            const int step = static_cast<std::uint8_t>(256 / dirs);
+            m_ui.setDirection(o.handle, ((((step >> 1) + dir) & 0xff) * dirs) >> 8);
+        };
+        const auto glyph = [&](int c, int x, int y) {   // putcadr(127, c, x, y, 0)
+            const Vid& font = m_vids[ui::vids::Font];
+            const auto* g = std::get_if<Vid::Graphics>(&font.graphicsData);
+            if (fb && g && *g && static_cast<std::size_t>(c) < (*g)->frames.size())
+                hicolor::drawFrame((*g)->frames[static_cast<std::size_t>(c)], x, y, *fb);
+            return g && *g ? static_cast<int>((*g)->width) : 7;
+        };
+        const auto objects = m_ui.objects();   // setDirection edits objects in place
+        for (const auto& o : objects) {
             if (o.list != UiList::StateBar)
                 continue;
-            const int dirs = m_vids[o.nvid].directionsCount;
-            if (o.nvid == 49 && dirs > 0)
-                m_ui.changeAction(o.handle, o.action, std::clamp(hp * (dirs - 1) / maxhp, 0, dirs - 1));
-            else if (o.nvid == 266 && dirs > 0)
-                m_ui.changeAction(o.handle, o.action, std::clamp(globalInt("nweapon"), 0, dirs - 1));
+            if (o.nvid == 266 && info->turretNvid >= 0) {
+                const int tx = ox + o.x - 299, ty = oy + o.y + 225 - 15;
+                int x = tx;
+                for (const char ch : info->turretName)
+                    x += glyph(static_cast<std::uint8_t>(ch), x, ty);
+                for (std::size_t i = 0; i < info->ammo.size(); ++i) {
+                    const std::string digits = std::to_string(info->ammo[i]);   // itoa(v, 10)
+                    int dx = tx + 391 + 48 * static_cast<int>(i);
+                    for (auto it = digits.rbegin(); it != digits.rend(); ++it)
+                        dx -= glyph(static_cast<std::uint8_t>(*it), dx, ty);
+                }
+                const int n = info->turretNvid;
+                const int index = n < 0x5c ? n - 0x58 : n < 0xcf ? n - 0xca : n == 0xcf ? 4 : n - 0xcf;
+                const int dirs = std::max<int>(1, m_vids[o.nvid].directionsCount);
+                setDir(o, (index * 256 + static_cast<std::uint8_t>(256 / dirs)) / dirs);
+            } else if (o.nvid == 61) {
+                if (fb) {
+                    const int left = ox, top = oy, right = ox + 639, bottom = oy + 479;   // clip rect
+                    for (const auto& d : info->radar) {
+                        const int x = ox + o.x + (d.dx >> 4), y = oy + o.y + (d.dy >> 4);
+                        if (x < left || y < top || x >= right || y >= bottom)
+                            continue;
+                        const RGBA8 c = hicolor::toPixel(d.color);
+                        for (int yy = y; yy <= y + 1; ++yy)
+                            for (int xx = x; xx <= x + 1; ++xx)
+                                if (xx >= 0 && yy >= 0 && xx < fb->extent(1) && yy < fb->extent(0))
+                                    (*fb)[yy, xx] = c;
+                    }
+                }
+                setDir(o, info->enemyDirection >= 0 ? info->enemyDirection : 0);
+            } else if (o.nvid == 49) {
+                if (info->maxHp)
+                    setDir(o, info->hp * 127 / info->maxHp);
+                else if (o.dirIndex != 0)
+                    m_ui.setDirection(o.handle, 0);
+            }
         }
     }
 
@@ -812,16 +915,13 @@ private:
 
     // ---- audio ------------------------------------------------------------------------------------
     // Effect numbers index fw.res sounds from 0, as the original's descriptor table
-    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (sound 0 is a
-    // silent placeholder, nsfx 0 is rejected by 0x408dd0) and nsfx N = number of fw.res
-    // sounds is the single PlayWAV slot.
+    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (nsfx 0 is rejected
+    // by 0x408dd0) and nsfx N = number of fw.res sounds is the single PlayWAV slot
+    // (game/sound_channels.hpp effectSound, checked against the original by sound_oracle_test).
     [[nodiscard]] int playWavSlot() const { return static_cast<int>(m_sounds.size()); }
     [[nodiscard]] const SoundData* sound(int nsfx) const {
-        if (nsfx >= 1 && nsfx < playWavSlot())
-            return &m_sounds[static_cast<std::size_t>(nsfx)];
-        if (nsfx == playWavSlot() && !m_wavs.empty())
-            return &m_wavs.back(); // older WAVs stay alive: voices may still point at them
-        return nullptr;
+        // older WAVs stay alive in m_wavs: voices may still point at them
+        return effectSound(m_sounds, m_wavLoaded && !m_wavs.empty() ? &m_wavs.back() : nullptr, nsfx);
     }
 
     // PlaySFX(n) and UI sounds: full volume, centred (0x4130ca -> 0x408dd0).
@@ -838,7 +938,7 @@ private:
             const int dx = e.x - (cam.x + cam.width / 2), dy = e.y - (cam.y + cam.height / 2);
             m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
         }
-        // Texts are screen sprites of the font's layer (14), after the world's sprites: their
+        // Menus and texts are screen sprites (layers 10..14, after the world's units): their
         // sounds are relative to the centre of the script's screen (0x409ab4).
         for (const auto& e : std::exchange(m_screenSounds, {})) {
             const int dx = e.x - m_screenW / 2, dy = e.y - m_screenH / 2;
@@ -847,18 +947,56 @@ private:
         m_sfx.tact(*m_sink, static_cast<std::uint32_t>(m_engine->clock()));
     }
 
-    // gromada::Mixer as the SoundChannels sink (no mixer: nothing plays, nothing is "playing").
+    // gromada::Mixer as the SoundChannels sink: one DirectSound buffer per channel (no mixer:
+    // nothing plays, nothing is "playing"). Stop pauses the voice, Play resumes it (DirectSound
+    // keeps the position); a one-shot that reached its end plays again from the start.
     struct MixerSink final : SoundSink {
+        struct Buffer {
+            const SoundData* sound = nullptr;
+            int nsfx = 0;
+            std::uint32_t voice = 0;
+            int pan = 0, attenuation = 0; // DirectSound units
+        };
         Mixer* mixer = nullptr;
         Session* session = nullptr;
-        std::uint32_t play(int nsfx, const SoundData& s, float volume, float pan, bool loop) override {
-            if (loop && session) // rare: a looping sound (vehicle engine) starts
-                session->log(LogLevel::Debug, std::format("sfx {} loop start", nsfx));
-            return mixer ? mixer->playSfx(s, volume, pan, loop) : 0;
+        std::array<Buffer, SoundChannels::ChannelCount> buffers{};
+
+        bool load(int ch, int nsfx, const SoundData& s, int source) override {
+            drop(ch);
+            buffers[ch] = {&s, nsfx, 0, 0, 0};
+            if (source >= 0) { // a duplicate starts with the parameters of its source
+                buffers[ch].pan = buffers[source].pan;
+                buffers[ch].attenuation = buffers[source].attenuation;
+            }
+            return true;
         }
-        bool playing(std::uint32_t v) const override { return mixer && mixer->sfxPlaying(v); }
-        void update(std::uint32_t v, float volume, float pan) override { if (mixer) mixer->setSfxVolumePan(v, volume, pan); }
-        void stop(std::uint32_t v) override { if (mixer) mixer->stopSfxVoice(v); }
+        void release(int ch) override { drop(ch); buffers[ch] = {}; }
+        bool playing(int ch) override { return mixer && mixer->sfxPlaying(buffers[ch].voice); }
+        void setPan(int ch, int pan) override { buffers[ch].pan = pan; apply(ch); }
+        void setVolume(int ch, int attenuation) override {
+            if (attenuation > 0 || attenuation < -10000)
+                return; // DSERR_INVALIDPARAM: the volume does not change
+            buffers[ch].attenuation = attenuation;
+            apply(ch);
+        }
+        void play(int ch, bool loop) override {
+            auto& b = buffers[ch];
+            if (!mixer || !b.sound || mixer->resumeSfxVoice(b.voice, loop))
+                return;
+            if (loop && session) // rare: a looping sound (vehicle engine) starts
+                session->log(LogLevel::Debug, std::format("sfx {} loop start", b.nsfx));
+            b.voice = mixer->playSfx(*b.sound, SoundChannels::volumeOf(b.attenuation), SoundChannels::panOf(b.pan), loop);
+        }
+        void stop(int ch) override { if (mixer) mixer->pauseSfxVoice(buffers[ch].voice); }
+        void drop(int ch) {
+            if (mixer && buffers[ch].voice)
+                mixer->stopSfxVoice(buffers[ch].voice);
+        }
+        void apply(int ch) {
+            const auto& b = buffers[ch];
+            if (mixer && b.voice)
+                mixer->setSfxVolumePan(b.voice, SoundChannels::volumeOf(b.attenuation), SoundChannels::panOf(b.pan));
+        }
     };
 
     // PlayAudio(t1..t4) / PlayMusic: CD playlist (docs/re/runtime.md §9).
@@ -901,20 +1039,27 @@ private:
         m_mixer->setMusicVolume(m_movieActive ? 0.0f : m_coreMusic * m_scriptMusic / 100.0f);
     }
 
+    // PlayWAV (0x408c50): one slot (N), looping, queued at once; the same file already playing
+    // is left alone (game/sound_channels.hpp). Returns N, 0 if the file cannot be opened.
     int playWav(const std::string& file) {
-        auto path = script::resolveCaseInsensitive(m_config.gameDir, file);
-        if (!path)
-            return 0;
-        try {
-            std::ifstream in{*path, std::ios::binary};
-            const auto size = std::filesystem::file_size(*path);
-            BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
-            m_wavs.emplace_back(reader);
-            return playWavSlot(); // the original has one slot: a new WAV replaces the previous one
-        } catch (const std::exception& e) {
-            log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
-            return 0;
-        }
+        using WavLoad = SoundChannels::WavLoad;
+        return m_sfx.playWav(*m_sink, file, [&] {
+            m_wavLoaded = false; // the original frees the previous WAV first
+            auto path = script::resolveCaseInsensitive(m_config.gameDir, file);
+            if (!path)
+                return WavLoad::NotFound;
+            try {
+                std::ifstream in{*path, std::ios::binary};
+                const auto size = std::filesystem::file_size(*path);
+                BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
+                m_wavs.emplace_back(reader);
+                m_wavLoaded = true;
+                return WavLoad::Loaded;
+            } catch (const std::exception& e) {
+                log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
+                return WavLoad::Invalid; // opened but not playable: slot N stays empty
+            }
+        });
     }
 
     // ---- movies -----------------------------------------------------------------------------------
@@ -963,6 +1108,76 @@ private:
                 m_ui.fonts().drawText(c, ui::vids::Font, ox + o.x - 3, oy + o.y - 5, fb);
                 return;
             }
+    }
+
+    // ---- controls (issue #16, session_controls.hpp) -----------------------------------------------
+    WeaponSlots currentWeapons() {
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        const int flagman = f ? f->toInt() : 0;
+        return weaponSlots([&](std::string_view name, int i) { return globalInt(name, i); }, [&](int index) {
+            const std::array<script::Value, 4> a{script::Value{flagman}, script::Value{64}, script::Value{index}, script::Value{0}};
+            const auto v = flagman ? m_engine->callBuiltin(67, a) : std::nullopt; // Action(act_getammo)
+            return v ? v->toInt() : 0;
+        });
+    }
+
+    void followCamera(const OriginalInput& rec, double dt) {
+        if (!m_followOn || m_demo || m_scrollLock || m_ui.hasMenu())
+            return;
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        if (!f || f->toInt() == 0)
+            return;
+        const std::array<script::Value, 1> unit{*f};
+        const auto x = m_engine->callBuiltin(109, unit), y = m_engine->callBuiltin(110, unit);
+        if (!x || !y)
+            return;
+        constexpr int band = 5; // the engine's edge scroll (0x415e8d)
+        const bool edge = rec.mouseScreenX <= band || rec.mouseScreenY <= band || rec.mouseScreenX >= m_viewW - 1 - band ||
+                          rec.mouseScreenY >= m_outH - 1 - band;
+        m_follow.update(m_engine->camera(), x->toInt(), y->toInt(), static_cast<float>(dt), edge);
+    }
+
+    // The selected weapon for a moment after a change, when the status bar is hidden.
+    void drawWeaponHud(FramebufferRef fb, double dt) {
+        if (m_demo || !m_vm || !m_vm->hasGlobal("nweapon") || !m_vm->hasGlobal("weapon")) {
+            m_weaponHud.reset();
+            return;
+        }
+        const std::array<script::Value, 1> army{script::Value{0}};
+        const auto f = m_engine->callBuiltin(85, army);
+        if (!f || f->toInt() == 0) {
+            m_weaponHud.reset();
+            return;
+        }
+        const WeaponSlots w = currentWeapons();
+        const int requested = m_pc.weaponPending ? m_pc.weaponSlot : w.current;
+        bool poke = false;
+        for (int k = 0; k < 4; ++k)
+            poke |= m_pc.key(static_cast<input::Key>(static_cast<int>(input::Key::Num1) + k)).pressed;
+        if (!m_weaponHud.update(w.current, requested, static_cast<float>(dt), poke) || m_stateBar || m_ui.hasMenu())
+            return;
+        const int head = w.nvid[static_cast<std::size_t>(std::clamp(requested, 0, 3))];
+        if (!head)
+            return;
+        const std::array<script::Value, 1> nvid{script::Value{head}};
+        const auto name = m_engine->callBuiltin(124, nvid); // GetVidName
+        // ammunition index of the head as the engine counts it (act_coor_attack)
+        const int index = head < 0x5d ? head - 0x58 : head < 0xcf ? head - 0xca : head == 0xcf ? 4 : head - 0xcf;
+        const std::array<script::Value, 4> a{*f, script::Value{64}, script::Value{index}, script::Value{0}};
+        const auto ammoValue = m_engine->callBuiltin(67, a);
+        const int ammo = ammoValue ? ammoValue->toInt() : -1;
+        const std::string text = WeaponHud::label(requested, name ? name->toString() : std::string{}, ammo,
+                                                  requested != w.current);
+        // darkened box behind the text: the game font is green, like much of the scenery
+        const int x0 = 6, y0 = m_outH - 30, x1 = std::min(m_viewW, 18 + 7 * static_cast<int>(text.size())), y1 = m_outH - 8;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                auto& p = fb[y, x];
+                p = RGBA8{{static_cast<std::uint8_t>(p.r >> 2), static_cast<std::uint8_t>(p.g >> 2), static_cast<std::uint8_t>(p.b >> 2)}, 255};
+            }
+        m_ui.fonts().drawText(text, ui::vids::Font, 12, m_outH - 24, fb);
     }
 
     [[nodiscard]] bool textEntry() const {
@@ -1015,6 +1230,9 @@ private:
     std::unique_ptr<script::Interpreter> m_vm;
     std::optional<script::GlobalSnapshot> m_carry; // cells carried across map loads
     InputRecordBuilder m_inputBuilder;
+    FollowCamera m_follow;     // issue #16
+    bool m_followOn = false;
+    WeaponHud m_weaponHud;
     const input::CursorSet* m_cursors = nullptr;
 
     std::string m_map;
@@ -1044,17 +1262,19 @@ private:
     std::string m_lastMovie;
 
     MixerSink m_sfxSink;
-    SoundSink* m_sink = &m_sfxSink;
+    SoundSink* m_sink = &m_sfxSink;    // replaced by tools (game_trace) through setSoundSink()
     Camera m_soundCam;                 // camera during tactWorld() (positional sounds)
-    std::vector<ui::ScreenSound> m_screenSounds;   // typewriter sounds of the frame   // replaced by tools (game_trace) through setSoundSink()
+    std::vector<ui::ScreenSound> m_screenSounds;   // menu and text sounds of the frame
     SoundChannels m_sfx{[this](int n) { return sound(n); },
                         [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV
+    bool m_wavLoaded = false;      // m_wavs.back() is in slot N
     std::array<int, 4> m_playlist{};
     bool m_playing = false;
     int m_scriptSfx = 100, m_scriptMusic = 100;
     float m_coreMusic = 0.8f, m_coreSfx = 1.0f;
 
+    std::uint32_t m_messageClock = 0;   // statebar +0x24: time of the last Message()
     bool m_scrollLock = false, m_stateBar = false, m_detail = true, m_exit = false;
     int m_cursorType = 0, m_net = 0;
     std::size_t m_scriptErrors = 0, m_warnings = 0, m_unknown = 0;

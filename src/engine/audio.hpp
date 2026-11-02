@@ -49,7 +49,23 @@ public:
     }
 
     [[nodiscard]] bool sfxPlaying(std::uint32_t id) const noexcept {
-        return id && std::ranges::any_of(m_voices, [id](const Voice& v) { return v.id == id; });
+        return id && std::ranges::any_of(m_voices, [id](const Voice& v) { return v.id == id && !v.paused; });
+    }
+    // DirectSound Stop/Play: a paused voice keeps its position and resumes from it. A one-shot
+    // voice that reached its end is gone: resumeSfxVoice() returns false (play it again).
+    void pauseSfxVoice(std::uint32_t id) noexcept {
+        for (auto& v : m_voices)
+            if (v.id == id)
+                v.paused = true;
+    }
+    bool resumeSfxVoice(std::uint32_t id, bool loop) noexcept {
+        for (auto& v : m_voices)
+            if (id && v.id == id) {
+                v.paused = false;
+                v.loop = loop;
+                return true;
+            }
+        return false;
     }
     void setSfxVolumePan(std::uint32_t id, float volume, float pan) noexcept {
         for (auto& v : m_voices)
@@ -103,6 +119,7 @@ private:
         float gainL = 1.0f, gainR = 1.0f;
         std::uint32_t id = 0;
         bool loop = false;
+        bool paused = false;
     };
 
     static void setGains(Voice& v, float volume, float pan) noexcept {
@@ -124,6 +141,8 @@ private:
     void mixVoices(std::size_t frames) {
         const float master = m_sfxVolume * 0.6f; // headroom: several voices at once
         for (auto& v : m_voices) {
+            if (v.paused)
+                continue;
             for (std::size_t i = 0; i < frames; ++i) {
                 while (v.loop && v.pos >= static_cast<double>(v.frames))
                     v.pos -= static_cast<double>(v.frames); // seamless wrap of looping sounds

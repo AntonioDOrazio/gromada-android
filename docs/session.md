@@ -32,12 +32,15 @@ Tutti header-only. La sessione dipende dal contratto, non da un'implementazione 
    `GetNetKey`, `GetNetInputState` leggono lo stesso record.
 3. `main()` dello script (una volta per frame, da capo).
 4. `engine.draw()` e sopra menu, testi e barra di stato (l'originale disegna prima di
-   aggiornare: si vede lo stato del frame precedente); poi `engine.tactWorld()`.
+   aggiornare: si vede lo stato del frame precedente); poi `engine.tactWorld()` e le animazioni
+   degli oggetti di schermo (che nell'originale sono sprite del mondo) e la macchina da scrivere.
 5. Aggiornamento dei menu (vedi sotto): se consuma il click, il record viene rimandato al motore
    con i bit azzerati prima di `tactPlayers()` (come `0x40c1d0`, che azzera i bit prima di
-   `0x415e20`); prima, i tick di menu e testi (animazioni, macchina da scrivere); `tactPlayers()`, `tactGroupAi()`,
-   `updateCamera()`; suoni (motore + `PlaySFX` + menu).
-6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine), cursore.
+   `0x415e20`; prima, i tick di menu e testi come sprite di `World::Tact`); `tactPlayers()` e subito dopo la barra di stato (`StateBar::Tact`, chiamata
+   dall'originale dentro `Player::Tact`), `tactGroupAi()`, `updateCamera()`; suoni (motore +
+   `PlaySFX` + menu).
+6. `engine.drawScreenEffects()` (effetti `Effect()` su tutta l'immagine, `docs/engine.md` §8),
+   cursore.
 7. **Dopo il frame**, nell'ordine in cui lo script li ha chiesti (in originale sono
    `PostMessage`): `Load()`, `PlayAVI()`, `SetGraphMode()`, `Exit()`.
 
@@ -129,25 +132,52 @@ Dal disassemblato:
 - `MenuAction(nvid,dir,azione)` agisce sugli oggetti della lista con quel nvid e indice.
 - **Disegno**: strati 0..15, dentro lo strato per y, z, x e ordine di creazione (ordine
   d'inserimento delle liste del mondo); i testi sono sprite dello strato del font (14).
-- **Animazioni e suoni** (verificati sulle demo, issue #13): gli oggetti di menu e i testi sono
-  sprite di schermo dell'originale e ricevono il tick come gli altri (`0x409a20`): al più uno per
-  frame, quando sono passati `frameDuration` ms di orologio di gioco, mai nel frame della
-  creazione, anche in pausa; avanzano di un fotogramma; un vid con animazione di nascita parte in
-  `act_birth` e poi sta fermo; `act_death` rimuove l'oggetto a fine animazione. Il suono
-  dell'azione suona al **tick successivo** al cambio d'azione (`ChangeAction` azzera il bit "suono
-  emesso" anche quando l'azione non cambia), posizionale rispetto al centro dello schermo degli
-  script (pan `4·dx`, attenuazione `−2·max(|dx|,|dy|)`), dopo i suoni del mondo. I tick avvengono
-  prima dell'aggiornamento dei menu del frame, come `World::Tact` prima di `0x40c1d0`.
+- **Animazioni** (verificate nel disassemblato, issue #15): gli oggetti di schermo sono sprite
+  del mondo e si animano come `SpriteTact` (`0x409a20`) sull'orologio di gioco, anche in pausa
+  (sprite di schermo): un fotogramma quando `orologio − lastTact ≥ frameDuration`, controllato
+  una volta per frame, senza recupero (`lastTact = orologio`; a 60 fps un vid da 71 ms avanza
+  ogni 5 frame, come gli sprite del motore). Fine di `act_birth` → `act_stand`; fine di
+  `act_death` → l'oggetto sparisce; le altre azioni (luci dei pulsanti, indicatori della mappa
+  delle missioni) ricominciano. `ChangeAction` (`0x40b3e0`) riarma sempre il suono (`state & 0x200`,
+  azzerato anche se azione e direzione non cambiano) e, se cambiano, riparte dal primo
+  fotogramma; il suono suona al primo tick successivo (le Image non lo riarmano a fine ciclo),
+  **posizionale** rispetto al centro dello schermo degli script (pan `4·dx`, attenuazione
+  `−2·max(|dx|,|dy|)`, `0x409ab4`), dopo i suoni del mondo; i testi (macchina da scrivere,
+  `TextManager::tick`) allo stesso modo. Verificato sulle tre demo (issue #13). Il pulsante cliccato ha `lastTact −= 1000` (`0x40c2c4`): avanza al frame dopo. `Init`
+  (`0x40bf30`) fa partire un'animazione di attesa da un fotogramma casuale (`rand()` condiviso
+  con il motore; per le Image solo se ha più di 2 fotogrammi). `Pause(0)` riporta indietro
+  l'orologio e i timer degli oggetti con lui. Il disegno usa il renderer a 16 bit del motore
+  (`game/hicolor.hpp`: trasparenza esatta della barra di stato e del vetro dell'interfaccia).
 
 ## Testi e barra di stato
 
 `PrintText`/`PrintFile` usano `ui::TextManager` (font, macchina da scrivere, suoni 23/24: vedi
 `docs/ui.md`); `PrintFile` cerca nella cartella del gioco e poi in quella di salvataggio.
 `StateBar(1)` carica `statebar.men` in una lista propria (non cliccabile) e abilita `Message`.
-Contenuto della barra (**ipotesi**, l'originale non è analizzato): la direzione della barra dei
-punti vita (vid 49, 79 direzioni) è `hp · 78 / maxhp` (hp del flagman da `Action(act_gethp)`,
-`maxhp` globale dello script), la direzione della barra (vid 266) è `nweapon`; `Message` scrive
-in (24,452). `Message` non è usata dagli script del gioco.
+Tab (Select sul pad) la mostra e la nasconde (`HEADER.INI`: `opt_player ^= OPT_STATEBAR`).
+
+Contenuto (`StateBar::Tact` `0x416de0`, verificato nel disassemblato, issue #15). L'originale la
+esegue dentro `Player::Tact` del giocatore locale, quindi solo con un flagman e fuori dalla pausa;
+la sessione la esegue subito dopo `tactPlayers()` con i dati di `Engine::stateBarInfo()`. Per
+ogni oggetto della barra, in ordine di lista (`statebar.men`: 266, 61, 49):
+- **266** (la barra, formato 8 con trasparenza, 5 direzioni), solo se il flagman ha una testa
+  d'arma (sotto-oggetto): il nome del vid della testa e i 5 contatori di munizioni (`s16` a
+  `+0x54`, il quinto sono i salti), scritti con il font 127 direttamente nell'immagine
+  (`putcadr`, angolo in alto a sinistra, passo 7 px) a y = 266.y + 225 − 15: il nome da
+  x = 266.x − 299, i numeri (`itoa`) allineati a destra in x = 266.x − 299 + 391 + 48·i; la
+  direzione è l'indice dell'arma ricavato dal nvid della testa (`nvid−88` sotto 92, `nvid−202`
+  sotto 207, 4 per 207, altrimenti `nvid−207`), convertito come `(i·256 + 256/dirs)/dirs`;
+- **61** (radar, 32 direzioni): per ogni oggetto della griglia entro ±464 px dal flagman (escluso
+  lui) un punto 2×2 in (radar + Δ/16) entro il rettangolo di ritaglio: giallo (200,200,50) per
+  gli `AviaMissile`, aviazione ciano (56,145,165) dell'armata 1 o (35,88,100) delle altre, mine
+  rosse (200,50,50), unità di terra verdi (83,165,54) dell'armata 1 o grigie (`0x7bef`) delle
+  altre; la direzione punta all'unità più vicina dell'armata 1 (distanza ≤ 60000), 0 se nessuna;
+- **49** (punti vita, 79 direzioni): direzione `hp · 127 / maxHP` del vid del flagman (metà
+  delle direzioni), 0 se `maxHP` è 0.
+`SetDirection` (`0x40b610`) riparte dal primo fotogramma: questi oggetti non si animano.
+`Message(testo)` (`0x416cf0`) scrive con un'unità font creata da `StateBar(1)` e spostata in
+(266.x − 299, 266.y + 225) = (21, 465): primo glifo in (21, 466); dopo 5 s (orologio di gioco)
+dall'ultimo `Message` il testo torna vuoto. `Message` non è usata dagli script del gioco.
 
 ## Input
 
@@ -168,6 +198,18 @@ annullerebbe la conferma.
 
 Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 `Engine::cursorAt()`; in demo è disegnato nella posizione registrata.
+
+Comandi sul gioco vero (issue #16, `src/game/session_controls.hpp`, dettagli in `docs/controls.md`):
+- `controlsFrame()` dà al core, prima di ogni frame, giocatore e bersagli in coordinate
+  dell'immagine (`Engine::playerAim()`), gittata dell'arma, armi selezionabili (`weapon[k]` dello
+  script + munizioni) e arma in uso (`nweapon`).
+- Il record di input porta gli **ordini di movimento** dello schema diretto (`PcState::moveOrder`:
+  click sinistro nel punto dell'ordine, senza tasto destro in quel frame) e tiene fuori dalla
+  fascia di scorrimento ai bordi (6 px) il mouse "schermo" dei tocchi e del punto mirato
+  (`PcState::edgeScroll`), lasciando esatto il punto nel mondo; nei menu non tocca nulla.
+- `setCameraFollow(bool)`: prima di `updateCamera()` la vista segue il giocatore (zona morta,
+  anticipo nella direzione di marcia); non in demo, nei menu e con `ScrollLock(1)`.
+- Indicatore dell'arma (barra di stato nascosta): 2 s dopo un cambio o una pressione di `1`-`4`.
 
 ## Salvataggi
 
@@ -203,8 +245,8 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 ## Audio e filmati
 
 - `PlaySFX(n)`: effetto `n` = suono di indice `n` di `fw.res` (**da 0**: 0x408730 carica il suono *i*
-  nel descrittore *i*; 0x408dd0 accetta `1..N`, il suono 0 è un segnaposto muto e `N` è lo slot
-  di `PlayWAV`). Fino alla correzione del 2/11/2026 il core suonava `fw.res[n−1]`: ogni effetto
+  nel descrittore *i*; 0x408dd0 accetta `1..N`, il suono 0 non è suonabile e `N` è lo slot
+  di `PlayWAV`; mappatura in `game::effectSound`, verificata sulla tabella dell'originale). Fino alla correzione del 2/11/2026 il core suonava `fw.res[n−1]`: ogni effetto
   era quello accanto, e i loop (motori al minimo 40, teletrasporto 14) diventavano colpi ripetuti;
   a volume pieno e centrato. Suoni del motore (`takeSounds`, uno per ciclo d'animazione
   dell'azione) con pan `4·dx` e attenuazione `−2·max(|dx|,|dy|)` in centesimi di dB rispetto al
@@ -214,14 +256,23 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
   richieste per frame (sotto −20 dB scartate; richieste uguali di effetti non ciclici fuse),
   **8 canali**, nessuna ripartenza di un effetto partito ≤ 50 ms prima, e a fine frame
   (`tact()`, dopo `updateCamera()`, con l'orologio di gioco) gli effetti ciclici (byte di tipo
-  0 in `fw.res`, `SoundData::kind`: motori dei veicoli 41..47, ecc.) suonano **in loop**: una
+  0 in `fw.res`, `SoundData::kind`: 14, 17, 29, 31 e i motori dei veicoli 40..46) suonano **in loop**: una
   richiesta di un effetto ciclico già in corso aggiorna solo volume e pan e lo tiene vivo; si
   fermano 500 ms dopo l'ultima richiesta. Se le richieste superano i canali liberi si scartano
   le più deboli. Tipo 100 = non posizionale (volume pieno). Prima della issue #17 ogni richiesta
   creava una nuova voce sovrapposta e il motore del veicolo ripartiva da capo a ogni tick
-  (~50 ms): inviluppo periodico e "ronzio" in missione.
+  (~50 ms): inviluppo periodico e "ronzio" in missione. Dalla issue #18 è una porta operazione
+  per operazione, confrontata con l'originale in emulazione (`docs/oracle.md` §8): il sink
+  (`SoundSink`) è un dispositivo DirectSound con un buffer per canale (`load`/`release`/`playing`/
+  `setPan`/`setVolume`/`play`/`stop`, interi in centesimi di dB) e `Stop` conserva la posizione:
+  un motore fermato dopo 500 ms che riparte sullo stesso canale continua da dove era, come
+  nell'originale (prima ricominciava dall'inizio).
+- `PlayWAV(file)` (0x408c50): carica il WAV nello slot `N`, lo accoda subito a volume pieno e lo
+  suona **in loop** (escluso da `StopSFX()` e dalla scadenza); lo stesso file già in corso non
+  riparte; `StopMusic()` lo ferma. Prima della #18 il WAV veniva caricato ma mai suonato.
 - Il `Mixer` (`src/engine/audio.hpp`) dà a ogni voce un id (`playSfx` → id, `sfxPlaying`,
-  `setSfxVolumePan`, `stopSfxVoice`); le voci cicliche ripartono dal campione 0 senza
+  `setSfxVolumePan`, `stopSfxVoice`, `pauseSfxVoice`/`resumeSfxVoice` per `Stop`/`Play`); il
+  `MixerSink` della sessione traduce pan e attenuazione DirectSound in guadagni; le voci cicliche ripartono dal campione 0 senza
   discontinuità (interpolazione tra l'ultimo e il primo campione). `SessionConfig::log` riceve
   a livello Debug `sfx <n> loop start` a ogni avvio di un effetto ciclico (lo usa
   `tests/core_sfx_loop.sh`).
@@ -259,10 +310,13 @@ I test della sessione usano un motore finto (`session_test`) o `ViewerEngine`
 (`session_data_test`); al merge basta costruire lì il motore vero.
 
 Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
+- `playerAim()` (issue #16): flagman, gittata dell'arma in uso e unità colpibili, per i comandi;
 - `setScrollLock(bool)`: lo stato di `ScrollLock()` ferma lo scorrimento ai bordi, il guinzaglio
   e i tasti `+`/`-`, che sono del motore;
 - `drawScreenEffects(FramebufferRef)`: gli effetti di `Effect()` valgono per tutta l'immagine,
   menu compresi, quindi vanno disegnati dopo i menu.
+- `stateBarInfo()` (issue #15): i dati del mondo che `StateBar::Tact` legge (punti vita, testa
+  d'arma, munizioni, punti del radar, nemico più vicino); `nullopt` senza flagman o in pausa.
 
 ## Core libretro
 
@@ -287,7 +341,9 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
 - `sound_channels_test` (sempre): scheduler degli effetti con un sink finto (loop tenuto vivo e
   fermato dopo 500 ms, guardia di 50 ms, 8 canali e scarto dei più deboli, formula di fusione,
   tipo 100, `StopSFX`) e voci cicliche del `Mixer` (giunzione senza discontinuità, volume/pan,
-  stop). `resources_test` controlla il byte di tipo dei 47 effetti di `fw.res`.
+  stop, pausa e ripresa). `resources_test` controlla il byte di tipo dei 47 effetti di `fw.res`.
+- `sound_oracle_test` (sempre; con `GROMADA_DATA` anche la tabella di `fw.res`): 1355 sequenze di
+  eventi con le chiamate DirectSound dell'originale, riprodotte esattamente (issue #18).
 - `core_sfx_loop`, `core_sfx_loop_120fps` (con `GROMADA_DATA`, `tests/core_sfx_loop.sh`): livello
   1 col veicolo (ELEPHANT) mosso da ordini di movimento per ~15 s; il motore (effetto 43) deve
   partire una volta sola. Misura (issue #17, livello 1 a 60/120 fps): prima 128/147 avvii del
@@ -297,8 +353,8 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
 
 ## Ipotesi e domande aperte
 
-1. Animazioni degli oggetti di menu e ritorno da `act_birth`/`act_menupress*` (sopra).
-2. Contenuto della barra di stato e posizione di `Message`.
+1. (Chiusa, issue #15) Animazioni degli oggetti di menu: verificate, vedi sopra.
+2. (Chiusa, issue #15) Contenuto della barra di stato e posizione di `Message`: verificati.
 3. Disegno: menu e testi sono disegnati sopra tutto il mondo; nell'originale sono negli stessi
    strati degli sprite (uno sprite del mondo di strato ≥ 10 coprirebbe la lente). Raro.
 4. Ripetizione dei tasti: tempi predefiniti di Windows (ritardo 1, velocità ~15/s).

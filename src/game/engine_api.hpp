@@ -39,9 +39,37 @@ struct SoundEvent {
     int x = 0, y = 0;
 };
 
+// What StateBar::Tact (0x416de0) reads from the world for the local player's status bar
+// (issue #15). Colours are 16-bit RGB565 values of the original (game/hicolor.hpp).
+struct StateBarInfo {
+    int hp = 0;                  // flagman hp (sprite +0x3f)
+    int maxHp = 0;               // vid maxHP (+0x2d); 0 = the hp bar is reset to direction 0
+    int turretNvid = -1;         // the flagman's sub-object (weapon head), -1 none
+    std::string turretName;      // its vid name (CP866 bytes)
+    std::array<int, 5> ammo{};   // s16 counters at +0x54 (the fifth is the jumps)
+    struct Dot { int dx = 0, dy = 0; std::uint16_t color = 0; };
+    std::vector<Dot> radar;      // objects around the flagman: world offset, colour
+    int enemyDirection = -1;     // GetDirection to the nearest enemy unit (<= 60000), -1 none
+};
+
 struct Camera {
     int x = 0, y = 0;            // top-left corner of the view, world pixels
     int width = 640, height = 480;
+};
+
+// What the local player can shoot at (issue #16: aim assist of the direct control scheme,
+// weapon range for the aim point, automated tests). World coordinates.
+struct PlayerAim {
+    struct Target {
+        UnitId id = 0;
+        int x = 0, y = 0;             // a point that puts the unit under the cursor (cursorAt → Fight)
+        int groundX = 0, groundY = 0; // the unit on the ground (distances, ranges)
+        int hp = 0;
+    };
+    bool valid = false;          // false: no local flagman (menus, cutscenes)
+    int flagmanX = 0, flagmanY = 0;
+    int weaponRange = 0;         // current weapon, game metric max(|dx|, 1.5·|dy|); 0 = unknown
+    std::vector<Target> targets; // hostile units the current weapon can hit, anywhere on the map
 };
 
 class Engine {
@@ -96,6 +124,13 @@ public:
     // after it has drawn menus, texts and the status bar over draw()'s output, just
     // before the cursor.
     virtual void drawScreenEffects(FramebufferRef framebuffer) { (void)framebuffer; }
+    // Status bar data of the local player, read at the time the original runs StateBar::Tact
+    // (inside Player::Tact, right after tactPlayers()). nullopt when the original would not
+    // run it: no flagman, paused, or an engine that does not provide it.
+    [[nodiscard]] virtual std::optional<StateBarInfo> stateBarInfo() { return std::nullopt; }
+    // Local player's flagman, weapon range and attackable units (issue #16, read-only query
+    // for the controls: aim assist and the aim point at weapon range). Default: nothing known.
+    [[nodiscard]] virtual PlayerAim playerAim() const { return {}; }
 };
 
 // Engine builtin IDs (extern IDs of maps/HEADER.INI). Everything else belongs to the session.

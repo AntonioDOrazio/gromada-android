@@ -79,30 +79,59 @@ void sprite(std::string& out, const Sprite& s, int layer, int parent) {
 // scheduler sees the same "finished" channels on both sides.
 struct TraceSink final : SoundSink {
     const Engine* engine = nullptr;
-    struct Voice { std::uint32_t start = 0, duration = 0; bool loop = false, active = false; };
-    std::vector<Voice> voices{Voice{}};
-    std::uint32_t play(int, const SoundData& s, float, float, bool loop) override {
+    std::string* audio = nullptr;   // the frame's audio entries
+    struct Buffer {
+        bool loaded = false, playing = false, loop = false;
+        int nsfx = 0, pan = 0, att = 0;
+        std::uint32_t duration = 0, start = 0;
+    };
+    std::array<Buffer, SoundChannels::ChannelCount> buffers{};
+    std::size_t updateBegin = 0, updateEnd = 0;   // last 'u' entry, folded into a following play
+    int updateChannel = -1;
+
+    std::uint32_t now() const { return static_cast<std::uint32_t>(engine->clock()); }
+    static std::uint32_t durationOf(const SoundData& s) {
         std::size_t samples = 0;
         std::visit([&](const auto& v) { samples = v.size(); }, s.waveData);
         const std::uint64_t frames = s.numChannels ? samples / s.numChannels : samples;
-        const auto dur = s.sampleRate ? static_cast<std::uint32_t>(frames * 1000 / s.sampleRate) : 0u;
-        voices.push_back({static_cast<std::uint32_t>(engine->clock()), dur, loop, true});
-        return static_cast<std::uint32_t>(voices.size() - 1);
+        return s.sampleRate ? static_cast<std::uint32_t>(frames * 1000 / s.sampleRate) : 0u;
     }
-    bool playing(std::uint32_t v) const override {
-        if (v == 0 || v >= voices.size() || !voices[v].active) return false;
-        const auto& x = voices[v];
-        return x.loop || static_cast<std::uint32_t>(engine->clock()) - x.start < x.duration;
+    bool load(int ch, int nsfx, const SoundData& s, int source) override {
+        auto& b = buffers[static_cast<std::size_t>(ch)];
+        b = {};
+        b.loaded = true;
+        b.nsfx = nsfx;
+        b.duration = source >= 0 ? buffers[static_cast<std::size_t>(source)].duration : durationOf(s);
+        return true;
     }
-    void update(std::uint32_t, float, float) override {}
-    void stop(std::uint32_t v) override {
-        // only audible stops are traced (the original's fake DirectSound does the same)
-        if (!playing(v) && stopEntry && audio && audio->size() >= *stopEntry) audio->resize(*stopEntry);
-        stopEntry.reset();
-        if (v < voices.size()) voices[v].active = false;
+    void release(int ch) override { buffers[static_cast<std::size_t>(ch)] = {}; }
+    bool playing(int ch) override {
+        const auto& b = buffers[static_cast<std::size_t>(ch)];
+        return b.playing && (b.loop || now() - b.start < b.duration);
     }
-    std::string* audio = nullptr;              // the frame's audio entries
-    std::optional<std::size_t> stopEntry;      // where the observer appended the last 's'
+    void setPan(int ch, int pan) override { buffers[static_cast<std::size_t>(ch)].pan = pan; }
+    void setVolume(int ch, int att) override {
+        updateBegin = audio->size();
+        *audio += std::format("[\"u\",{},{},{},{}],", ch, buffers[static_cast<std::size_t>(ch)].nsfx, att,
+                              buffers[static_cast<std::size_t>(ch)].pan);
+        updateEnd = audio->size();
+        updateChannel = ch;
+        buffers[static_cast<std::size_t>(ch)].att = att;
+    }
+    void play(int ch, bool loop) override {
+        auto& b = buffers[static_cast<std::size_t>(ch)];
+        if (updateChannel == ch && audio->size() == updateEnd) audio->resize(updateBegin);   // pan+volume+play = one op
+        updateChannel = -1;
+        *audio += std::format("[\"p\",{},{},{},{},{}],", ch, b.nsfx, b.att, b.pan, loop ? 1 : 0);
+        b.playing = true;
+        b.loop = loop;
+        b.start = now();
+    }
+    void stop(int ch) override {
+        // only audible stops are traced (like the original's fake DirectSound)
+        if (playing(ch)) *audio += std::format("[\"s\",{},{}],", ch, buffers[static_cast<std::size_t>(ch)].nsfx);
+        buffers[static_cast<std::size_t>(ch)].playing = false;
+    }
 };
 
 struct Options {
@@ -184,11 +213,6 @@ int main(int argc, char** argv) {
     channels.requestObserver = [&](int nsfx, int pan, int att) {
         audio += std::format("[\"r\",{},{},{}],", nsfx, pan, att);
     };
-    channels.channelObserver = [&](char op, int ch, int nsfx, int att, int pan, bool loop) {
-        if (op == 's') { sink.stopEntry = audio.size(); audio += std::format("[\"s\",{},{}],", ch, nsfx); }
-        else if (op == 'u') audio += std::format("[\"u\",{},{},{},{}],", ch, nsfx, att, pan);
-        else audio += std::format("[\"p\",{},{},{},{},{}],", ch, nsfx, att, pan, loop ? 1 : 0);
-    };
 
     session.playDemo(opt.demo);
     if (!session.demoPlaying()) { std::fprintf(stderr, "demo %d did not start\n", opt.demo); return 1; }
@@ -202,6 +226,7 @@ int main(int argc, char** argv) {
         builtins.clear();
         posted.clear();
         audio.clear();
+        sink.updateChannel = -1;
         const auto ticks = session.ticks();
         // Real time of the call = the recorded step (plus 1 us): every call replays exactly one
         // record, and what the session times with real time (typewriter, menu animations)

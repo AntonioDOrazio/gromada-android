@@ -20,6 +20,8 @@ inline constexpr retro_variable coreOptions[] = {
     {"gromada_cursor_precision", "Precisione stick; Normale|Alta|Lineare"},
     {"gromada_pointer", "Touchscreen e mouse; Entrambi|Solo touchscreen|Solo mouse|Disattivati"},
     {"gromada_keyboard", "Tastiera fisica; Disattivata|Attiva"},
+    {"gromada_camera", "Telecamera; Automatica (segue il giocatore nello schema diretto e col touch)|Segue sempre il giocatore|Originale (scorrimento ai bordi)"},
+    {"gromada_aim_assist", "Mira assistita (schema diretto); Attiva|Disattivata"},
 };
 
 // getVar(key) -> value or nullptr (the core's RETRO_ENVIRONMENT_GET_VARIABLE wrapper).
@@ -36,6 +38,9 @@ Settings readSettings(GetVar&& getVar) {
         s.mouse = is(v, "Entrambi") || is(v, "Solo mouse");
     }
     if (const char* v = getVar("gromada_keyboard")) s.keyboard = is(v, "Attiva");
+    if (const char* v = getVar("gromada_camera"))
+        s.camera = is(v, "Segue sempre") ? CameraFollow::Always : is(v, "Originale") ? CameraFollow::Off : CameraFollow::Auto;
+    if (const char* v = getVar("gromada_aim_assist")) s.aimAssist = !is(v, "Disattivata");
     return s;
 }
 
@@ -46,17 +51,17 @@ inline std::span<const retro_input_descriptor> inputDescriptors(Scheme scheme) {
 #define GROMADA_STICK(side, axis, text) \
     {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_##side, RETRO_DEVICE_ID_ANALOG_##axis, text}
 #define GROMADA_COMMON                                                                  \
-    GROMADA_PAD(A, "Muovi / conferma (click sinistro)"),                                \
-    GROMADA_PAD(B, "Attacca (click destro)"),                                           \
     GROMADA_PAD(L, "Arma precedente (tasti 1-4)"),                                      \
     GROMADA_PAD(R, "Arma successiva (tasti 1-4)"),                                      \
     GROMADA_PAD(X, "Invio"),                                                            \
     GROMADA_PAD(START, "Menu (Esc)"),                                                   \
     GROMADA_PAD(SELECT, "Schermo informazioni (TAB)"),                                  \
-    GROMADA_PAD(UP, "Su (freccia)"), GROMADA_PAD(DOWN, "Giu' (freccia)"),               \
-    GROMADA_PAD(LEFT, "Sinistra (freccia)"), GROMADA_PAD(RIGHT, "Destra (freccia)")
+    GROMADA_PAD(UP, "Avanti (freccia su)"), GROMADA_PAD(DOWN, "Indietro (freccia giu')"), \
+    GROMADA_PAD(LEFT, "Gira a sinistra (freccia)"), GROMADA_PAD(RIGHT, "Gira a destra (freccia)")
     static constexpr retro_input_descriptor cursor[] = {
         GROMADA_COMMON,
+        GROMADA_PAD(A, "Muovi / conferma (click sinistro)"),
+        GROMADA_PAD(B, "Attacca (click destro)"),
         GROMADA_STICK(LEFT, X, "Cursore (orizzontale)"),
         GROMADA_STICK(LEFT, Y, "Cursore (verticale)"),
         GROMADA_STICK(RIGHT, X, "Cursore lento, preciso (orizzontale)"),
@@ -64,8 +69,10 @@ inline std::span<const retro_input_descriptor> inputDescriptors(Scheme scheme) {
     };
     static constexpr retro_input_descriptor direct[] = {
         GROMADA_COMMON,
-        GROMADA_STICK(LEFT, X, "Movimento (frecce sinistra/destra)"),
-        GROMADA_STICK(LEFT, Y, "Movimento (frecce su/giu')"),
+        GROMADA_PAD(A, "Vai al punto mirato / conferma (click sinistro)"),
+        GROMADA_PAD(B, "Spara al punto mirato (click destro)"),
+        GROMADA_STICK(LEFT, X, "Guida (ordini di movimento, orizzontale)"),
+        GROMADA_STICK(LEFT, Y, "Guida (ordini di movimento, verticale)"),
         GROMADA_STICK(RIGHT, X, "Mira, in fondo spara (orizzontale)"),
         GROMADA_STICK(RIGHT, Y, "Mira, in fondo spara (verticale)"),
     };
@@ -93,14 +100,18 @@ inline RawInput pollRaw(retro_input_state_t state, const Settings& s) {
                      axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y)};
 
     if (s.touch) {
-        // [-0x7fff, 0x7fff] across the game image; fingers listed until PRESSED is 0.
+        // [-0x7fff, 0x7fff] across the game image (RetroArch maps the viewport, so the black
+        // bars of a 4:3 picture on a 16:9 screen are outside). A finger off the picture reads
+        // as not pressed (x/y = -0x8000 on Android): skip it, the others still count.
         for (unsigned i = 0; i < in.touches.size(); ++i) {
             if (!state(0, RETRO_DEVICE_POINTER, i, RETRO_DEVICE_ID_POINTER_PRESSED))
-                break;
+                continue;
+            const int x = state(0, RETRO_DEVICE_POINTER, i, RETRO_DEVICE_ID_POINTER_X);
+            const int y = state(0, RETRO_DEVICE_POINTER, i, RETRO_DEVICE_ID_POINTER_Y);
+            if (x == -0x8000 || y == -0x8000)
+                continue;
             auto norm = [](int v) { return std::clamp((v + 0x7fff) / float(2 * 0x7fff), 0.0f, 1.0f); };
-            in.touches[i] = {norm(state(0, RETRO_DEVICE_POINTER, i, RETRO_DEVICE_ID_POINTER_X)),
-                             norm(state(0, RETRO_DEVICE_POINTER, i, RETRO_DEVICE_ID_POINTER_Y))};
-            in.touchCount = static_cast<int>(i) + 1;
+            in.touches[static_cast<std::size_t>(in.touchCount++)] = {norm(x), norm(y)};
         }
     }
     if (s.mouse) {
