@@ -346,8 +346,16 @@ void testPause() {
     run(w, 3000);
     CHECK_EQ(static_cast<int>(t->x), x0);   // frozen
     CHECK(w.clock() > c0);                   // GetTime keeps running in the pause menus
+    w.advanceClock(30);                      // a frame without tick before the resume
+    const std::uint32_t last = t->lastTact, shift = w.clock() - c0, gap = w.clock() - last;
+    CHECK(gap >= 30u);
+    CHECK(last > c0);                        // ticked during the pause
     w.pause(false);
     CHECK_EQ(w.clock(), c0);                 // brought back
+    // 0x40ac70: lastTact += pauseStart - curclock for every sprite, even below pauseStart
+    // (issue #13: the demos pause and resume; clamping at pauseStart delayed the next tick)
+    CHECK_EQ(t->lastTact, last - shift);
+    CHECK_EQ(w.clock() - t->lastTact, gap);  // below pauseStart: the time since the tick is kept
     w.advanceClock(71);
     w.tact();
     CHECK(t->x - x0 < 20);                   // no jump forward after the pause

@@ -5,7 +5,7 @@
     python3 -I tools/oracle/compare_traces.py ORIG.jsonl[.gz] CORE.jsonl[.gz] [--at F] [--json OUT]
 
 Report: first divergent frame for each aspect (clock, rand() state, camera, sprite count,
-layer CRCs, dynamic sprites, builtin calls), the first differing sprites/fields/calls with
+layer CRCs, dynamic sprites, builtin calls, sound requests and channel operations), the first differing sprites/fields/calls with
 their values, and statistics over the whole demo (frames with a difference, per field).
 `--at F` prints every difference of frame F. The traces contain game data: keep them, and
 the report, outside the repository.
@@ -65,6 +65,7 @@ def main():
     field_first = {}
     nframes = 0
     examples = []
+    plays = {"orig": collections.Counter(), "core": collections.Counter()}   # (op, nsfx) -> count
     end_note = ""
     go, gc = frames(fo), frames(fc)
     while True:
@@ -128,6 +129,22 @@ def main():
             i = next((i for i, (x, y) in enumerate(zip(ba, bb)) if x != y), min(len(ba), len(bb)))
             mark("builtins", f"call #{i}: orig {ba[i] if i < len(ba) else None} core {bb[i] if i < len(bb) else None} "
                              f"({len(ba)} vs {len(bb)} calls)")
+        ra = [x[1:] for x in a.get("a", []) if x[0] == "r"]
+        rb = [x[1:] for x in b.get("a", []) if x[0] == "r"]
+        oa = [x for x in a.get("a", []) if x[0] != "r"]
+        ob = [x for x in b.get("a", []) if x[0] != "r"]
+        for side, ops in (("orig", oa), ("core", ob)):
+            for x in ops:
+                plays[side][(x[0], x[2])] += 1
+        if ra != rb:
+            if sorted(ra) == sorted(rb):
+                mark("sound-req-order", f"same requests, other order: orig {ra[:6]} core {rb[:6]}")
+            else:
+                mark("sound-req", f"orig {ra[:8]} core {rb[:8]} ({len(ra)} vs {len(rb)})")
+        if oa != ob:
+            i = next((i for i, (x, y) in enumerate(zip(oa, ob)) if x != y), min(len(oa), len(ob)))
+            mark("sound-ops", f"op #{i}: orig {oa[i] if i < len(oa) else None} core {ob[i] if i < len(ob) else None}; "
+                              f"orig {oa[:6]} core {ob[:6]}")
         if a.get("post") != b.get("post"):
             mark("post", f"orig {a.get('post')} core {b.get('post')}")
         if verbose:
@@ -139,6 +156,14 @@ def main():
            "fields": {n: {"frames": field_frames[n], "first_frame": field_first[n][0], "uid": str(field_first[n][1]),
                           "orig": field_first[n][2], "core": field_first[n][3], "sprite": field_first[n][4]}
                       for n in sorted(field_frames, key=lambda n: field_first[n][0])}}
+    sound = {}
+    for key in sorted(set(plays["orig"]) | set(plays["core"]), key=lambda k: (k[0], k[1])):
+        x, y = plays["orig"][key], plays["core"][key]
+        if x != y:
+            sound[f"{key[0]}:{key[1]}"] = [x, y]
+    out["sound_ops_per_nsfx"] = sound
+    out["sound_ops_total"] = {side: {op: sum(v for k, v in c.items() if k[0] == op) for op in "pus"}
+                              for side, c in plays.items()}
     print(f"compared {nframes} frames ({ho.get('demo')}){'; ' + end_note if end_note else ''}")
     if not first:
         print("no difference")
@@ -148,6 +173,11 @@ def main():
         print("sprite fields (frames with a difference, first occurrence):")
         for n, v in out["fields"].items():
             print(f"  {n:9} {v['frames']:5} frames, first at {v['first_frame']} uid {v['uid']}: orig {v['orig']} core {v['core']}")
+    print(f"sound channel operations (p play, u pan/volume, s stop): orig {out['sound_ops_total']['orig']} "
+          f"core {out['sound_ops_total']['core']}")
+    if sound:
+        worst = sorted(sound.items(), key=lambda kv: -abs(kv[1][0] - kv[1][1]))[:12]
+        print("  differing op:nsfx counts (orig, core): " + ", ".join(f"{k} {v[0]}/{v[1]}" for k, v in worst))
     for f, diffs in examples:
         print(f"--- frame {f}")
         for d in diffs:

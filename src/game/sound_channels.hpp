@@ -43,8 +43,16 @@ public:
     SoundChannels(SoundLookup lookup, std::function<int()> soundCount)
         : m_lookup{std::move(lookup)}, m_count{std::move(soundCount)} {}
 
+    // Diagnostics (tools/game_trace): every request() as called, and every channel operation
+    // in the original's units (pan/attenuation in 1/100 dB): 'p' play, 'u' new pan/volume of a
+    // looping sound, 's' stop.
+    std::function<void(int nsfx, int pan, int attenuation)> requestObserver;
+    std::function<void(char op, int channel, int nsfx, int attenuation, int pan, bool loop)> channelObserver;
+
     // 0x408dd0. pan clamped to ±10000; attenuation below -2000 is dropped.
     void request(int nsfx, int pan = 0, int attenuation = 0) {
+        if (requestObserver)
+            requestObserver(nsfx, pan, attenuation);
         const SoundData* s = m_lookup(nsfx);
         if (!s || attenuation < MinAttenuation)
             return;
@@ -84,6 +92,7 @@ public:
         const int last = m_count();
         for (auto& c : m_channels)
             if (c.active && c.nsfx != last) {
+                observe('s', c, 0, 0, false);
                 sink.stop(c.voice);
                 c.active = false;
                 c.voice = 0;
@@ -95,6 +104,7 @@ public:
     void stop(SoundSink& sink, int nsfx) {
         for (auto& c : m_channels)
             if (c.active && c.nsfx == nsfx) {
+                observe('s', c, 0, 0, false);
                 sink.stop(c.voice);
                 c = {};
             }
@@ -124,6 +134,7 @@ public:
             }
             if (s->kind == 0) {
                 if (auto* c = findActive(q.nsfx)) {
+                    observe('u', *c, q.attenuation, q.pan, true);
                     sink.update(c->voice, volumeOf(q.attenuation), panOf(q.pan));
                     c->time = clock;
                     q.nsfx = -1;
@@ -141,6 +152,7 @@ public:
             if (!s || s->kind != 0 || c.nsfx == m_count())
                 continue;
             if (clock - c.time > LoopKeepAliveMs) {
+                observe('s', c, 0, 0, true);
                 sink.stop(c.voice);
                 c.active = false;
                 c.voice = 0;
@@ -166,6 +178,7 @@ public:
                     sink.stop(c->voice);
                 c->voice = sink.play(q.nsfx, *s, volumeOf(q.attenuation), panOf(q.pan), s->kind == 0);
                 c->nsfx = q.nsfx;
+                observe('p', *c, q.attenuation, q.pan, s->kind == 0);
                 c->active = c->voice != 0;
                 c->time = clock;
             }
@@ -198,6 +211,11 @@ private:
     static float panOf(int pan) {
         const float far = 1.0f - std::pow(10.0f, -static_cast<float>(std::abs(pan)) / 2000.0f);
         return pan < 0 ? -far : far;
+    }
+
+    void observe(char op, const Channel& c, int attenuation, int pan, bool loop) {
+        if (channelObserver)
+            channelObserver(op, static_cast<int>(&c - m_channels.data()), c.nsfx, attenuation, pan, loop);
     }
 
     Channel* findActive(int nsfx) {

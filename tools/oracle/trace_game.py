@@ -7,7 +7,8 @@ mechanism, winenv.py for the Win32 environment):
 1. the statically linked MSVC CRT starts normally (heap, stdio, static constructors) up to
    WinMain (0x401550), which is not executed (window, DirectDraw, DirectPlay);
 2. Field::Init (0x415af0) loads fw.res (vids, weapons), the rotation tables and the players,
-   like WinMain does after creating the window; only Sound::Init (DirectSound) is skipped;
+   like WinMain does after creating the window; Sound::Init gets a fake DirectSound
+   (dsound.py) that records the channel operations;
 3. Field::LoadMap (0x4149b0) loads `maps\\demoN.dem`: the original code reads the demo
    header, loads the map with the recorded seed and clock, compiles the script and restores
    the recorded int cells;
@@ -20,7 +21,8 @@ mechanism, winenv.py for the Win32 environment):
 After each frame the world is sampled into one JSON line (see docs/trace-oracle.md):
 clock, rand() state, sprite count, a CRC per z layer over every sprite, the detailed state
 of the "dynamic" sprites (everything but terrain, static scenery, menus and texts) and the
-builtin calls made by the script during the frame. tools/game_trace.cpp writes the same
+builtin calls made by the script during the frame, the sound requests (0x408dd0) and the
+DirectSound channel operations of Sound::Tact (0x408f20) and StopSFX. tools/game_trace.cpp writes the same
 format from our session + engine; tools/oracle/compare_traces.py compares them.
 
 Usage:
@@ -46,6 +48,7 @@ import oracle as oracle_mod  # noqa: E402
 from oracle import Oracle, s32  # noqa: E402
 from unicorn import UC_HOOK_CODE, UcError  # noqa: E402
 from unicorn.x86_const import UC_X86_REG_EIP  # noqa: E402
+from dsound import FakeDirectSound  # noqa: E402
 from winenv import VIRT_BASE, VIRT_SIZE, WINHEAP_BASE, WinEnv, resolve_ci  # noqa: E402
 
 ENTRY = 0x41d2bb            # CRT entry point
@@ -55,6 +58,7 @@ FIELD_INIT = 0x415af0
 LOAD_MAP = 0x4149b0
 FIELD_TACT = 0x4141f0
 SOUND_INIT = 0x4083f0
+SOUND_REQUEST = 0x408dd0    # PlaySFX / PlayPositional(nsfx, pan, attenuation), thiscall
 SPRITE_INIT = 0x40bf30
 BUILTIN_DISPATCH = 0x412b30
 BUILTIN_RETURN = 0x41b118   # instruction after the dispatcher call in the VM
@@ -65,6 +69,7 @@ LAYERS = 0x439cf8
 VIDS_PTR, NVIDS = 0x42df57, 0x42df4f
 VID_SIZE = 0x136
 CAMERA = 0x439cf4           # s16 x, s16 y
+SCREEN_W, SCREEN_H = 0x42da00, 0x42da04
 FIELD_DEMO_PLAY = 0x32f3
 WM_COMMAND, CMD_LOAD = 0x111, 0x9c4c
 
@@ -104,6 +109,7 @@ class Game:
         self.builtins = []       # calls of the current frame
         self.pending = None
         self.posted = []         # PostMessage(WM_COMMAND, CMD_LOAD, name) of the frame
+        self.audio = []          # sound requests (0x408dd0) and channel operations of the frame
         self.arity = self._read_externs()
         # Hooks must exist before the code they watch is first translated: unicorn does not
         # re-translate cached blocks when a hook is added later.
@@ -111,6 +117,7 @@ class Game:
         uc.hook_add(UC_HOOK_CODE, self._on_init, begin=SPRITE_INIT, end=SPRITE_INIT)
         uc.hook_add(UC_HOOK_CODE, self._on_builtin, begin=BUILTIN_DISPATCH, end=BUILTIN_DISPATCH)
         uc.hook_add(UC_HOOK_CODE, self._on_builtin_ret, begin=BUILTIN_RETURN, end=BUILTIN_RETURN)
+        uc.hook_add(UC_HOOK_CODE, self._on_sound_request, begin=SOUND_REQUEST, end=SOUND_REQUEST)
 
     def log(self, s):
         if self.verbose:
@@ -164,8 +171,25 @@ class Game:
         w.stub(u + "PostMessageA", 4, self._post_message)
         w.stub("WINMM.dll!mciSendStringA", 4, self._mci)
         o.w32(0x42be6c, 0x400000)                       # hInstance
-        o.stub(SOUND_INIT, lambda o, a: 0, popped=4)    # Sound::Init(hwnd): no DirectSound
+        # Screen size, set by SVGA::Init (0x404a00, DirectDraw: not run). The demos were
+        # recorded at 640x480 (recorded screen mouse < 640x480, world - screen = camera).
+        o.w32(SCREEN_W, 640)
+        o.w32(SCREEN_H, 480)
+        # Sound::Init (0x4083f0) runs with a fake DirectSound and no mixer/CD volume devices
+        self.dsound = FakeDirectSound(o)
+        self.dsound.ops = self.audio
+        w.stub("DSOUND.dll!1", 3, self._direct_sound_create)
+        for name in ("waveOutGetNumDevs", "auxGetNumDevs"):
+            w.const("WINMM.dll!" + name, 0, 0)
         o.call(FIELD_INIT, [0x1234], conv="thiscall", this=FIELD)
+
+    def _direct_sound_create(self, a):
+        self.o.w32(a(1) & 0xFFFFFFFF, self.dsound.ds)
+        return 0
+
+    def _on_sound_request(self, uc, address, size, user):
+        esp = self.o.reg("esp")
+        self.audio.append(["r", self.o.s32(esp + 4), self.o.s32(esp + 8), self.o.s32(esp + 12)])
 
     def _post_message(self, a):
         msg, wp, lp = a(1), a(2), a(3) & 0xFFFFFFFF
@@ -248,6 +272,7 @@ class Game:
     def frame(self):
         self.builtins = []
         self.posted = []
+        self.audio.clear()       # shared with the fake DirectSound
         self.o.call(FIELD_TACT, [1], conv="thiscall", this=FIELD)
 
     # ------------------------------------------------------------------ sampling
@@ -280,7 +305,7 @@ class Game:
             crcs.append(zlib.crc32(b"".join(crc_data)))
         return {"f": index, "clock": o.u32(CURCLOCK), "rng": o.u32(RAND_STATE), "n": total,
                 "cam": [o.s16(CAMERA), o.s16(CAMERA + 2)], "crc": crcs, "s": sprites,
-                "b": self.builtins}
+                "b": self.builtins, "a": list(self.audio)}
 
     def _sprite(self, out, p, b, layer, cls, parent):
         (x, y, z, d, act, nvid, frame, _, _, state, last_tact,

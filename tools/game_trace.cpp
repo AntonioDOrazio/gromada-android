@@ -2,7 +2,8 @@
 // engine and writes, after every demo tick, the same JSON line as the emulated original
 // (tools/oracle/trace_game.py): clock, rand() state, sprite count, camera, CRC per z layer,
 // the "dynamic" sprites (all but terrain, scenery, menus, texts) and the script's builtin
-// calls. tools/oracle/compare_traces.py compares the two traces (docs/trace-oracle.md).
+// calls, and the sound requests and effect-channel operations of the frame (SoundChannels).
+// tools/oracle/compare_traces.py compares the two traces (docs/trace-oracle.md).
 //
 //   game_trace --data DIR --demo N -o OUT.jsonl[.gz] [--frames N] [--full-at F,F,...]
 //
@@ -71,6 +72,31 @@ void sprite(std::string& out, const Sprite& s, int layer, int parent) {
                        s.nvid, s.x, s.y, s.z, s.direction, s.action, s.frame, s.state, hp, s.speed, s.vz, s.goX,
                        s.goY, s.goZ, s.timer, s.lastTact, ncmd, target, parent);
 }
+
+// Sound sink of the trace: nothing is heard; a voice "plays" for the length of its sound in
+// game-clock milliseconds (looping voices until stopped). The emulated original uses the
+// same model for its fake DirectSound buffers (tools/oracle/dsound.py), so the channel
+// scheduler sees the same "finished" channels on both sides.
+struct TraceSink final : SoundSink {
+    const Engine* engine = nullptr;
+    struct Voice { std::uint32_t start = 0, duration = 0; bool loop = false, active = false; };
+    std::vector<Voice> voices{Voice{}};
+    std::uint32_t play(int, const SoundData& s, float, float, bool loop) override {
+        std::size_t samples = 0;
+        std::visit([&](const auto& v) { samples = v.size(); }, s.waveData);
+        const std::uint64_t frames = s.numChannels ? samples / s.numChannels : samples;
+        const auto dur = s.sampleRate ? static_cast<std::uint32_t>(frames * 1000 / s.sampleRate) : 0u;
+        voices.push_back({static_cast<std::uint32_t>(engine->clock()), dur, loop, true});
+        return static_cast<std::uint32_t>(voices.size() - 1);
+    }
+    bool playing(std::uint32_t v) const override {
+        if (v == 0 || v >= voices.size() || !voices[v].active) return false;
+        const auto& x = voices[v];
+        return x.loop || static_cast<std::uint32_t>(engine->clock()) - x.start < x.duration;
+    }
+    void update(std::uint32_t, float, float) override {}
+    void stop(std::uint32_t v) override { if (v < voices.size()) voices[v].active = false; }
+};
 
 struct Options {
     std::filesystem::path data;
@@ -142,9 +168,24 @@ int main(int argc, char** argv) {
                       "\"state\", \"hp\", \"speed\", \"vz\", \"goX\", \"goY\", \"goZ\", \"timer\", \"lastTact\", \"ncmd\", "
                       "\"target\", \"parent\"]}\n", demoName.c_str());
 
+    TraceSink sink;
+    sink.engine = &engine;
+    session.setSoundSink(&sink);
+    std::string audio;
+    auto& channels = session.soundChannels();
+    channels.requestObserver = [&](int nsfx, int pan, int att) {
+        audio += std::format("[\"r\",{},{},{}],", nsfx, pan, att);
+    };
+    channels.channelObserver = [&](char op, int ch, int nsfx, int att, int pan, bool loop) {
+        if (op == 's') audio += std::format("[\"s\",{},{}],", ch, nsfx);
+        else if (op == 'u') audio += std::format("[\"u\",{},{},{},{}],", ch, nsfx, att, pan);
+        else audio += std::format("[\"p\",{},{},{},{},{}],", ch, nsfx, att, pan, loop ? 1 : 0);
+    };
+
     session.playDemo(opt.demo);
     if (!session.demoPlaying()) { std::fprintf(stderr, "demo %d did not start\n", opt.demo); return 1; }
     builtins.clear();
+    audio.clear();
     input::PcState pc;
     std::size_t frame = 0;
     std::string line;
@@ -152,10 +193,13 @@ int main(int argc, char** argv) {
     while (session.demoPlaying() && (opt.frames == 0 || frame < opt.frames)) {
         builtins.clear();
         posted.clear();
+        audio.clear();
         const auto ticks = session.ticks();
-        // 100 ms of real time per call: always more than the recorded step (<= 71 ms), so
-        // every call replays exactly one record.
-        session.runFrame(pc, 0.1);
+        // Real time of the call = the recorded step (plus 1 us): every call replays exactly one
+        // record, and what the session times with real time (typewriter, menu animations)
+        // advances like the game clock, as in the recording.
+        const int due = session.demo() ? std::max(0, session.demo()->due()) : 0;
+        session.runFrame(pc, due * 0.001 + 1e-6);
         if (session.ticks() == ticks) break;      // the demo ended (end of records)
         if (session.ticks() != ticks + 1) { std::fprintf(stderr, "frame %zu: %llu ticks\n", frame, static_cast<unsigned long long>(session.ticks() - ticks)); return 1; }
 
@@ -193,7 +237,9 @@ int main(int argc, char** argv) {
         line = std::format("{{\"f\":{},\"clock\":{},\"rng\":{},\"n\":{},\"cam\":[{},{}],\"crc\":[", frame, engine.clock(),
                            w.rng().state, total, engine.camera().x, engine.camera().y);
         for (int l = 0; l < World::MaxLayers; ++l) line += std::format("{}{}", l ? "," : "", crcs[static_cast<std::size_t>(l)]);
-        line += "],\"s\":[" + sprites + "],\"b\":[" + b + "]";
+        std::string a = audio;
+        if (!a.empty()) a.pop_back();
+        line += "],\"s\":[" + sprites + "],\"b\":[" + b + "],\"a\":[" + a + "]";
         if (!posted.empty()) {
             line += ",\"post\":[";
             for (std::size_t i = 0; i < posted.size(); ++i) {
