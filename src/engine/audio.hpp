@@ -26,21 +26,38 @@ public:
     void setMusicVolume(float v) noexcept { m_musicVolume = std::clamp(v, 0.0f, 1.0f); }
     void setSfxVolume(float v) noexcept { m_sfxVolume = std::clamp(v, 0.0f, 1.0f); }
 
-    // volume 0..1, pan -1 (left) .. +1 (right)
-    void playSfx(const SoundData& sound, float volume = 1.0f, float pan = 0.0f) {
+    // volume 0..1, pan -1 (left) .. +1 (right). Returns a voice id (0 = not started) that
+    // can be used to follow, update or stop the voice; `loop` repeats the sound until stopped.
+    std::uint32_t playSfx(const SoundData& sound, float volume = 1.0f, float pan = 0.0f, bool loop = false) {
         if (m_voices.size() >= MaxVoices)
             m_voices.erase(m_voices.begin()); // drop the oldest voice
         const auto frames = std::visit([](const auto& v) { return v.size(); }, sound.waveData) / std::max<std::uint16_t>(sound.numChannels, 1);
         if (frames == 0)
-            return;
-        pan = std::clamp(pan, -1.0f, 1.0f);
-        m_voices.push_back(Voice{
+            return 0;
+        if (++m_nextVoiceId == 0)
+            ++m_nextVoiceId;
+        Voice v{
             .sound = &sound,
             .frames = frames,
             .step = static_cast<double>(sound.sampleRate) / m_outRate,
-            .gainL = volume * std::min(1.0f, 1.0f - pan),
-            .gainR = volume * std::min(1.0f, 1.0f + pan),
-        });
+            .id = m_nextVoiceId,
+            .loop = loop,
+        };
+        setGains(v, volume, pan);
+        m_voices.push_back(v);
+        return v.id;
+    }
+
+    [[nodiscard]] bool sfxPlaying(std::uint32_t id) const noexcept {
+        return id && std::ranges::any_of(m_voices, [id](const Voice& v) { return v.id == id; });
+    }
+    void setSfxVolumePan(std::uint32_t id, float volume, float pan) noexcept {
+        for (auto& v : m_voices)
+            if (v.id == id)
+                setGains(v, volume, pan);
+    }
+    void stopSfxVoice(std::uint32_t id) {
+        std::erase_if(m_voices, [id](const Voice& v) { return v.id == id; });
     }
 
     // Stops every sound effect (script StopSFX()), or the voices playing one sound.
@@ -83,8 +100,16 @@ private:
         std::size_t frames;
         double step;
         double pos = 0.0;
-        float gainL, gainR;
+        float gainL = 1.0f, gainR = 1.0f;
+        std::uint32_t id = 0;
+        bool loop = false;
     };
+
+    static void setGains(Voice& v, float volume, float pan) noexcept {
+        pan = std::clamp(pan, -1.0f, 1.0f);
+        v.gainL = volume * std::min(1.0f, 1.0f - pan);
+        v.gainR = volume * std::min(1.0f, 1.0f + pan);
+    }
 
     static float sampleAt(const SoundData& s, std::size_t frame) noexcept {
         const std::size_t idx = frame * s.numChannels; // mono mixdown: first channel
@@ -100,18 +125,20 @@ private:
         const float master = m_sfxVolume * 0.6f; // headroom: several voices at once
         for (auto& v : m_voices) {
             for (std::size_t i = 0; i < frames; ++i) {
+                while (v.loop && v.pos >= static_cast<double>(v.frames))
+                    v.pos -= static_cast<double>(v.frames); // seamless wrap of looping sounds
                 const auto i0 = static_cast<std::size_t>(v.pos);
                 if (i0 >= v.frames) break;
                 const float t = static_cast<float>(v.pos - i0);
                 const float a = sampleAt(*v.sound, i0);
-                const float b = i0 + 1 < v.frames ? sampleAt(*v.sound, i0 + 1) : a;
+                const float b = i0 + 1 < v.frames ? sampleAt(*v.sound, i0 + 1) : (v.loop ? sampleAt(*v.sound, 0) : a);
                 const float s = (a + (b - a) * t) * master;
                 m_mix[2 * i] += s * v.gainL;
                 m_mix[2 * i + 1] += s * v.gainR;
                 v.pos += v.step;
             }
         }
-        std::erase_if(m_voices, [](const Voice& v) { return v.pos >= v.frames; });
+        std::erase_if(m_voices, [](const Voice& v) { return !v.loop && v.pos >= v.frames; });
     }
 
     // --- music ---
@@ -203,6 +230,7 @@ private:
     int m_outRate;
     float m_musicVolume = 0.8f, m_sfxVolume = 1.0f;
     std::vector<Voice> m_voices;
+    std::uint32_t m_nextVoiceId = 0;
     std::vector<float> m_mix;
 
     std::vector<std::filesystem::path> m_musicDirs;

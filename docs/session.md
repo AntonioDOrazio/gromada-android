@@ -197,17 +197,36 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 
 ## Audio e filmati
 
-- `PlaySFX(n)`: effetto `n` di `fw.res` **a base 1** (0x408dd0 accetta 1..numero di effetti);
-  richieste uguali nello stesso frame si fondono. Suoni del motore (`takeSounds`) con pan
-  `4·dx` e attenuazione `−2·max(|dx|,|dy|)` in centesimi di dB rispetto al centro della camera,
-  scartati sotto −20 dB (0x409a20/0x408dd0).
+- `PlaySFX(n)`: effetto `n` di `fw.res` **a base 1** (0x408dd0 accetta 1..numero di effetti),
+  a volume pieno e centrato. Suoni del motore (`takeSounds`, uno per ciclo d'animazione
+  dell'azione) con pan `4·dx` e attenuazione `−2·max(|dx|,|dy|)` in centesimi di dB rispetto al
+  centro della camera (0x409a20).
+- Tutte le richieste passano per `game::SoundChannels` (`src/game/sound_channels.hpp`, issue
+  #17), copia dello scheduler dell'originale (dettagli in `docs/re/runtime.md` §9): coda di 32
+  richieste per frame (sotto −20 dB scartate; richieste uguali di effetti non ciclici fuse),
+  **8 canali**, nessuna ripartenza di un effetto partito ≤ 50 ms prima, e a fine frame
+  (`tact()`, dopo `updateCamera()`, con l'orologio di gioco) gli effetti ciclici (byte di tipo
+  0 in `fw.res`, `SoundData::kind`: motori dei veicoli 41..47, ecc.) suonano **in loop**: una
+  richiesta di un effetto ciclico già in corso aggiorna solo volume e pan e lo tiene vivo; si
+  fermano 500 ms dopo l'ultima richiesta. Se le richieste superano i canali liberi si scartano
+  le più deboli. Tipo 100 = non posizionale (volume pieno). Prima della issue #17 ogni richiesta
+  creava una nuova voce sovrapposta e il motore del veicolo ripartiva da capo a ogni tick
+  (~50 ms): inviluppo periodico e "ronzio" in missione.
+- Il `Mixer` (`src/engine/audio.hpp`) dà a ogni voce un id (`playSfx` → id, `sfxPlaying`,
+  `setSfxVolumePan`, `stopSfxVoice`); le voci cicliche ripartono dal campione 0 senza
+  discontinuità (interpolazione tra l'ultimo e il primo campione). `SessionConfig::log` riceve
+  a livello Debug `sfx <n> loop start` a ogni avvio di un effetto ciclico (lo usa
+  `tests/core_sfx_loop.sh`).
 - `PlayAudio(t1..t4)`: playlist CD; negativi sostituiti da `t1`, `t1<0` non fa nulla, la stessa
   quaterna già in corso non riparte; traccia successiva con la regola dell'originale
   (`cur==t1 ? t2 : cur==t2 ? t3 : cur==t3 ? t4 : t1`, ora nel `Mixer`). `StopMusic` ferma il CD.
 - `SetSound`/`SetMusic` 0–100 moltiplicano i volumi delle opzioni core; `SetMusic` da 0 a >0
   riavvia la playlist.
-- `StopSFX()` ferma tutti gli effetti, `StopSFX(n)` quelli di un effetto (nuovi metodi
-  `Mixer::stopSfx`). `PlayWAV(file)` carica un WAV e restituisce il suo `nsfx`.
+- `StopSFX()` ferma tutti i canali in corso tranne quello dell'ultimo numero di effetto (lo slot
+  di `PlayWAV`), senza svuotare la coda del frame; `StopSFX(n)` (irraggiungibile dagli script)
+  libera i canali di `n`; `StopMusic()` libera anche il canale dello slot `PlayWAV`.
+  `PlayWAV(file)` carica un WAV (tipo 100) e restituisce il suo `nsfx` (l'originale lo suona
+  subito in loop: non usato dagli script del gioco).
 - `PlayAVI`: filmato a tutto schermo (centrato in 16:9), CD in pausa (musica muta) durante il
   filmato; se il file non si apre si continua senza.
 
@@ -257,6 +276,16 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
   l'harness (`tests/core_e2e.sh`), solo con il pad, con screenshot di ogni passo in
   `build/core_e2e_out` (non vanno nel repository). L'harness accetta ora `savedir=` e si ferma a
   `RETRO_ENVIRONMENT_SHUTDOWN`.
+- `sound_channels_test` (sempre): scheduler degli effetti con un sink finto (loop tenuto vivo e
+  fermato dopo 500 ms, guardia di 50 ms, 8 canali e scarto dei più deboli, formula di fusione,
+  tipo 100, `StopSFX`) e voci cicliche del `Mixer` (giunzione senza discontinuità, volume/pan,
+  stop). `resources_test` controlla il byte di tipo dei 47 effetti di `fw.res`.
+- `core_sfx_loop`, `core_sfx_loop_120fps` (con `GROMADA_DATA`, `tests/core_sfx_loop.sh`): livello
+  1 col veicolo (ELEPHANT) mosso da ordini di movimento per ~15 s; il motore (effetto 43) deve
+  partire una volta sola. Misura (issue #17, livello 1 a 60/120 fps): prima 128/147 avvii del
+  43 (uno per ciclo d'animazione), ora 1 avvio e 127/146 rinnovi; profondità dell'inviluppo
+  mediato in sincrono al periodo del tick (50 / 41,7 ms) da 6,5 / 5,2 dB a 2,4 / 2,5 dB
+  (controllo a un periodo non correlato: 1,3–2,4 dB).
 
 ## Ipotesi e domande aperte
 

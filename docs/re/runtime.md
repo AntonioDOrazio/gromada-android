@@ -354,7 +354,7 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | 75 | `MenuDir()` | int | Indice di direzione del pulsante sotto il mouse/cliccato: `((dir_unità + vid[0x127]/2) & 0xff) * vid[0x45] >> 8`, dove `vid+0x45` è il numero di direzioni (es. 0..3 per `V_4BUTTON`) | 0x412daa | alta |
 | 76 | `Exit()` | — | `PostMessage(WM_CLOSE)`: chiude il gioco | 0x412dc3 | alta |
 | 77 | `PlayMidi(string filename)` | — | MCI `open %s type sequencer alias FWMUSIC` + play (non usata) | 0x412de2 | alta |
-| 78 | `StopMusic()` | — | Ferma e chiude il CD (`stop/close FWMUSIC`, playlist annullata) e ferma un canale SFX (0x408d80 con il primo campo dell'oggetto audio) | 0x412e00 | alta / media (il canale) |
+| 78 | `StopMusic()` | — | Ferma e chiude il CD (`stop/close FWMUSIC`, playlist annullata) e libera il canale SFX dello slot `PlayWAV` (0x408d80 con N, §9.1) | 0x412e00 | alta |
 | 79 | `MaxUnit(int nvid,int maxunit)` | — | `vid[nvid]+0x128 = maxunit`: numero massimo di unità vive di quel vid (−1 = illimitato) | 0x412e27 | alta |
 | 80 | `Effect(int effect)` | — | Effetto di schermo/palette `eff_*` (0x406e40); 255 = casuale 1..6; ignorato mentre è attivo `eff_openwindow` (6), che cattura la schermata attuale | 0x412e6e | media |
 | 81 | `SetGraphDetail(int detail)` | — | Alto: abilita figli grafici extra (`VID_CHILD+14` = vid 199 per i vid 5, 63, 162, 193; `VID_CHILD+15` = vid 200 per il vid 74); basso: li azzera. In entrambi i casi `VID_CHILD+2`, `+4`, `+5` del vid 19 = vid 116 | 0x412e8c | alta (scritture) / media (significato) |
@@ -367,7 +367,7 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | 88 | `GetKey()` | int | Tasto del frame: codice `WM_CHAR` (13 Invio, 27 Esc, 9 Tab, ' ', '1'..'4', lettere) oppure 1 ←, 2 →, 3 ↑, 4 ↓, 5 Canc; 0 se nessuno. Vale per un solo frame | 0x41304e | alta |
 | 89 | `Pause(int flag)` | — | ≠0: pausa (salva l'orologio e mette il cursore 0); 0: riprende, **riporta l'orologio al valore salvato** e sposta i timer delle unità (0x40ac70) | 0x41306a | alta |
 | 90 | `Random(int max)` | int | `rand() % (max+1)` (LCG MSVC, 0..max) | 0x4130a4 | alta |
-| 91 | `PlaySFX(int nsfx)` | — | Mette in coda l'effetto `nsfx` (1..numero di effetti in `fw.res`) a volume pieno, centrato (0x408dd0); richieste uguali nello stesso frame si fondono | 0x4130ca | alta |
+| 91 | `PlaySFX(int nsfx)` | — | Mette in coda l'effetto `nsfx` (1..numero di effetti in `fw.res`) a volume pieno, centrato (0x408dd0); richieste uguali di effetti non ciclici nello stesso frame si fondono (§9.1) | 0x4130ca | alta |
 | 92 | `SetGraphMode(int mode)` | — | 1/2/3 → `PostMessage(WM_COMMAND 40007/40010/40011)` → modalità 640×480 / 800×600 / 1024×768 dopo il frame | 0x4130ec | alta |
 | 93 | `GetInputState()` | int | Bit `INPUT_*` del frame (§6) | 0x413ebb | alta |
 | 94 | `GetUnitVid(int unit)` | int | nvid dell'unità (`unit+0x14`), 0 se unit=0 | 0x413162 | alta |
@@ -410,10 +410,10 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | 131 | `Receive()` | int | 4 byte ricevuti, 0 se nulla | 0x413d58 | media |
 | 132 | `SetNet(int flag)` | — | `obj+0x3557`: modalità rete per `Load` | 0x413d8f | alta |
 | 133 | `GetNetKey(int nplayer)` | int | In rete: tasto del giocatore n; altrimenti `GetKey()` | 0x413da7 | alta |
-| 134 | `StopSFX()` | — | Ferma tutti gli effetti (0x409550) | 0x413e01 | alta |
+| 134 | `StopSFX()` | — | Ferma tutti gli effetti tranne lo slot `PlayWAV` (0x409550, §9.1) | 0x413e01 | alta |
 | 135 | `mciSendString(string command)` | — | Comando MCI grezzo | 0x413e17 | alta |
 | 136 | `StopSFX(int nsfx)` | — | Ferma l'effetto nsfx (0x408d80). **Irraggiungibile** dagli script: il nome risolve sempre a 134 | 0x413e37 | alta |
-| 137 | `PlayWAV(string file)` | int | Carica un WAV come effetto e restituisce il suo nsfx (0x408c50) | 0x413e55 | media |
+| 137 | `PlayWAV(string file)` | int | Carica un WAV come effetto (slot N, ciclico) e lo suona subito; restituisce il suo nsfx (0x408c50, §9.1) | 0x413e55 | media |
 | 138 | `GetNetInputState(int nplayer)` | int | In rete: bit di input del giocatore n; altrimenti `GetInputState()` | 0x413e7b | alta |
 | 139 | `GetReg(string path,string name)` | str | `RegQueryValueEx(HKLM\path, name)` (128 byte), `""` se manca | 0x413ed7 | alta |
 
@@ -567,6 +567,51 @@ al marcatore di fine, con il numero di globali calcolato dal compilatore replica
   poi ripreso sulla traccia corrente (0x4095c0/0x4095e0, confidenza media). Menu: `PlayMusic(10,10,10,10)`.
 - `StopMusic()` ferma il CD. Volumi con `SetSound`/`SetMusic` 0–100 lineari (0 disattiva).
 - Effetti: `PlaySFX(n)` con n indice degli effetti di `fw.res` (1-based).
+
+### 9.1 Sistema degli effetti sonori (DirectSound, issue #17)
+
+Oggetto audio: `+0` numero di effetti `N` (il numero `N` è lo slot di `PlayWAV`), `+4` tabella
+dei descrittori (27 byte per effetto, indice = nsfx: `+0` buffer, `+8` **byte di tipo**), `+8`
+coda di 32 richieste da 16 byte (`+0` nsfx, −1 = libera; `+8` pan; `+0xc` attenuazione), `+0x210`
+8 canali da 16 byte (`+0` attivo, `+4` buffer DirectSound, `+8` nsfx, `+0xc` istante), `+0x2a4`
+audio disattivato (tutte le funzioni escono subito). Unità DirectSound: centesimi di dB, pan > 0
+attenua il canale sinistro. Orologio: `curclock` (0x42bf94, ms di gioco, fermo in pausa).
+
+- **Byte di tipo**: in `fw.res` è il byte che precede ogni suono (prima dell'offset a 32 bit).
+  0 = ciclico (`DSBPLAY_LOOPING`), 100 = non posizionale (attenuazione forzata a 0), altri valori
+  (1, 40, 50, 90) = singolo. In `fw.res` i ciclici sono 15, 18, 30, 32 e 41..47 (motori dei
+  veicoli: 42 ruote BULL, 43 cingoli ELEPHANT, 44 PEGASUS, ...). `PlayWAV` (0x408c50) carica il
+  file nello slot `N`, gli dà tipo 0 e lo accoda subito; se lo stesso file è già in corso non fa
+  nulla.
+- **Coda** 0x408dd0 `(nsfx, pan, att)`: nsfx fuori da 1..N → log `SND:PlaySFX:Incorrect nsfx`;
+  `att < −2000` → scartata (prima della forzatura del tipo 100); pan limitato a ±10000; tipo 100
+  → `att = 0`. Effetti **non ciclici**: se in coda c'è già lo stesso nsfx si fondono:
+  `pan = ((a1+10000)·p1 + (a2+10000)·p2) / (a1+a2+20000)` (divisione intera, troncata),
+  `att = min(a1+a2+10000, 0)` (quindi in pratica volume pieno). I ciclici non si fondono. Coda
+  piena → richiesta persa.
+- **Scelta del canale** 0x408910 `(nsfx)`: il primo canale che contiene nsfx con
+  `clock − istante ≤ 50` → nessun canale (non riparte entro 50 ms, attivo o no); un canale
+  **non attivo** che contiene già nsfx → riusato; altrimenti un canale mai usato (senza buffer),
+  altrimenti uno non attivo qualsiasi (buffer rilasciato con 0x408bf0), altrimenti nessuno. Il
+  buffer è duplicato da un altro canale con lo stesso nsfx o creato dal descrittore.
+- **Tact** 0x408f20 (una volta per frame):
+  1. canali con buffer attivi ma non più in riproduzione → non attivi; conta i canali liberi
+     (non attivi);
+  2. per ogni richiesta di un effetto ciclico già **attivo** su un canale: solo `SetPan`,
+     `SetVolume`, istante = clock, richiesta tolta; le altre richieste contano come pendenti;
+  3. canali con effetto ciclico, nsfx ≠ N e `clock − istante > 500` → `Stop`, non attivi (non
+     contano come liberi in questo frame);
+  4. finché pendenti > liberi: scarta la richiesta con attenuazione minore (a parità l'ultima);
+  5. per ogni richiesta rimasta: canale da 0x408910; `SetPan`, `SetVolume`,
+     `Play(DSBPLAY_LOOPING se tipo 0)`, attivo, istante = clock.
+- `StopSFX()` 0x409550: `Stop` di tutti i canali attivi tranne quello con nsfx = N, non attivi
+  (la coda resta). `StopSFX(n)` 0x408d80: rilascia (0x408bf0: buffer, attivo, nsfx = −1,
+  istante 0) i canali attivi con quel nsfx. `StopMusic()` chiama 0x408d80 con N (lo slot
+  `PlayWAV`).
+- Effetto pratico: il motore richiede il suono dell'azione a ogni ciclo d'animazione (0x409a20;
+  per un veicolo in moto ~ogni 39 ms, 50 ms a 60 fps); il suono ciclico parte una volta e resta
+  in loop finché il veicolo si muove, poi si ferma 500 ms dopo. Implementazione:
+  `src/game/sound_channels.hpp`.
 - Video (0x401110): `PlayAVI` mette in pausa il CD, pulisce lo schermo, apre il file con MCI in una
   finestra figlia centrata alla dimensione nativa, nasconde il cursore e blocca il ciclo di gioco
   finché il video finisce o si preme un tasto/pulsante; poi riprende la musica. Se il file non si
@@ -629,8 +674,8 @@ al marcatore di fine, con il numero di globali calcolato dal compilatore replica
 - Effetti `eff_*` (0x406e40, 0x405700), `SetGamma`, `CreateLight`: comportamento del renderer non
   analizzato in dettaglio.
 - Significato di `obj+0x32d9`/`obj+0x991`/`obj+0x32eb` (solo azzerati e letti: probabilmente
-  modalità dell'editor) e del campo `+8 == 100` degli effetti sonori in 0x408dd0.
-- `StopMusic` ferma anche "un" canale SFX: quale sia (forse l'ultimo `PlayWAV`) non è verificato.
+  modalità dell'editor). (Il campo `+8` degli effetti sonori e il canale fermato da `StopMusic`
+  sono chiariti in §9.1.)
 - Il trailer delle demo non è scritto dall'exe: forse aggiunto da uno strumento esterno.
 
 ## 13. Strumenti (`tools/re/runtime/`)
