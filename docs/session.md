@@ -198,8 +198,8 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 ## Audio e filmati
 
 - `PlaySFX(n)`: effetto `n` = suono di indice `n` di `fw.res` (**da 0**: 0x408730 carica il suono *i*
-  nel descrittore *i*; 0x408dd0 accetta `1..N`, il suono 0 è un segnaposto muto e `N` è lo slot
-  di `PlayWAV`). Fino alla correzione del 2/11/2026 il core suonava `fw.res[n−1]`: ogni effetto
+  nel descrittore *i*; 0x408dd0 accetta `1..N`, il suono 0 non è suonabile e `N` è lo slot
+  di `PlayWAV`; mappatura in `game::effectSound`, verificata sulla tabella dell'originale). Fino alla correzione del 2/11/2026 il core suonava `fw.res[n−1]`: ogni effetto
   era quello accanto, e i loop (motori al minimo 40, teletrasporto 14) diventavano colpi ripetuti;
   a volume pieno e centrato. Suoni del motore (`takeSounds`, uno per ciclo d'animazione
   dell'azione) con pan `4·dx` e attenuazione `−2·max(|dx|,|dy|)` in centesimi di dB rispetto al
@@ -209,14 +209,23 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
   richieste per frame (sotto −20 dB scartate; richieste uguali di effetti non ciclici fuse),
   **8 canali**, nessuna ripartenza di un effetto partito ≤ 50 ms prima, e a fine frame
   (`tact()`, dopo `updateCamera()`, con l'orologio di gioco) gli effetti ciclici (byte di tipo
-  0 in `fw.res`, `SoundData::kind`: motori dei veicoli 41..47, ecc.) suonano **in loop**: una
+  0 in `fw.res`, `SoundData::kind`: 14, 17, 29, 31 e i motori dei veicoli 40..46) suonano **in loop**: una
   richiesta di un effetto ciclico già in corso aggiorna solo volume e pan e lo tiene vivo; si
   fermano 500 ms dopo l'ultima richiesta. Se le richieste superano i canali liberi si scartano
   le più deboli. Tipo 100 = non posizionale (volume pieno). Prima della issue #17 ogni richiesta
   creava una nuova voce sovrapposta e il motore del veicolo ripartiva da capo a ogni tick
-  (~50 ms): inviluppo periodico e "ronzio" in missione.
+  (~50 ms): inviluppo periodico e "ronzio" in missione. Dalla issue #18 è una porta operazione
+  per operazione, confrontata con l'originale in emulazione (`docs/oracle.md` §8): il sink
+  (`SoundSink`) è un dispositivo DirectSound con un buffer per canale (`load`/`release`/`playing`/
+  `setPan`/`setVolume`/`play`/`stop`, interi in centesimi di dB) e `Stop` conserva la posizione:
+  un motore fermato dopo 500 ms che riparte sullo stesso canale continua da dove era, come
+  nell'originale (prima ricominciava dall'inizio).
+- `PlayWAV(file)` (0x408c50): carica il WAV nello slot `N`, lo accoda subito a volume pieno e lo
+  suona **in loop** (escluso da `StopSFX()` e dalla scadenza); lo stesso file già in corso non
+  riparte; `StopMusic()` lo ferma. Prima della #18 il WAV veniva caricato ma mai suonato.
 - Il `Mixer` (`src/engine/audio.hpp`) dà a ogni voce un id (`playSfx` → id, `sfxPlaying`,
-  `setSfxVolumePan`, `stopSfxVoice`); le voci cicliche ripartono dal campione 0 senza
+  `setSfxVolumePan`, `stopSfxVoice`, `pauseSfxVoice`/`resumeSfxVoice` per `Stop`/`Play`); il
+  `MixerSink` della sessione traduce pan e attenuazione DirectSound in guadagni; le voci cicliche ripartono dal campione 0 senza
   discontinuità (interpolazione tra l'ultimo e il primo campione). `SessionConfig::log` riceve
   a livello Debug `sfx <n> loop start` a ogni avvio di un effetto ciclico (lo usa
   `tests/core_sfx_loop.sh`).
@@ -282,7 +291,9 @@ Aggiunte al contratto (compatibili: metodi virtuali con implementazione vuota):
 - `sound_channels_test` (sempre): scheduler degli effetti con un sink finto (loop tenuto vivo e
   fermato dopo 500 ms, guardia di 50 ms, 8 canali e scarto dei più deboli, formula di fusione,
   tipo 100, `StopSFX`) e voci cicliche del `Mixer` (giunzione senza discontinuità, volume/pan,
-  stop). `resources_test` controlla il byte di tipo dei 47 effetti di `fw.res`.
+  stop, pausa e ripresa). `resources_test` controlla il byte di tipo dei 47 effetti di `fw.res`.
+- `sound_oracle_test` (sempre; con `GROMADA_DATA` anche la tabella di `fw.res`): 1355 sequenze di
+  eventi con le chiamate DirectSound dell'originale, riprodotte esattamente (issue #18).
 - `core_sfx_loop`, `core_sfx_loop_120fps` (con `GROMADA_DATA`, `tests/core_sfx_loop.sh`): livello
   1 col veicolo (ELEPHANT) mosso da ordini di movimento per ~15 s; il motore (effetto 43) deve
   partire una volta sola. Misura (issue #17, livello 1 a 60/120 fps): prima 128/147 avvii del

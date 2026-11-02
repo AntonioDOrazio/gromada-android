@@ -796,16 +796,13 @@ private:
 
     // ---- audio ------------------------------------------------------------------------------------
     // Effect numbers index fw.res sounds from 0, as the original's descriptor table
-    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (sound 0 is a
-    // silent placeholder, nsfx 0 is rejected by 0x408dd0) and nsfx N = number of fw.res
-    // sounds is the single PlayWAV slot.
+    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (nsfx 0 is rejected
+    // by 0x408dd0) and nsfx N = number of fw.res sounds is the single PlayWAV slot
+    // (game/sound_channels.hpp effectSound, checked against the original by sound_oracle_test).
     [[nodiscard]] int playWavSlot() const { return static_cast<int>(m_sounds.size()); }
     [[nodiscard]] const SoundData* sound(int nsfx) const {
-        if (nsfx >= 1 && nsfx < playWavSlot())
-            return &m_sounds[static_cast<std::size_t>(nsfx)];
-        if (nsfx == playWavSlot() && !m_wavs.empty())
-            return &m_wavs.back(); // older WAVs stay alive: voices may still point at them
-        return nullptr;
+        // older WAVs stay alive in m_wavs: voices may still point at them
+        return effectSound(m_sounds, m_wavLoaded && !m_wavs.empty() ? &m_wavs.back() : nullptr, nsfx);
     }
 
     // PlaySFX(n) and UI sounds: full volume, centred (0x4130ca -> 0x408dd0).
@@ -825,18 +822,56 @@ private:
         m_sfx.tact(m_sfxSink, static_cast<std::uint32_t>(m_engine->clock()));
     }
 
-    // gromada::Mixer as the SoundChannels sink (no mixer: nothing plays, nothing is "playing").
+    // gromada::Mixer as the SoundChannels sink: one DirectSound buffer per channel (no mixer:
+    // nothing plays, nothing is "playing"). Stop pauses the voice, Play resumes it (DirectSound
+    // keeps the position); a one-shot that reached its end plays again from the start.
     struct MixerSink final : SoundSink {
+        struct Buffer {
+            const SoundData* sound = nullptr;
+            int nsfx = 0;
+            std::uint32_t voice = 0;
+            int pan = 0, attenuation = 0; // DirectSound units
+        };
         Mixer* mixer = nullptr;
         Session* session = nullptr;
-        std::uint32_t play(int nsfx, const SoundData& s, float volume, float pan, bool loop) override {
-            if (loop && session) // rare: a looping sound (vehicle engine) starts
-                session->log(LogLevel::Debug, std::format("sfx {} loop start", nsfx));
-            return mixer ? mixer->playSfx(s, volume, pan, loop) : 0;
+        std::array<Buffer, SoundChannels::ChannelCount> buffers{};
+
+        bool load(int ch, int nsfx, const SoundData& s, int source) override {
+            drop(ch);
+            buffers[ch] = {&s, nsfx, 0, 0, 0};
+            if (source >= 0) { // a duplicate starts with the parameters of its source
+                buffers[ch].pan = buffers[source].pan;
+                buffers[ch].attenuation = buffers[source].attenuation;
+            }
+            return true;
         }
-        bool playing(std::uint32_t v) const override { return mixer && mixer->sfxPlaying(v); }
-        void update(std::uint32_t v, float volume, float pan) override { if (mixer) mixer->setSfxVolumePan(v, volume, pan); }
-        void stop(std::uint32_t v) override { if (mixer) mixer->stopSfxVoice(v); }
+        void release(int ch) override { drop(ch); buffers[ch] = {}; }
+        bool playing(int ch) override { return mixer && mixer->sfxPlaying(buffers[ch].voice); }
+        void setPan(int ch, int pan) override { buffers[ch].pan = pan; apply(ch); }
+        void setVolume(int ch, int attenuation) override {
+            if (attenuation > 0 || attenuation < -10000)
+                return; // DSERR_INVALIDPARAM: the volume does not change
+            buffers[ch].attenuation = attenuation;
+            apply(ch);
+        }
+        void play(int ch, bool loop) override {
+            auto& b = buffers[ch];
+            if (!mixer || !b.sound || mixer->resumeSfxVoice(b.voice, loop))
+                return;
+            if (loop && session) // rare: a looping sound (vehicle engine) starts
+                session->log(LogLevel::Debug, std::format("sfx {} loop start", b.nsfx));
+            b.voice = mixer->playSfx(*b.sound, SoundChannels::volumeOf(b.attenuation), SoundChannels::panOf(b.pan), loop);
+        }
+        void stop(int ch) override { if (mixer) mixer->pauseSfxVoice(buffers[ch].voice); }
+        void drop(int ch) {
+            if (mixer && buffers[ch].voice)
+                mixer->stopSfxVoice(buffers[ch].voice);
+        }
+        void apply(int ch) {
+            const auto& b = buffers[ch];
+            if (mixer && b.voice)
+                mixer->setSfxVolumePan(b.voice, SoundChannels::volumeOf(b.attenuation), SoundChannels::panOf(b.pan));
+        }
     };
 
     // PlayAudio(t1..t4) / PlayMusic: CD playlist (docs/re/runtime.md §9).
@@ -879,20 +914,27 @@ private:
         m_mixer->setMusicVolume(m_movieActive ? 0.0f : m_coreMusic * m_scriptMusic / 100.0f);
     }
 
+    // PlayWAV (0x408c50): one slot (N), looping, queued at once; the same file already playing
+    // is left alone (game/sound_channels.hpp). Returns N, 0 if the file cannot be opened.
     int playWav(const std::string& file) {
-        auto path = script::resolveCaseInsensitive(m_config.gameDir, file);
-        if (!path)
-            return 0;
-        try {
-            std::ifstream in{*path, std::ios::binary};
-            const auto size = std::filesystem::file_size(*path);
-            BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
-            m_wavs.emplace_back(reader);
-            return playWavSlot(); // the original has one slot: a new WAV replaces the previous one
-        } catch (const std::exception& e) {
-            log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
-            return 0;
-        }
+        using WavLoad = SoundChannels::WavLoad;
+        return m_sfx.playWav(m_sfxSink, file, [&] {
+            m_wavLoaded = false; // the original frees the previous WAV first
+            auto path = script::resolveCaseInsensitive(m_config.gameDir, file);
+            if (!path)
+                return WavLoad::NotFound;
+            try {
+                std::ifstream in{*path, std::ios::binary};
+                const auto size = std::filesystem::file_size(*path);
+                BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
+                m_wavs.emplace_back(reader);
+                m_wavLoaded = true;
+                return WavLoad::Loaded;
+            } catch (const std::exception& e) {
+                log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
+                return WavLoad::Invalid; // opened but not playable: slot N stays empty
+            }
+        });
     }
 
     // ---- movies -----------------------------------------------------------------------------------
@@ -1025,6 +1067,7 @@ private:
     SoundChannels m_sfx{[this](int n) { return sound(n); },
                         [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV
+    bool m_wavLoaded = false;      // m_wavs.back() is in slot N
     std::array<int, 4> m_playlist{};
     bool m_playing = false;
     int m_scriptSfx = 100, m_scriptMusic = 100;
