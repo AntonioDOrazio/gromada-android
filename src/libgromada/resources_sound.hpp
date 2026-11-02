@@ -9,6 +9,11 @@
 
 // Actually, it's a usual wav
 struct SoundData {
+    // Per-sound byte stored before each sound in fw.res (offset +8 of the runtime descriptor in
+    // gromada.exe). 0 = looping sound (played with DSBPLAY_LOOPING and kept alive while it is
+    // requested, e.g. vehicle engines), 100 = non-positional (always full volume), other values
+    // = one-shot. Sounds loaded at run time (PlayWAV) default to 100.
+    std::uint8_t kind = 100;
     std::uint16_t numChannels;
     std::uint32_t sampleRate;
     std::variant<std::vector<float>, std::vector<std::uint8_t>, std::vector<std::int16_t>> waveData;
@@ -28,11 +33,12 @@ std::vector<SoundData> getSounds( const Section& soundSection, BinaryStreamReade
     result.reserve(soundSection.header().elementCount);
 
     for (int i = 0; i < soundSection.header().elementCount; ++i) {
-        const auto _ = soundReader.read<std::uint8_t>();
+        const auto kind = soundReader.read<std::uint8_t>();
         const auto offset = soundReader.read<std::uint32_t>();
 
         const auto soundDataStartPos = soundReader.tellg();
         result.emplace_back(soundReader);
+        result.back().kind = kind;
         const auto numBytesRead = soundReader.tellg() - soundDataStartPos;
         if (numBytesRead > offset) {
             throw std::logic_error("Sound data read exceeds expected offset");
