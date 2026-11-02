@@ -28,6 +28,7 @@ namespace gromada::game {
 
 class SaveFiles {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     // Files copied from the game folder to the save directory on first run.
     static constexpr std::array<std::string_view, 6> SeededFiles = {"save1", "save2", "save3", "save4", "save5", "fw.ini"};
 

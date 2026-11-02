@@ -100,6 +100,7 @@ inline Vec2 edgeScroll(Vec2 cursor, int width, int height, float zone = 16) {
 
 class Mapper {
 public:
+    friend struct SaveStateAccess; // save states (input/mapper_state.hpp)
     explicit Mapper(const Settings& s = {}) : m_settings(s) {}
 
     void configure(const Settings& s) {

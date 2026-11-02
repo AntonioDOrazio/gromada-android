@@ -181,6 +181,23 @@ public:
         return changed;
     }
 
+    // Save states: moves the clock to `seconds`. Forward, the frames up to it are decoded (as
+    // step() would); backward, only the clock moves (decoders cannot go back): the picture on
+    // screen stays until the clock reaches the next frame. The soundtrack is moved separately
+    // (AudioStream::seek).
+    bool seek(double seconds) {
+        if (!(seconds >= 0) || seconds > 1e7)
+            return false;
+        const auto due = static_cast<long>(std::floor(seconds * m_fps + 1e-6)) - 1; // shown by the last step
+        const long target = std::min(due, static_cast<long>(frameCount()) - 1);
+        while (m_shown < target) {
+            ++m_shown;
+            decodeFrame(static_cast<std::size_t>(m_shown), m_shown == target);
+        }
+        m_time = seconds;
+        return true;
+    }
+
     // Decodes the next frame without the clock (benchmarks, tests). False at the end.
     bool decodeNext(bool convert = true) {
         if (m_shown + 1 >= static_cast<long>(frameCount()))
@@ -237,6 +254,35 @@ private:
         }
         [[nodiscard]] double duration() const noexcept { return m_duration; }
         [[nodiscard]] int sampleRate() const override { return static_cast<int>(m_stream.audio.sampleRate); }
+        // Save states: the PCM chunks form one byte stream; frame f starts f * bytesPerFrame
+        // after the delayed-start silence.
+        bool seek(std::uint64_t frame) override {
+            const auto& f = m_stream.audio;
+            const std::size_t silence = m_stream.rate > 0 && m_stream.start > 0
+                ? static_cast<std::size_t>(std::llround(static_cast<double>(m_stream.start) * m_stream.scale / m_stream.rate * f.sampleRate))
+                : 0;
+            m_buf.clear();
+            m_pos = 0;
+            m_chunk = 0;
+            if (frame < silence) {
+                m_silence = silence - static_cast<std::size_t>(frame);
+                return true;
+            }
+            m_silence = 0;
+            std::uint64_t skip = (frame - silence) * m_bytesPerFrame;
+            while (m_chunk < m_stream.chunks.size()) {
+                const std::uint64_t size = m_stream.chunks[m_chunk].size;
+                if (skip < size) {
+                    if (!m_avi.read(m_stream.chunks[m_chunk++], m_buf))
+                        return false;
+                    m_pos = static_cast<std::size_t>(skip);
+                    return true;
+                }
+                skip -= size;
+                ++m_chunk;
+            }
+            return true; // past the end: nothing left to read
+        }
         std::size_t read(std::int16_t* out, std::size_t frames) override {
             std::size_t done = 0;
             for (; done < frames && m_silence > 0; ++done, --m_silence)

@@ -10,6 +10,18 @@
 //             touch=<px>,<py>[;<px>,<py>]@...         (fingers, in game-image pixels)
 //             mouse=<dx>,<dy>@...  mouse_btn=<left|right>@...
 //   savedir=<dir>   libretro save directory (default <out_prefix>_save; "none" = no save dir)
+//   save states (issue #14): frames are "logical" frames, the ones the timed input refers to.
+//             savestate=<frame>       save (retro_serialize) before running that frame
+//             loadstate=<frame>       when that frame is reached the first time, load the state
+//                                     and go back to the saved frame (its input is replayed)
+//             statefile=<path>        write the saved state there (savestate) / load it from
+//                                     there (loadstate without savestate)
+//             runahead=<n>            every frame: run it, save, run n more frames, load (the
+//                                     single-instance run-ahead of RetroArch)
+//             hashes=<path>           one line per real frame: "<frame> <video fnv> <audio fnv>",
+//                                     plus "ahead <frame> <video fnv>" for run-ahead frames
+//             statefuzz=<n>           after the run: n corrupted/truncated copies of a fresh state
+//                                     must be rejected by retro_unserialize without crashing
 //   Exit() from the game (RETRO_ENVIRONMENT_SHUTDOWN) stops the run.
 #include <dlfcn.h>
 #include <chrono>
@@ -33,6 +45,13 @@ static size_t audioFrames = 0;
 static std::vector<int16_t> audioCapture;
 static std::set<int> pressA;
 static unsigned imageW = 640, imageH = 480;
+static uint64_t videoHash = 0, audioHash = 0;
+static bool hashing = false;
+static uint64_t fnv(const void* p, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; }
+    return h;
+}
 
 struct Timed {
     std::string kind;        // btn, lstick, rstick, touch, mouse, mouse_btn
@@ -112,6 +131,8 @@ static bool env(unsigned cmd, void* data) {
 
 static void video(const void* data, unsigned w, unsigned h, size_t pitch) {
     lastW = w; lastH = h; imageW = w; imageH = h;
+    if (hashing && data)
+        for (unsigned y = 0; y < h; ++y) videoHash = fnv(static_cast<const uint8_t*>(data) + y * pitch, w * 4, videoHash);
     if (!data || !shots.count(frame)) return;
     std::string path = outPrefix + "_" + std::to_string(frame) + ".ppm";
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -127,7 +148,12 @@ static void video(const void* data, unsigned w, unsigned h, size_t pitch) {
     std::fprintf(stderr, "wrote %s\n", path.c_str());
 }
 
-static size_t audio(const int16_t* d, size_t frames) { audioFrames += frames; audioCapture.insert(audioCapture.end(), d, d + frames * 2); return frames; }
+static bool muteCapture = false;
+static size_t audio(const int16_t* d, size_t frames) {
+    if (hashing) audioHash = fnv(d, frames * 4, audioHash);
+    if (muteCapture) return frames;
+    audioFrames += frames; audioCapture.insert(audioCapture.end(), d, d + frames * 2); return frames;
+}
 static void poll() {}
 static int16_t timedInput(unsigned device, unsigned index, unsigned id) {
     auto clamp16 = [](float v) { return int16_t(v > 32767 ? 32767 : v < -32767 ? -32767 : v); };
@@ -178,6 +204,9 @@ static int16_t input(unsigned port, unsigned device, unsigned index, unsigned id
 
 #define SYM(name) auto name = reinterpret_cast<decltype(&::name)>(dlsym(lib, #name)); if (!name) { std::fprintf(stderr, "missing %s\n", #name); return 1; }
 
+static int saveAt = -1, loadAt = -1, runAhead = 0, stateFuzz = 0;
+static std::string stateFile, hashFile;
+
 int main(int argc, char** argv) {
     if (argc < 5) { std::fprintf(stderr, "usage: harness core.so content frames out_prefix [k=v...]\n"); return 1; }
     void* lib = dlopen(argv[1], RTLD_NOW);
@@ -192,6 +221,12 @@ int main(int argc, char** argv) {
         else if (k == "press_r_at") pressRAt = std::atoi(v.c_str());
         else if (k == "press_a_at") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) pressA.insert(std::atoi(t)); }
         else if (k == "savedir") saveDir = v;
+        else if (k == "savestate") saveAt = std::atoi(v.c_str());
+        else if (k == "loadstate") loadAt = std::atoi(v.c_str());
+        else if (k == "statefile") stateFile = v;
+        else if (k == "runahead") runAhead = std::atoi(v.c_str());
+        else if (k == "hashes") hashFile = v;
+        else if (k == "statefuzz") stateFuzz = std::atoi(v.c_str());
         else if (k == "shots") { for (char* t = std::strtok(v.data(), ","); t; t = std::strtok(nullptr, ",")) shots.insert(std::atoi(t)); }
         else opts[k] = v;
     }
@@ -200,6 +235,7 @@ int main(int argc, char** argv) {
     SYM(retro_set_environment) SYM(retro_set_video_refresh) SYM(retro_set_audio_sample_batch)
     SYM(retro_set_input_poll) SYM(retro_set_input_state) SYM(retro_init) SYM(retro_load_game)
     SYM(retro_get_system_av_info) SYM(retro_run) SYM(retro_unload_game) SYM(retro_deinit)
+    SYM(retro_serialize_size) SYM(retro_serialize) SYM(retro_unserialize)
 
     retro_set_environment(env); retro_set_video_refresh(video); retro_set_audio_sample_batch(audio);
     retro_set_input_poll(poll); retro_set_input_state(input);
@@ -211,9 +247,117 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "av: %ux%u aspect=%.3f fps=%.0f rate=%.0f\n", av.geometry.base_width, av.geometry.base_height,
                  av.geometry.aspect_ratio, av.timing.fps, av.timing.sample_rate);
 
+    const size_t stateSize = retro_serialize_size();
+    std::vector<uint8_t> state, scratch(stateSize);
+    FILE* hashes = hashFile.empty() ? nullptr : std::fopen(hashFile.c_str(), "w");
+    hashing = hashes != nullptr;
+    double serializeMs = 0, unserializeMs = 0, maxSerializeMs = 0, maxUnserializeMs = 0;
+    long serializeCount = 0, unserializeCount = 0;
+    size_t maxUsed = 0;
+    auto timed = [](auto&& fn) {
+        auto a = std::chrono::steady_clock::now();
+        const bool ok = fn();
+        return std::pair{ok, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count()};
+    };
+    auto doSave = [&](std::vector<uint8_t>& out) {
+        out.assign(stateSize, 0xAA);
+        auto [ok, ms] = timed([&] { return retro_serialize(out.data(), out.size()); });
+        serializeMs += ms; maxSerializeMs = std::max(maxSerializeMs, ms); ++serializeCount;
+        size_t used = 0;
+        if (ok && out.size() >= 24) { uint64_t payload; std::memcpy(&payload, out.data() + 16, 8); used = size_t(payload) + 64; }
+        maxUsed = std::max(maxUsed, used);
+        return ok;
+    };
+    auto doLoad = [&](const std::vector<uint8_t>& in) {
+        auto [ok, ms] = timed([&] { return retro_unserialize(in.data(), in.size()); });
+        unserializeMs += ms; maxUnserializeMs = std::max(maxUnserializeMs, ms); ++unserializeCount;
+        return ok;
+    };
+    bool saved = false, loaded = false;
+    int savedFrame = -1, failures = 0;
+    if (saveAt < 0 && loadAt >= 0 && !stateFile.empty()) {   // load a state written by an earlier run
+        FILE* f = std::fopen(stateFile.c_str(), "rb");
+        if (!f) { std::fprintf(stderr, "cannot read %s\n", stateFile.c_str()); return 3; }
+        state.assign(stateSize, 0);
+        state.resize(std::fread(state.data(), 1, state.size(), f));
+        std::fclose(f);
+        saved = true;
+    }
+
     auto t0 = std::chrono::steady_clock::now();
-    for (frame = 0; frame < frames && !shutdownRequested; ++frame) retro_run();
+    for (int run = 0; run < frames && !shutdownRequested; ++run) {
+        if (frame == saveAt && !saved) {
+            if (!doSave(state)) { std::fprintf(stderr, "[f%d] retro_serialize failed\n", frame); ++failures; }
+            else {
+                saved = true;
+                savedFrame = frame;
+                std::fprintf(stderr, "[f%d] state saved (%zu-byte buffer)\n", frame, state.size());
+                if (!stateFile.empty()) { FILE* f = std::fopen(stateFile.c_str(), "wb"); std::fwrite(state.data(), 1, state.size(), f); std::fclose(f); }
+            }
+        }
+        if (frame == loadAt && saved && !loaded) {
+            loaded = true;
+            if (!doLoad(state)) { std::fprintf(stderr, "[f%d] retro_unserialize failed\n", frame); ++failures; }
+            else {
+                std::fprintf(stderr, "[f%d] state loaded, back to frame %d\n", frame, savedFrame);
+                if (savedFrame >= 0) frame = savedFrame;
+            }
+        }
+        videoHash = audioHash = 0xcbf29ce484222325ull;
+        retro_run();
+        if (hashes) std::fprintf(hashes, "%d %016llx %016llx\n", frame, (unsigned long long)videoHash, (unsigned long long)audioHash);
+        if (runAhead > 0 && !shutdownRequested) {
+            if (!doSave(scratch)) { std::fprintf(stderr, "[f%d] run-ahead: retro_serialize failed\n", frame); ++failures; }
+            else {
+                const int real = frame;
+                muteCapture = true;
+                for (int k = 1; k <= runAhead; ++k) {
+                    ++frame;
+                    videoHash = audioHash = 0xcbf29ce484222325ull;
+                    retro_run();
+                }
+                if (hashes) std::fprintf(hashes, "ahead %d %016llx\n", frame, (unsigned long long)videoHash);
+                muteCapture = false;
+                frame = real;
+                if (!doLoad(scratch)) { std::fprintf(stderr, "[f%d] run-ahead: retro_unserialize failed\n", frame); ++failures; }
+            }
+        }
+        ++frame;
+    }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (hashes) std::fclose(hashes);
+    if (serializeCount)
+        std::fprintf(stderr, "savestates: size %zu (max used %zu), serialize %ld x avg %.3f ms max %.3f ms, "
+                     "unserialize %ld x avg %.3f ms max %.3f ms\n", stateSize, maxUsed, serializeCount,
+                     serializeMs / serializeCount, maxSerializeMs, unserializeCount,
+                     unserializeCount ? unserializeMs / unserializeCount : 0.0, maxUnserializeMs);
+    if (stateFuzz > 0 && !shutdownRequested) {
+        // Corrupted states: truncations, bit flips, garbage. All must be refused, and the game
+        // must go on exactly as before (the state is checked before anything changes).
+        std::vector<uint8_t> good, bad, before, after;
+        if (!doSave(good)) { std::fprintf(stderr, "statefuzz: cannot save\n"); return 4; }
+        doSave(before);
+        uint64_t x = 0x9E3779B97F4A7C15ull;
+        auto rnd = [&] { x ^= x << 13; x ^= x >> 7; x ^= x << 17; return x; };
+        uint64_t used; std::memcpy(&used, good.data() + 16, 8); used += 64;
+        int accepted = 0;
+        for (int i = 0; i < stateFuzz; ++i) {
+            bad = good;
+            switch (i % 4) {
+            case 0: bad.resize(size_t(rnd() % used)); break;                         // truncated
+            case 1: for (int k = 0; k < 1 + int(rnd() % 8); ++k) bad[rnd() % used] ^= uint8_t(1u << (rnd() % 8)); break;
+            case 2: for (size_t k = 64 + rnd() % (used - 64), e = std::min(used, k + 64); k < e; ++k) bad[k] = uint8_t(rnd()); break;
+            case 3: bad[rnd() % 64] ^= uint8_t(1 + rnd() % 255); break;                // header
+            }
+            if (bad == good) continue;
+            if (retro_unserialize(bad.data(), bad.size())) ++accepted;
+        }
+        doSave(after);
+        const bool same = before == after;
+        std::fprintf(stderr, "statefuzz: %d corrupted states, %d accepted, state %s\n", stateFuzz, accepted,
+                     same ? "unchanged" : "CHANGED");
+        if (accepted || !same) ++failures;
+    }
     std::fprintf(stderr, "ran %d frames (%ux%u) in %.1f ms -> %.2f ms/frame; audio frames %zu (expected %.0f)\n",
                  frames, lastW, lastH, ms, ms / frames, audioFrames, frames * av.timing.sample_rate / fps);
     {   // dump captured audio as WAV
@@ -226,5 +370,5 @@ int main(int argc, char** argv) {
         std::fwrite(audioCapture.data(), 2, audioCapture.size(), f); std::fclose(f);
     }
     retro_unload_game(); retro_deinit();
-    return 0;
+    return failures ? 5 : 0;
 }

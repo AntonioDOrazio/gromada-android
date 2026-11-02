@@ -54,6 +54,11 @@ public:
     virtual void blit(std::uint32_t* xrgb, int width, int height, std::size_t pitchPixels) = 0;
     virtual AudioStream* audio() = 0;
     virtual void close() = 0;
+    // Save states (issue #14): the playback clock, and moving the clock to `seconds` (forward:
+    // frames are decoded up to it; backward: the clock moves, the picture waits for it).
+    // Players without them make save states fail while a movie plays.
+    [[nodiscard]] virtual std::optional<double> position() const { return std::nullopt; }
+    virtual bool seek(double seconds) { (void)seconds; return false; }
 };
 
 enum class LogLevel : std::uint8_t { Debug, Info, Warn, Error };
@@ -72,6 +77,7 @@ struct SessionConfig {
 
 class Session final : public script::ScriptHost {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     static constexpr std::string_view DefaultStartMap = "maps\\logo.map";
     static constexpr int MaxFrameMs = 71;
 
@@ -623,6 +629,7 @@ private:
             log(LogLevel::Warn, std::format("demo: map clock {} differs from the recorded {}", m_engine->clock(),
                                             player.file().startClock));
         m_demo.emplace(std::move(player));
+        m_demoName = name; // save states reload the demo by name
         m_demoDebtMs = 0;
         m_demoView = true;
         updateView();
@@ -885,6 +892,7 @@ private:
             const auto size = std::filesystem::file_size(*path);
             BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
             m_wavs.emplace_back(reader);
+            m_wavNames.push_back(file); // save states reload them by name
             return static_cast<int>(m_sounds.size() + m_wavs.size());
         } catch (const std::exception& e) {
             log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
@@ -1020,6 +1028,8 @@ private:
 
     std::vector<PendingSfx> m_sfxQueue;
     std::deque<SoundData> m_wavs;  // PlayWAV
+    std::vector<std::string> m_wavNames; // PlayWAV file of each m_wavs entry (save states)
+    std::string m_demoName;              // .dem being played (save states)
     std::array<int, 4> m_playlist{};
     bool m_playing = false;
     int m_scriptSfx = 100, m_scriptMusic = 100;

@@ -38,6 +38,7 @@ inline OriginalInput toOriginalInput(const demo::DemoInput& d) {
 
 class DemoPlayer {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     explicit DemoPlayer(demo::DemoFile file) : m_file{std::move(file)}, m_clock{m_file.startClock} {}
 
     [[nodiscard]] const demo::DemoFile& file() const noexcept { return m_file; }
@@ -89,6 +90,7 @@ private:
 // Writes a demo in the format of the shipped ones.
 class DemoRecorder {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     DemoRecorder(std::string mapName, std::uint32_t seed, std::uint32_t startClock, std::span<const std::int32_t> ints) {
         put32(static_cast<std::uint32_t>(mapName.size()));
         m_data.insert(m_data.end(), mapName.begin(), mapName.end());

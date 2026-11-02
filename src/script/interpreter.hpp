@@ -114,6 +114,7 @@ struct CarryOverPolicy {
 
 class Interpreter {
 public:
+    friend struct SaveStateAccess; // save states (script/vm_state.hpp)
     // Sets up the cells like the original's compiler at a map load from a fresh game (every
     // cell 0): flags, compile-time initializers, an empty 128-byte buffer per string cell.
     // Nothing is executed and no builtin is called.

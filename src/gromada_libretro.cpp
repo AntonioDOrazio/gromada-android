@@ -12,6 +12,7 @@
 #include "engine/renderer.hpp"
 #include "game/session_movie.hpp"
 #include "game/engine.hpp"
+#include "game/savestate.hpp"
 #include "input/input.hpp"
 #include "libretro/libretro.h"
 #include "video/movie.hpp"
@@ -71,6 +72,9 @@ struct Core {
     // --- game session (issue #10) ---
     std::unique_ptr<gromada::game::Session> session;
     std::filesystem::path gameDir, saveDir;
+    // --- save states (issue #14, docs/savestates.md) ---
+    gromada::game::SaveStateManager saveStates;
+    std::vector<std::uint8_t> stateBuffer;
 };
 
 std::unique_ptr<Core> core;
@@ -610,10 +614,38 @@ RETRO_API void retro_run() {
 RETRO_API unsigned retro_get_region() { return RETRO_REGION_NTSC; }
 RETRO_API bool retro_load_game_special(unsigned, const retro_game_info*, size_t) { return false; }
 
-// Save states arrive with the gameplay milestone.
-RETRO_API size_t retro_serialize_size() { return 0; }
-RETRO_API bool retro_serialize(void*, size_t) { return false; }
-RETRO_API bool retro_unserialize(const void*, size_t) { return false; }
+// Save states (issue #14, docs/savestates.md): the whole session, engine, script VM, UI,
+// mixer and input mapper. The size is a fixed upper bound for the whole session (libretro
+// forbids it to grow); the unused tail is zero-filled.
+RETRO_API size_t retro_serialize_size() {
+    return core && core->resources ? gromada::game::SaveStateMaxSize : 0;
+}
+RETRO_API bool retro_serialize(void* data, size_t size) {
+    if (!core || !core->session || !data)
+        return false;
+    const gromada::game::SaveStateExtras extras{&core->input, &core->audioDebt};
+    if (!core->saveStates.save(*core->session, core->stateBuffer, extras)) {
+        log(RETRO_LOG_WARN, "save state: %s", core->saveStates.error().c_str());
+        return false;
+    }
+    if (core->stateBuffer.size() > size) {
+        log(RETRO_LOG_ERROR, "save state: %zu bytes, the frontend buffer has %zu", core->stateBuffer.size(), size);
+        return false;
+    }
+    std::memcpy(data, core->stateBuffer.data(), core->stateBuffer.size());
+    std::memset(static_cast<std::uint8_t*>(data) + core->stateBuffer.size(), 0, size - core->stateBuffer.size());
+    return true;
+}
+RETRO_API bool retro_unserialize(const void* data, size_t size) {
+    if (!core || !core->session || !data)
+        return false;
+    const gromada::game::SaveStateExtras extras{&core->input, &core->audioDebt};
+    if (!core->saveStates.load(*core->session, {static_cast<const std::uint8_t*>(data), size}, extras)) {
+        log(RETRO_LOG_WARN, "load state: %s", core->saveStates.error().c_str());
+        return false;
+    }
+    return true;
+}
 RETRO_API void* retro_get_memory_data(unsigned) { return nullptr; }
 RETRO_API size_t retro_get_memory_size(unsigned) { return 0; }
 RETRO_API void retro_cheat_reset() {}
