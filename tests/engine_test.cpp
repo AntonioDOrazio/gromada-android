@@ -376,6 +376,138 @@ void testBaseActions() {
     CHECK(w.getObject(0, 100, 200) == nullptr);
 }
 
+void testBuiltins() {
+    std::vector<Weapon> weapons(1);
+    std::vector<Vid> vids{makeVid({.speedX = 50, .dirs = 32, .maxHP = 10, .army = 1}),
+                          makeVid({.cls = cls::Static, .category = cat::Object, .flags = vf::PresentOnGrid, .army = 0}),
+                          makeVid({.army = 0})};
+    vids[0].name = {'T', 'a', 'n', 'k'};
+    GameEngine e{vids, weapons};
+    e.camera().width = 640;
+    e.camera().height = 480;
+    e.loadEmptyMap(4000, 3000, 99);
+    using script::Value;
+    auto call = [&](int id, std::initializer_list<Value> args) {
+        std::vector<Value> v(args);
+        auto r = e.callBuiltin(id, v);
+        CHECK(r.has_value());
+        return r.value_or(Value{0});
+    };
+    CHECK(!e.callBuiltin(64, {}).has_value());   // Load is the session's
+    const int u = call(68, {0, 1000, 800, 0}).toInt();   // Create
+    CHECK(u > 0);
+    CHECK_EQ(call(109, {u}).toInt(), 1000);   // GetX
+    CHECK_EQ(call(110, {u}).toInt(), 800);    // GetY
+    CHECK_EQ(call(94, {u}).toInt(), 0);       // GetUnitVid
+    CHECK_EQ(call(65, {u, 1010, 900}).toInt(), 150);   // SizeTo: max(10, 100*3/2)
+    CHECK_EQ(call(65, {0, 1, 1}).toInt(), 60000);
+    CHECK_EQ(call(67, {u, 65, 0, 0}).toInt(), 10);     // Action(act_gethp)
+    CHECK_EQ(call(67, {u, act::salut, 0, 0}).toInt(), 0);   // act <= 15: animation
+    CHECK_EQ(e.world().byId(u)->action, act::salut);
+    CHECK_EQ(call(86, {0, 1005, 805}).toInt(), u);     // GetObject
+    CHECK_EQ(call(86, {0, 1100, 805}).toInt(), 0);
+    CHECK_EQ(call(124, {0}).toString(), std::string("Tank"));   // GetVidName
+    const int b = call(68, {2, 1500, 800, 0}).toInt();
+    CHECK(call(123, {0, 1500, 800, 0}).toInt() == b);   // AskPlace finds the blocker
+    CHECK_EQ(call(123, {0, 2500, 800, 0}).toInt(), 0);
+    // FirstUnit/NextUnit walk the units of a vid army from the last
+    const int c = call(68, {0, 2000, 800, 0}).toInt();
+    CHECK_EQ(call(95, {1, cat::Vehicle}).toInt(), c);
+    CHECK_EQ(call(96, {}).toInt(), u);
+    CHECK_EQ(call(96, {}).toInt(), 0);
+    // AddCommand / GetCommands / SetCommands
+    call(87, {u, act::move, 1200, 800});
+    call(87, {u, act::move, 1300, 800});
+    CHECK_EQ(call(121, {u}).toString(), std::string("d1300,800d1200,800"));
+    CHECK_EQ(call(121, {0}).toString(), std::string("d1300,800d1200,800"));   // previous buffer
+    // flagman
+    call(119, {0, u});
+    CHECK_EQ(call(85, {0}).toInt(), u);
+    CHECK_EQ(call(85, {1}).toInt(), 0);
+    // MaxUnit, SetVid
+    call(79, {1, 1});
+    CHECK(call(68, {1, 10, 10, 0}).toInt() > 0);
+    CHECK_EQ(call(68, {1, 20, 10, 0}).toInt(), 0);
+    call(127, {0, 1, 33});   // VID_MAXHP
+    CHECK_EQ(static_cast<int>(e.world().vid(0).maxHP), 33);
+    call(127, {0, 2 + act::death, 1});   // VID_CHILD+15
+    CHECK_EQ(e.world().vid(0).childNvid[act::death], 1);
+    // Random(max) = rand() % (max+1) on the shared generator
+    MsvcRand ref;
+    ref.seed(e.world().rng().state);
+    CHECK_EQ(call(90, {6}).toInt(), ref.next() % 7);
+    CHECK_EQ(e.rand(), ref.next());
+    // GetTime, Pause
+    const int t0 = call(69, {}).toInt();
+    e.beginFrame(100);
+    CHECK_EQ(call(69, {}).toInt(), t0 + 71);
+    call(89, {1});
+    e.beginFrame(50);
+    call(89, {0});
+    CHECK_EQ(call(69, {}).toInt(), t0 + 71);
+    // SetPosition centres the view, SetAutoScroll follows the flagman
+    call(126, {2000, 1500});
+    CHECK_EQ(e.camera().x, 2000 - 320);
+    CHECK_EQ(e.camera().y, 1500 - 240);
+    call(128, {1});
+    OriginalInput in;
+    in.mouseScreenX = 320;
+    in.mouseScreenY = 240;
+    e.setInput(in);
+    e.beginFrame(500);
+    e.updateCamera();
+    CHECK(std::abs(e.camera().x - (1000 - 320)) < std::abs(2000 - 320 - (1000 - 320)));
+    // the player: a left click orders the flagman to move there
+    in.mouseWorldX = 1400;
+    in.mouseWorldY = 900;
+    in.bits = OriginalInput::LClick | OriginalInput::LDown;
+    e.setInput(in);
+    e.tactPlayers();
+    Sprite* f = e.world().byId(u);
+    CHECK_EQ(static_cast<int>(f->wpX), 1400);
+    CHECK_EQ(static_cast<int>(f->wpY), 900);
+    CHECK(!f->commands);   // clearcom before act_move
+    CHECK(e.cursorAt(1400 - e.camera().x, 900 - e.camera().y) == CursorKind::Move);
+    CHECK(e.cursorAt(1500 - e.camera().x, 800 - e.camera().y) == CursorKind::Fight);
+}
+
+void testKassandraKeys() {
+    VidSpec k{.cls = cls::Kassandra, .speedX = 100, .accel = 200, .dirs = 32, .rot = 35, .maxHP = 40, .army = 0};
+    k.anim.fill(1);
+    std::vector<Vid> vids{makeVid(k)};
+    std::vector<Weapon> weapons(1);
+    GameEngine e{vids, weapons};
+    e.loadEmptyMap(3000, 3000, 5);
+    World& w = e.world();
+    Sprite* f = w.createUnit(0, 1500, 1500, 0, 0, 0, nullptr);   // facing north
+    w.players()[0].flagman = f->id;
+    auto frames = [&](int n, std::uint16_t bits) {
+        for (int i = 0; i < n; ++i) {
+            OriginalInput in;
+            in.mouseScreenX = 320;
+            in.mouseScreenY = 240;
+            in.bits = bits;
+            e.beginFrame(17);
+            e.setInput(in);
+            e.tactWorld();
+            e.tactPlayers();
+        }
+    };
+    frames(60, OriginalInput::Up);   // ~1 s forward
+    CHECK(f->y < 1500 - 40);
+    CHECK_EQ(static_cast<int>(f->x), 1500);
+    const auto dir0 = f->direction;
+    frames(20, OriginalInput::Up | OriginalInput::Right);   // turning while moving
+    CHECK(f->direction != dir0);
+    CHECK(f->direction > 0 && f->direction < 128);          // clockwise from north
+    frames(60, 0);                                          // released: decelerates and stops
+    CHECK_EQ(f->speed, 0);
+    frames(30, OriginalInput::Down);                        // reverse at half speed
+    CHECK_EQ(f->speed, -50);
+    frames(5, 0);
+    CHECK_EQ(f->speed, 0);
+}
+
 } // namespace
 
 int main() {
@@ -389,5 +521,7 @@ int main() {
     testTargets();
     testPause();
     testBaseActions();
+    testBuiltins();
+    testKassandraKeys();
     return gromada_test::finish();
 }

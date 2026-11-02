@@ -68,13 +68,18 @@ struct ShadowVisitor {
 
 class GameEngine final : public Engine {
 public:
-    explicit GameEngine(const GameResources& resources) : m_res(resources), m_world(resources) {
+    explicit GameEngine(const GameResources& resources) : m_res(&resources), m_world(resources) {
+        m_palettes.resize(m_world.vids().size());
+    }
+    // Without fw.res (tests): only loadMap(const Map&) and loadEmptyMap() are usable.
+    GameEngine(std::span<const Vid> vids, std::span<const Weapon> weapons) : m_world(vids, weapons) {
         m_palettes.resize(m_world.vids().size());
     }
 
     // ------------------------------------------------------------ map lifecycle
     void loadMap(const std::filesystem::path& mapFile, std::uint32_t rngSeed) override {
-        const Map map = ::loadMap(m_res.vids(), mapFile);
+        if (!m_res) throw std::logic_error("GameEngine::loadMap: built without GameResources");
+        const Map map = ::loadMap(m_res->vids(), mapFile);
         loadMap(map, rngSeed);
     }
     void loadMap(const Map& map, std::uint32_t rngSeed) {
@@ -90,6 +95,14 @@ public:
         m_lights.clear();
         m_iterUnit = -1;
         m_loaded = true;
+    }
+    void loadEmptyMap(int width, int height, std::uint32_t seed) {
+        Map map;
+        map.header.width = static_cast<std::uint32_t>(width);
+        map.header.height = static_cast<std::uint32_t>(height);
+        for (auto& a : map.armies) a = Army{};
+        map.armies[0].a = 1;
+        loadMap(map, seed);
     }
     void unloadMap() override {
         m_world.clear();
@@ -185,7 +198,7 @@ private:
     }
     void saveMapFile(const std::string& name);
 
-    const GameResources& m_res;
+    const GameResources* m_res = nullptr;
     World m_world;
     MapHeaderRawData m_header;
     Camera m_camera;
@@ -545,17 +558,19 @@ inline std::optional<script::Value> GameEngine::callBuiltin(int id, std::span<co
             else if (type == 22) v.flags = static_cast<std::uint16_t>(var);
             else if (type >= 2 && type < 18) v.childNvid[static_cast<std::size_t>(type - 2)] = static_cast<std::int16_t>(var);
             else if (type >= 18 && type < 22 && v.gfx) {
-                // VID_GAMMA+k: alternative palette k of the graphics (0x406d60), shared by the
-                // vids that use the same graphics.
-                for (auto& o : m_world.vids())
-                    if (o.gfx == v.gfx) {
-                        if (!o.altPalettes) {
-                            o.altPalettes = std::make_shared<std::array<std::array<ColorRgb8, 256>, 4>>();
-                            o.altPalettes->fill(v.gfx->palette);
-                        }
-                    }
+                // VID_GAMMA+k (0x406d60): the palette of the graphics is reloaded (so it carries
+                // the global gamma), copied into the 4 alternative palettes the first time, and
+                // palette k becomes that copy with the gamma `var`. Shared by every vid that uses
+                // the same graphics.
+                std::array<ColorRgb8, 256> base = v.gfx->palette;
+                if (m_gamma != 0x777 && v.gfx->dataFormat == 2 && !(v.flags & vf::IgnoreGlobalGamma))
+                    detail::applyGamma(base, m_gamma);
                 auto alt = v.altPalettes;
-                (*alt)[static_cast<std::size_t>(type - 18)] = v.gfx->palette;
+                if (!alt) {
+                    alt = std::make_shared<std::array<std::array<ColorRgb8, 256>, 4>>();
+                    alt->fill(base);
+                }
+                (*alt)[static_cast<std::size_t>(type - 18)] = base;
                 detail::applyGamma((*alt)[static_cast<std::size_t>(type - 18)], var);
                 for (auto& o : m_world.vids())
                     if (o.gfx == v.gfx) o.altPalettes = alt;
@@ -603,7 +618,10 @@ inline void GameEngine::saveMapFile(const std::string& name) {
         map.armies[a] = Army{p.type, p.b, p.netIndex, ids.contains(m_world.byId(p.flagman)) ? ids[m_world.byId(p.flagman)] : 0, {}};
     }
     std::ofstream out{name, std::ios::binary};
-    if (out) ::saveMap(m_res.vids(), map, out);
+    std::vector<Vid> vids;
+    vids.reserve(m_world.vids().size());
+    for (const auto& v : m_world.vids()) vids.push_back(v.src ? *v.src : Vid{});
+    if (out) ::saveMap(vids, map, out);
 }
 
 } // namespace gromada::game
