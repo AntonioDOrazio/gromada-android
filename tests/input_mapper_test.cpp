@@ -71,7 +71,11 @@ void testButtons() {
 // the cursor, A/B held = zoom in/out; in menus and name entry A/B keep their meaning.
 void testCursorSchemeGameplay() {
     Mapper m;
-    const FrameInfo game = frame(), menu = frame(60, Context::Menu), text = frame(60, Context::TextEntry);
+    FixedPlayer player;
+    player.pos = Vec2{320, 240};
+    FrameInfo game = frame();
+    game.player = &player;
+    const FrameInfo menu = frame(60, Context::Menu), text = frame(60, Context::TextEntry);
     m.warpCursor({200, 150});
     auto s = m.update(padWith({pad::L2}), game);
     CHECK(s.left.pressed && s.left.down && !s.right.down && s.cursor == (Vec2{200, 150}) && s.zoomRate == 0);
@@ -117,6 +121,11 @@ void testCursorSchemeGameplay() {
     s = m.update(padWith({pad::R2}), menu);
     CHECK(s.right.pressed);
     m.update(padWith({}), menu);
+    // A screen without the player (logo, splash map between menus: gameplay context, no
+    // flagman): A/B still click, no zoom.
+    s = m.update(padWith({pad::A}), frame());
+    CHECK(s.left.pressed && s.zoomRate == 0);
+    m.update(padWith({}), frame());
     // Name entry: A writes the letter, B deletes, no zoom.
     s = m.update(padWith({pad::A}), text);
     CHECK(s.text == "A" && s.zoomRate == 0 && !s.left.down);
@@ -130,6 +139,13 @@ void testDirectZoom() {
     Settings st;
     st.scheme = Scheme::Direct;
     Mapper m(st);
+    FixedPlayer player;
+    player.pos = Vec2{320, 240};
+    auto frame = [&](int fps = 60, Context ctx = Context::Gameplay) {
+        FrameInfo f = ::frame(fps, ctx);
+        f.player = &player;
+        return f;
+    };
     RawInput in;
     in.r2 = 1;
     auto s = m.update(in, frame());
@@ -164,6 +180,9 @@ void testDirectZoom() {
     // Frame-rate independent by construction (a rate, integrated by the session with dt).
     s = m.update(padWith({pad::R2}), frame(120));
     CHECK_EQ(s.zoomRate, 1.0f);
+    // No player (not a level): no zoom.
+    s = m.update(padWith({pad::R2}), ::frame());
+    CHECK_EQ(s.zoomRate, 0.0f);
 }
 
 void testWeapons() {

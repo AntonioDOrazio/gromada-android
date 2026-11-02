@@ -30,6 +30,7 @@ struct ControlsFrame {
     // for logs and tests
     int flagmanX = 0, flagmanY = 0;          // world
     int targetCount = 0, targetHp = 0;       // all hostile units of the map
+    std::vector<int> targetHps;              // hp of each target (same order as `targets`)
 };
 
 // The weapon's kind for the invisible lock (issue #19), from the data of what its head fires

@@ -4,9 +4,10 @@
 //
 // Schemes (core option):
 //  - VirtualCursor: left stick moves the cursor (response curve + acceleration), right stick
-//    moves it slowly for precision; L2 = left click (move), R2 = right click (attack). In
-//    gameplay (issue #19) A/B held = zoom in/out (PcState::zoomRate +1/-1); in menus (and
-//    with the direct scheme) A = left click, B = right click.
+//    moves it slowly for precision; L2 = left click (move), R2 = right click (attack). In a
+//    level with the player (issue #19) A/B held = zoom in/out (PcState::zoomRate +1/-1);
+//    in menus, name entry, screens without the player (and in the direct scheme) A = left
+//    click, B = right click.
 //  - Direct (twin stick): the left stick drives the Kassandra with move orders the original
 //    understands, a left click at a point ahead of it in the stick direction (renewed while
 //    the stick is held; a short order at its feet when released stops it). The arrows of the
@@ -292,10 +293,13 @@ public:
         followWeapon(f, dt);
 
         // --- RetroPad -----------------------------------------------------------
-        // Cursor scheme in gameplay: A/B zoom (held after a press in gameplay, so that a
-        // button still held from a menu does not zoom), L2/R2 click.
+        // Zoom only in a level with the player (gameplay context and a player position): on
+        // screens without the player (logos, splash maps between menus) A/B keep clicking.
+        // Cursor scheme in a level: A/B zoom (held after a press there, so that a button
+        // still held from a menu does not zoom); L2/R2 click everywhere.
+        const bool inLevel = f.context == Context::Gameplay && f.player && f.player->screenPosition();
         const bool cursorScheme = s.scheme == Scheme::VirtualCursor;
-        const bool cursorGameplay = cursorScheme && f.context == Context::Gameplay;
+        const bool cursorGameplay = cursorScheme && inLevel;
         if (cursorGameplay && edge(pad::A)) m_zoomArmed |= 1;
         if (cursorGameplay && edge(pad::B)) m_zoomArmed |= 2;
         if (!in.has(pad::A)) m_zoomArmed &= ~1u;
@@ -316,7 +320,7 @@ public:
             if (cursorScheme) {
                 leftDown |= trigger(in.l2, in.has(pad::L2)) >= s.triggerClick;
                 rightDown |= trigger(in.r2, in.has(pad::R2)) >= s.triggerClick;
-            } else if (direct) {
+            } else if (direct && inLevel) {
                 m_state.zoomRate = trigger(in.r2, in.has(pad::R2)) - trigger(in.l2, in.has(pad::L2));
             }
             hold(Key::Tab, in.has(pad::Select));

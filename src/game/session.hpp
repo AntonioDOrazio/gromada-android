@@ -247,6 +247,7 @@ public:
             for (const auto& t : aim.targets) {
                 c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
                 c.targetHp += t.hp;
+                c.targetHps.push_back(t.hp);
             }
             c.targetCount = static_cast<int>(aim.targets.size());
         } else {
