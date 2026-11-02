@@ -196,6 +196,33 @@ void testTextManager() {
     CHECK_EQ(texts.printFile(0, 0, "/nonexistent/file.txt", 1), 0);
 }
 
+// TextManager::tick: the original's STEXT sprite (issue #13, checked against the emulated
+// original on the demos): one step per sprite tick (frameDuration, once per frame, never in
+// the creation frame), the step's sound one tick later at the text position, 150 ms pause
+// after a line break without repeating its sound.
+void testTypewriterTicks() {
+    TextManager texts{[](int) { return TypewriterTiming{.stepSeconds = 0.071f, .lineBreakSeconds = 0.150f, .charSfx = 23, .lineSfx = 24}; }};
+    const int t = texts.print(90, 100, "AB\r\nCD", 1);
+    texts.setVisibleCount(t, 0);
+    using V = std::vector<std::pair<int, std::size_t>>;   // (sound or 0, visible) per frame
+    V got;
+    std::uint32_t clock = 1000;
+    for (int frame = 0; frame < 14; ++frame, clock += 47) {
+        texts.tick(clock);
+        const auto s = texts.takeScreenSounds();
+        CHECK(s.size() <= 1);
+        if (!s.empty()) { CHECK_EQ(s[0].x, 90); CHECK_EQ(s[0].y, 100); }
+        got.push_back({s.empty() ? 0 : s[0].nsfx, texts.find(t)->visible});
+    }
+    // ticks every 2 frames (94 ms >= 71); the creation frame does not tick
+    const V want{{0, 0}, {0, 0}, {0, 1}, {0, 1}, {23, 2}, {0, 2},   // 'A', 'B'
+                 {23, 4}, {0, 4},                                // line break (and its run) revealed
+                 {24, 4}, {0, 4},                                // its sound; 150 ms timer running
+                 {0, 5}, {0, 5}, {23, 6}, {0, 6}};               // 'C' (no repeat of 24), 'D'
+    CHECK(got == want);
+    CHECK(texts.takeSounds().empty());   // tick() does not use the non-positional queue
+}
+
 void testDefines() {
     const auto d = parseDefines("#define STR_NONAME \"SENZANOME\"\r\n  #define STR_ON  \"ON\" // c\r\n"
                                 "#define V_FONT         127 //font\r\n#define ESC \"a\\\\b\\\"c\"\r\nint x;\r\n#define\r\n");
@@ -360,6 +387,7 @@ int main() {
     testWrap();
     testEncoding();
     testTextManager();
+    testTypewriterTicks();
     testDefines();
     testPaths();
     testMenuFile();

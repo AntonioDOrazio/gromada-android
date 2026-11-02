@@ -95,7 +95,14 @@ struct TraceSink final : SoundSink {
         return x.loop || static_cast<std::uint32_t>(engine->clock()) - x.start < x.duration;
     }
     void update(std::uint32_t, float, float) override {}
-    void stop(std::uint32_t v) override { if (v < voices.size()) voices[v].active = false; }
+    void stop(std::uint32_t v) override {
+        // only audible stops are traced (the original's fake DirectSound does the same)
+        if (!playing(v) && stopEntry && audio && audio->size() >= *stopEntry) audio->resize(*stopEntry);
+        stopEntry.reset();
+        if (v < voices.size()) voices[v].active = false;
+    }
+    std::string* audio = nullptr;              // the frame's audio entries
+    std::optional<std::size_t> stopEntry;      // where the observer appended the last 's'
 };
 
 struct Options {
@@ -172,12 +179,13 @@ int main(int argc, char** argv) {
     sink.engine = &engine;
     session.setSoundSink(&sink);
     std::string audio;
+    sink.audio = &audio;
     auto& channels = session.soundChannels();
     channels.requestObserver = [&](int nsfx, int pan, int att) {
         audio += std::format("[\"r\",{},{},{}],", nsfx, pan, att);
     };
     channels.channelObserver = [&](char op, int ch, int nsfx, int att, int pan, bool loop) {
-        if (op == 's') audio += std::format("[\"s\",{},{}],", ch, nsfx);
+        if (op == 's') { sink.stopEntry = audio.size(); audio += std::format("[\"s\",{},{}],", ch, nsfx); }
         else if (op == 'u') audio += std::format("[\"u\",{},{},{},{}],", ch, nsfx, att, pan);
         else audio += std::format("[\"p\",{},{},{},{},{}],", ch, nsfx, att, pan, loop ? 1 : 0);
     };

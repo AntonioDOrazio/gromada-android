@@ -111,7 +111,11 @@ class FakeDirectSound:
 
     def _duplicate(self, a):
         src, out = a(1) & 0xFFFFFFFF, a(2) & 0xFFFFFFFF
-        s = self.buffers.get(src, {"bytes": 0, "avg": 0})
+        s = self.buffers.get(src)
+        if s is None:
+            # 0x408a2b also tries the channel being allocated, whose buffer is still null:
+            # DirectSound refuses, the scheduler then creates a buffer
+            return 0x80070057      # DSERR_INVALIDPARAM
         self.o.w32(out, self._new_buffer(s["bytes"], s["avg"]))
         return 0
 
@@ -169,10 +173,13 @@ class FakeDirectSound:
     def _stop(self, a):
         buf = a(0) & 0xFFFFFFFF
         b = self.buffers.get(buf)
+        # Only audible stops are logged: Sound::Tact stops every inactive channel holding a
+        # looping sound again at every frame (0x409052 does not test the active flag)
+        if b is not None and self.playing(b):
+            ch, nsfx = self.channel_of(buf)
+            self.ops.append(["s", ch, nsfx])
         if b is not None:
             b["playing"] = False
-        ch, nsfx = self.channel_of(buf)
-        self.ops.append(["s", ch, nsfx])
         return 0
 
     def _pan(self, a):

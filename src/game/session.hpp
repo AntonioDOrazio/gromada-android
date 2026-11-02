@@ -444,6 +444,12 @@ private:
         m_soundCam = m_engine->camera();
         m_engine->tactWorld();
 
+        // Menus and texts are sprites of the world in the original: they tick in World::Tact,
+        // before the menu update (0x40c1d0) of the frame.
+        for (const int s : m_ui.update(static_cast<float>(dtSeconds), static_cast<std::uint32_t>(m_engine->clock())))
+            queueSfx(s);
+        m_screenSounds = m_ui.takeScreenSounds();
+
         // Menu update: screen coordinates of the script's screen.
         const auto [ox, oy] = menuOrigin();
         const int mx = m_demo ? rec.mouseScreenX : rec.mouseScreenX - ox;
@@ -453,8 +459,6 @@ private:
             rec.bits = bits;
             m_engine->setInput(rec);
         }
-        for (const int s : m_ui.update(static_cast<float>(dtSeconds)))
-            queueSfx(s);
         updateStateBar();
 
         m_engine->tactPlayers();
@@ -834,6 +838,12 @@ private:
             const int dx = e.x - (cam.x + cam.width / 2), dy = e.y - (cam.y + cam.height / 2);
             m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
         }
+        // Texts are screen sprites of the font's layer (14), after the world's sprites: their
+        // sounds are relative to the centre of the script's screen (0x409ab4).
+        for (const auto& e : std::exchange(m_screenSounds, {})) {
+            const int dx = e.x - m_screenW / 2, dy = e.y - m_screenH / 2;
+            m_sfx.request(e.nsfx, 4 * dx, -2 * std::max(std::abs(dx), std::abs(dy)));
+        }
         m_sfx.tact(*m_sink, static_cast<std::uint32_t>(m_engine->clock()));
     }
 
@@ -1035,7 +1045,8 @@ private:
 
     MixerSink m_sfxSink;
     SoundSink* m_sink = &m_sfxSink;
-    Camera m_soundCam;                 // camera during tactWorld() (positional sounds)   // replaced by tools (game_trace) through setSoundSink()
+    Camera m_soundCam;                 // camera during tactWorld() (positional sounds)
+    std::vector<ui::ScreenSound> m_screenSounds;   // typewriter sounds of the frame   // replaced by tools (game_trace) through setSoundSink()
     SoundChannels m_sfx{[this](int n) { return sound(n); },
                         [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV
