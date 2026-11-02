@@ -893,15 +893,21 @@ public:
     }
 
     // 0x40a770 FirstObstacleOnLine(x2, y2, z2): 16 px steps from the sprite; returns
-    // (y << 16) | x of the first blocked probe, 0 if the line is free.
+    // (y << 16) + x of the first blocked probe as a 32-bit sum (a negative x borrows from y, like
+    // the original), 0 if the line is free.
     std::uint32_t firstObstacleOnLine(Sprite& s, int x2, int y2, int z2) {
+        return firstObstacleOnLine(s, x2, y2, z2, [this](Sprite& m, int x, int y, int z) { return askPlace(m, x, y, z) != nullptr; });
+    }
+    // The same with the probe (AskPlace 0x40a430) passed in (oracle tests).
+    template <class Probe>
+    std::uint32_t firstObstacleOnLine(Sprite& s, int x2, int y2, int z2, Probe&& blocked) {
         const VidInfo& v = vidOf(s);
         if (v.category != cat::Vehicle && v.category != cat::Avia && v.category != cat::Cannon) return 0;
         if (v.flags & vf::NoCollision) return 0;
         int major = s.x, minor = s.y;
         int sMajor = x2 > s.x ? 1 : -1, sMinor = y2 > s.y ? 1 : -1;
-        std::uint32_t lMajor = static_cast<std::uint32_t>(std::abs(x2 - s.x));
-        std::uint32_t lMinor = static_cast<std::uint32_t>(std::abs(y2 - s.y));
+        std::uint32_t lMajor = static_cast<std::uint32_t>(fx::wrapAbs(fx::wrapSub(x2, s.x)));
+        std::uint32_t lMinor = static_cast<std::uint32_t>(fx::wrapAbs(fx::wrapSub(y2, s.y)));
         bool swapped = false;
         if (lMinor > lMajor) {
             std::swap(major, minor);
@@ -917,8 +923,8 @@ public:
         for (std::uint32_t t = 0; t < lMajor; t += 16) {
             if (t > 16) {
                 const int px = swapped ? minor : major, py = swapped ? major : minor;
-                if (askPlace(s, px, py, z))
-                    return (static_cast<std::uint32_t>(py) << 16) + static_cast<std::uint32_t>(px & 0xffff);
+                if (blocked(s, px, py, z))
+                    return (static_cast<std::uint32_t>(py) << 16) + static_cast<std::uint32_t>(px);   // 32-bit sum (0x40a91b)
             }
             if (err >= 0) {
                 do { minor += sMinor * 16; err -= twoMajor; } while (err >= 0);
@@ -927,8 +933,8 @@ public:
             z += zStep;
             err += twoMinor;
         }
-        if (askPlace(s, x2, y2, z2))
-            return (static_cast<std::uint32_t>(y2) << 16) + static_cast<std::uint32_t>(x2 & 0xffff);
+        if (blocked(s, x2, y2, z2))
+            return (static_cast<std::uint32_t>(y2) << 16) + static_cast<std::uint32_t>(x2);
         return 0;
     }
 

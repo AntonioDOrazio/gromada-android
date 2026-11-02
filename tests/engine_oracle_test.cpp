@@ -629,6 +629,83 @@ void testDamage() {
     });
 }
 
+// ---- issue #12 families: AskPlace, AskPlaceVid, FirstObstacleOnLine ----------------------------
+// Objects of a check_move-like case (vids 2.., filed in their cellX/cellY).
+std::vector<Sprite*> placeObjects(GridWorld& g, const Row& r) {
+    std::vector<Sprite*> objs;
+    for (int k = 0; k < int(r("nObjects")); ++k) {
+        VidInfo& ov = g.w.vid(2 + k);
+        ov.category = std::uint8_t(r.obj(k, "category"));
+        ov.collisionMask = std::uint8_t(r.obj(k, "collisionMask"));
+        setSizes(ov, int(r.obj(k, "sizeX")), int(r.obj(k, "sizeY")), int(r.obj(k, "sizeZ")));
+        Sprite* o = g.place(2 + k, int(r.obj(k, "x")), int(r.obj(k, "y")), int(r.obj(k, "z")), int(r.obj(k, "cellX")),
+                            int(r.obj(k, "cellY")));
+        ov.flags = std::uint16_t(r.obj(k, "flags"));
+        o->action = std::uint8_t(r.obj(k, "action"));
+        objs.push_back(o);
+    }
+    return objs;
+}
+Sprite* placeSelf(GridWorld& g, const Row& r, int x, int y, int z, bool inGrid) {
+    VidInfo& sv = g.w.vid(1);
+    sv.category = std::uint8_t(r("category"));
+    sv.collisionMask = std::uint8_t(r("collisionMask"));
+    setSizes(sv, int(r("sizeX")), int(r("sizeY")), int(r("sizeZ")));
+    Sprite* self = inGrid ? g.place(1, x, y, z, x >> 5, y >> 5) : spawn(g.w, 1, 10, 10, z, false);
+    self->x = std::int16_t(x); self->y = std::int16_t(y); self->z = std::int16_t(z);
+    sv.flags = std::uint16_t(r("flags"));
+    return self;
+}
+int indexOf(const std::vector<Sprite*>& objs, const Sprite* self, const Sprite* b) {
+    if (!b) return -1;
+    if (b == self) return -2;
+    return int(std::find(objs.begin(), objs.end(), b) - objs.begin());
+}
+
+void testCollisionQueries() {
+    GridWorld g;
+    forCases("ask_place", [&](Tally& t, int i, Row r, const Family&) {
+        g.reset();
+        const int az = int(r("argZ"));
+        Sprite* self = placeSelf(g, r, int(r("selfX")), int(r("selfY")), az, r("selfInGrid") != 0);
+        const auto objs = placeObjects(g, r);
+        Sprite* b = r("fn") == 0 ? g.w.askPlace(*self, int(r("argX")), int(r("argY")), az)
+                                 : g.w.askPlaceVid(int(r("argX")), int(r("argY")), az, 1);
+        EXPECT(t, i, "blocker", r("blocker"), indexOf(objs, self, b));
+    });
+    forCases("first_obstacle_grid", [&](Tally& t, int i, Row r, const Family&) {
+        g.reset();
+        Sprite* self = placeSelf(g, r, int(r("x")), int(r("y")), int(r("z")), r("selfInGrid") != 0);
+        placeObjects(g, r);
+        EXPECT(t, i, "ret", r("ret"), std::int32_t(g.w.firstObstacleOnLine(*self, int(r("x2")), int(r("y2")), int(r("z2")))));
+    });
+    std::vector<Vid> vids = blankVids(4);
+    World w{vids, {}};
+    w.loadEmpty(1000, 1000, 1);
+    Sprite* s = spawn(w, 1, 10, 10, 0, false);
+    forCases("first_obstacle", [&](Tally& t, int i, Row r, const Family&) {
+        w.vid(1).category = std::uint8_t(r("category"));
+        w.vid(1).flags = std::uint16_t(r("flags"));
+        s->x = std::int16_t(r("x")); s->y = std::int16_t(r("y")); s->z = std::int16_t(r("z"));
+        std::int64_t n = 0, sum[3] = {0, 0, 0}, last[3] = {0, 0, 0};
+        const auto blockAt = r("blockAt");
+        const auto ret = w.firstObstacleOnLine(*s, int(r("x2")), int(r("y2")), int(r("z2")), [&](Sprite& m, int x, int y, int z) {
+            EXPECT(t, i, "probe this", 1, &m == s);
+            sum[0] += x; sum[1] += y; sum[2] += z;
+            last[0] = x; last[1] = y; last[2] = z;
+            return n++ == blockAt;
+        });
+        EXPECT(t, i, "ret", r("ret"), std::int32_t(ret));
+        EXPECT(t, i, "nProbes", r("nProbes"), n);
+        EXPECT(t, i, "sumX", r("sumX"), sum[0]);
+        EXPECT(t, i, "sumY", r("sumY"), sum[1]);
+        EXPECT(t, i, "sumZ", r("sumZ"), sum[2]);
+        EXPECT(t, i, "lastX", r("lastX"), last[0]);
+        EXPECT(t, i, "lastY", r("lastY"), last[1]);
+        EXPECT(t, i, "lastZ", r("lastZ"), last[2]);
+    });
+}
+
 } // namespace
 
 int main() {
@@ -641,5 +718,6 @@ int main() {
     testCommands();
     testCheckMove();
     testDamage();
+    testCollisionQueries();
     return gromada_test::finish();
 }
