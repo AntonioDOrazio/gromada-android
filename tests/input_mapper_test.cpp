@@ -47,21 +47,123 @@ RawInput touch(std::initializer_list<Vec2> fingers) {
 }
 
 void testButtons() {
+    // In menus A = left click, B = right click (both schemes).
     Mapper m;
-    auto s = m.update(padWith({pad::A}), frame());
+    const FrameInfo menu = frame(60, Context::Menu);
+    auto s = m.update(padWith({pad::A}), menu);
     CHECK(s.left.down && s.left.pressed && !s.right.down);
-    s = m.update(padWith({pad::A}), frame());
+    s = m.update(padWith({pad::A}), menu);
     CHECK(s.left.down && !s.left.pressed);
-    s = m.update(padWith({}), frame());
+    s = m.update(padWith({}), menu);
     CHECK(!s.left.down && s.left.released);
 
-    s = m.update(padWith({pad::B, pad::Start, pad::Select, pad::X, pad::Up, pad::Left}), frame());
+    s = m.update(padWith({pad::B, pad::Start, pad::Select, pad::X, pad::Up, pad::Left}), menu);
     CHECK(s.right.pressed && !s.left.down);
     CHECK(s.key(Key::Escape).pressed && s.key(Key::Tab).pressed && s.key(Key::Enter).pressed);
     CHECK(s.key(Key::Up).down && s.key(Key::Left).down && !s.key(Key::Down).down && !s.key(Key::Right).down);
     CHECK(near(s.move.x, -0.7071f) && near(s.move.y, -0.7071f));
-    s = m.update(padWith({}), frame());
+    s = m.update(padWith({}), menu);
     CHECK(s.right.released && s.key(Key::Escape).released && s.key(Key::Tab).released && s.key(Key::Up).released);
+    CHECK_EQ(s.zoomRate, 0.0f);
+}
+
+// Issue #19, cursor scheme in gameplay: L2 = left click (move), R2 = right click (attack) at
+// the cursor, A/B held = zoom in/out; in menus and name entry A/B keep their meaning.
+void testCursorSchemeGameplay() {
+    Mapper m;
+    const FrameInfo game = frame(), menu = frame(60, Context::Menu), text = frame(60, Context::TextEntry);
+    m.warpCursor({200, 150});
+    auto s = m.update(padWith({pad::L2}), game);
+    CHECK(s.left.pressed && s.left.down && !s.right.down && s.cursor == (Vec2{200, 150}) && s.zoomRate == 0);
+    s = m.update(padWith({}), game);
+    CHECK(s.left.released);
+    s = m.update(padWith({pad::R2}), game);
+    CHECK(s.right.pressed && !s.left.down);
+    s = m.update(padWith({pad::R2}), game);
+    CHECK(s.right.down && !s.right.pressed); // held: continuous attack, as the mouse button
+    m.update(padWith({}), game);
+    // Analog triggers click past triggerClick (half way).
+    RawInput in;
+    in.l2 = 0.3f;
+    s = m.update(in, game);
+    CHECK(!s.left.down);
+    in.l2 = 0.8f;
+    s = m.update(in, game);
+    CHECK(s.left.pressed);
+    m.update(RawInput{}, game);
+    // A held = zoom in (+1), B held = zoom out (-1), both = 0; no clicks, no zoom once released.
+    s = m.update(padWith({pad::A}), game);
+    CHECK(s.zoomRate == 1 && !s.left.down && !s.right.down);
+    s = m.update(padWith({pad::A}), game);
+    CHECK(s.zoomRate == 1);
+    s = m.update(padWith({pad::A, pad::B}), game);
+    CHECK(s.zoomRate == 0 && !s.right.down);
+    s = m.update(padWith({pad::B}), game);
+    CHECK(s.zoomRate == -1 && !s.right.down);
+    s = m.update(padWith({}), game);
+    CHECK(s.zoomRate == 0);
+    // Menus: A/B click, no zoom; L2/R2 click as well (the cursor scheme's buttons).
+    s = m.update(padWith({pad::A}), menu);
+    CHECK(s.left.pressed && s.zoomRate == 0);
+    // A held from the menu into the game does not zoom until pressed again in the game.
+    s = m.update(padWith({pad::A}), game);
+    CHECK(s.zoomRate == 0 && !s.left.down);
+    s = m.update(padWith({}), game);
+    s = m.update(padWith({pad::A}), game);
+    CHECK(s.zoomRate == 1);
+    s = m.update(padWith({pad::B}), menu);
+    CHECK(s.right.pressed && s.zoomRate == 0);
+    m.update(padWith({}), menu);
+    s = m.update(padWith({pad::R2}), menu);
+    CHECK(s.right.pressed);
+    m.update(padWith({}), menu);
+    // Name entry: A writes the letter, B deletes, no zoom.
+    s = m.update(padWith({pad::A}), text);
+    CHECK(s.text == "A" && s.zoomRate == 0 && !s.left.down);
+    m.update(padWith({}), text);
+    s = m.update(padWith({pad::B}), text);
+    CHECK(s.key(Key::Backspace).pressed && s.zoomRate == 0);
+}
+
+// Issue #19, direct scheme: L2/R2 = analog zoom (pressure = rate), digital fallback 1.
+void testDirectZoom() {
+    Settings st;
+    st.scheme = Scheme::Direct;
+    Mapper m(st);
+    RawInput in;
+    in.r2 = 1;
+    auto s = m.update(in, frame());
+    CHECK_NEAR(s.zoomRate, 1);
+    CHECK(!s.left.down && !s.right.down);
+    in.r2 = 0.54f; // (0.54 - 0.08) / 0.92 = 0.5
+    s = m.update(in, frame());
+    CHECK_NEAR(s.zoomRate, 0.5f);
+    in.r2 = 0.05f; // inside the dead zone
+    s = m.update(in, frame());
+    CHECK_EQ(s.zoomRate, 0.0f);
+    in = {};
+    in.l2 = 0.54f;
+    s = m.update(in, frame());
+    CHECK_NEAR(s.zoomRate, -0.5f);
+    in.r2 = 1; // both: the difference
+    s = m.update(in, frame());
+    CHECK_NEAR(s.zoomRate, 0.5f);
+    // A pad without analog triggers: the digital buttons are full pressure.
+    s = m.update(padWith({pad::R2}), frame());
+    CHECK_EQ(s.zoomRate, 1.0f);
+    s = m.update(padWith({pad::L2}), frame());
+    CHECK_EQ(s.zoomRate, -1.0f);
+    CHECK(!s.left.down && !s.right.down);
+    // A/B keep their meaning in the direct scheme (click at the aim point), no zoom.
+    s = m.update(padWith({pad::A}), frame());
+    CHECK(s.left.pressed && s.zoomRate == 0);
+    // Menus: no zoom.
+    s = m.update(padWith({pad::R2}), frame(60, Context::Menu));
+    CHECK_EQ(s.zoomRate, 0.0f);
+    CHECK(!s.right.down); // and the triggers do not click there in the direct scheme
+    // Frame-rate independent by construction (a rate, integrated by the session with dt).
+    s = m.update(padWith({pad::R2}), frame(120));
+    CHECK_EQ(s.zoomRate, 1.0f);
 }
 
 void testWeapons() {
@@ -178,8 +280,9 @@ void testDirect() {
 
     Mapper m(st);
     auto s = m.update(RawInput{}, f);
-    // Aim point: straight up at the default range (160 in the game metric = 106.7 px up).
-    CHECK(!s.moveOrder && s.cursor.x == 100 && near(s.cursor.y, 200 - 160 / 1.5f));
+    // Aim point: straight up at the default range (160 px: the flagman's reach is Euclidean).
+    CHECK(!s.moveOrder && s.cursor.x == 100 && near(s.cursor.y, 200 - 160));
+    CHECK(s.hasAimTarget && s.aimTarget == s.cursor && !s.cursorHidden);
     CHECK(!s.edgeScroll); // the aim point never scrolls the view
     auto stick = [](Vec2 l, Vec2 r = {}) { RawInput in; in.leftStick = l; in.rightStick = r; return in; };
 
@@ -230,7 +333,7 @@ void testDirect() {
     // All the way: aim and fire (right button held at the aim point).
     s = m.update(stick({}, {0, -1}), f);
     CHECK(s.aiming && s.right.pressed);
-    CHECK(s.cursor.x == 100 && near(s.cursor.y, 200 - 160 / 1.5f));
+    CHECK(s.cursor.x == 100 && near(s.cursor.y, 200 - 160));
     s = m.update(stick({}, {0, -1}), f);
     CHECK(s.right.down && !s.right.pressed);
     // Released: no fire, the aim point stays and travels with the player.
@@ -238,15 +341,23 @@ void testDirect() {
     CHECK(!s.aiming && s.right.released);
     player.pos = Vec2{300, 250};
     s = m.update(stick({}), f);
-    CHECK(s.cursor.x == 300 && near(s.cursor.y, 250 - 160 / 1.5f));
-    // B attacks at the aim point; the range comes from the engine (game metric).
+    CHECK(s.cursor.x == 300 && near(s.cursor.y, 250 - 160));
+    // B attacks at the aim point; the range comes from the engine.
     f.aimDistance = 50;
     s = m.update(stick({}, {-1, 0}), f);
     CHECK(s.cursor == (Vec2{250, 250}) && s.right.down);
-    // An aim point beyond the screen is pulled in along the same line (exact direction).
+    // An aim point beyond the screen stays the aim point (the record's mouse point: full
+    // range); the reticle is drawn on the border along the same line.
     f.aimDistance = 600;
     s = m.update(stick({}, {1, 0.5f}), f);
     CHECK(s.cursor.x <= 639 && near((s.cursor.y - 250) / (s.cursor.x - 300), 0.5f));
+    CHECK(s.hasAimTarget && near((s.aimTarget - Vec2{300, 250}).length(), 600, 0.05f));
+    CHECK(near((s.aimTarget.y - 250) / (s.aimTarget.x - 300), 0.5f));
+    // The zoom scales the range (positions are screen px, the range world px).
+    f.zoom = 0.5f;
+    s = m.update(stick({}, {1, 0.5f}), f);
+    CHECK(near((s.aimTarget - Vec2{300, 250}).length(), 300, 0.05f));
+    f.zoom = 1;
     f.aimDistance = 50;
     // No player position: aim from the screen center.
     player.pos.reset();
@@ -260,7 +371,7 @@ void testDirect() {
     player.pos = Vec2{100, 200};
     m.update(touch({{0.25f, 0.5f}}), f);
     s = m.update(RawInput{}, f); // released: tap = left click there
-    CHECK(s.left.pressed && s.cursor == (Vec2{160, 240}));
+    CHECK(s.left.pressed && s.cursor == (Vec2{160, 240}) && s.aimTarget == s.cursor);
     player.pos = Vec2{110, 200};
     s = m.update(RawInput{}, f);
     CHECK(s.cursor == (Vec2{170, 240}) && !s.edgeScroll);
@@ -304,34 +415,91 @@ void testDirectFrameRate() {
     CHECK(near(a.back(), 1.5f, 0.02f));
 }
 
-void testAimAssist() {
+// Issue #19: the invisible lock. The nearest target inside the weapon's corridor around the
+// stick direction, within the weapon range (Euclidean), on or off screen; else the range along
+// the stick. Wider corridor for slow/inaccurate weapons.
+void testInvisibleLock() {
     Settings st;
     st.scheme = Scheme::Direct;
     FixedPlayer player;
     player.pos = Vec2{320, 240};
     const AimTarget targets[] = {
-        {{320, 80}, {320, 100}},  // up, 140 px (210 in the game metric)
-        {{420, 220}, {420, 240}}, // right, 100 px
-        {{320, -20}, {320, 0}},   // up, off screen: never
-        {{100, 470}, {100, 480}}, // down-left, 240/360: out of range
+        {{320, 80}, {320, 100}},  // 0: up, 140 px
+        {{420, 220}, {420, 240}}, // 1: right, 100 px
+        {{330, -90}, {330, -70}}, // 2: up, 310 px, off screen, 10 px off the line
+        {{100, 470}, {100, 480}}, // 3: down-left, 325 px: out of a 280 range
+        {{540, 160}, {540, 180}}, // 4: right, 220 px, 60 px above the line
     };
     FrameInfo f = frame();
     f.player = &player;
     f.targets = targets;
     f.aimDistance = 280;
+    f.weaponKind = WeaponKind::Direct;
     Mapper m(st);
     auto aim = [&](Vec2 r) { RawInput in; in.rightStick = r; return m.update(in, f); };
     auto s = aim({0, -1});
-    CHECK(s.aimLocked && s.cursor == (Vec2{320, 80}));
-    s = aim({1, 0.3f}); // 17 degrees off: still the target on the right
-    CHECK(s.aimLocked && s.cursor == (Vec2{420, 220}));
-    s = aim({0.7f, -0.7f}); // 45 degrees from both: no lock, weapon range along the stick
-    CHECK(!s.aimLocked && near(s.cursor.x - 320, 240 - s.cursor.y));
-    s = aim({-0.6f, 0.8f}); // the one down-left is out of range
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{320, 80}) && s.cursor == s.aimTarget); // nearest of 0 and 2
+    CHECK(s.right.pressed); // full deflection fires (fireThreshold 70 %)
+    s = aim({1, 0});
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{420, 220})); // 1, not 4 (60 px off a 40 px corridor)
+    s = aim({0.6f, 0.8f}); // nothing in that corridor: full range along the stick
+    CHECK(!s.aimLocked && near(s.aimTarget.x, 320 + 280 * 0.6f) && near(s.aimTarget.y, 240 + 280 * 0.8f));
+    CHECK(s.cursor == s.aimTarget); // on screen: the reticle is the aim point
+    s = aim({-0.6f, 0.8f}); // 3 is in the corridor but out of range
+    CHECK(!s.aimLocked && near((s.aimTarget - Vec2{320, 240}).length(), 280, 0.05f));
+    // Off screen and beyond the old fixed distance (280 / 1.5 = 187 px up): locked when in range.
+    f.aimDistance = 420; // HEPHEST after HEADER.INI's SetVid(18, VID_WEAPONRANGE, 280*3/2)
+    const AimTarget far[] = {targets[2]};
+    f.targets = far;
+    s = aim({0, -1});
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{330, -90}) && s.hasAimTarget);
+    CHECK(s.cursor.y >= 0 && s.cursor.y <= 3 && near((s.cursor.x - 320) / (s.cursor.y - 240), 10.0f / -330)); // reticle on the border
+    f.aimDistance = 300; // 310 px away: out of range, the shot goes to the full 300 px
+    s = aim({0, -1});
+    CHECK(!s.aimLocked && s.aimTarget == (Vec2{320, -60}));
+    // The near end of the corridor is a cone: a unit beside the player is not "ahead".
+    const AimTarget beside[] = {{{345, 215}, {345, 235}}}; // 5 px ahead, 25 px to the side
+    f.targets = beside;
+    f.aimDistance = 280;
+    s = aim({0, -1});
     CHECK(!s.aimLocked);
-    f.aimDistance = 0; // range unknown: any distance
-    s = aim({-0.4f, 0.9f});
-    CHECK(s.aimLocked && s.cursor == (Vec2{100, 470}));
+    // Corridor per weapon kind: 60 px off the line is outside the direct corridor (40) and
+    // inside the magnetic one (80) of ballistic cannons, mine layers and missile launchers.
+    const AimTarget side[] = {{{380, 20}, {380, 40}}}; // 200 px up, 60 px right
+    f.targets = side;
+    for (const WeaponKind k : {WeaponKind::Unknown, WeaponKind::Direct}) {
+        f.weaponKind = k;
+        CHECK(!aim({0, -1}).aimLocked);
+    }
+    for (const WeaponKind k : {WeaponKind::Ballistic, WeaponKind::Missile, WeaponKind::MineLayer, WeaponKind::FixedMineLayer}) {
+        f.weaponKind = k;
+        s = aim({0, -1});
+        CHECK(s.aimLocked && s.aimTarget == (Vec2{380, 20}));
+    }
+    // Corridor scale (core option) and zoom (screen px per world px) widen it too.
+    f.weaponKind = WeaponKind::Direct;
+    st.corridorScale = 1.6f; // 64 px
+    m.configure(st);
+    CHECK(aim({0, -1}).aimLocked);
+    st.corridorScale = 1;
+    m.configure(st);
+    f.zoom = 2; // 80 px on screen, range 560 px
+    CHECK(aim({0, -1}).aimLocked);
+    f.zoom = 1;
+    CHECK(m.corridorFor(WeaponKind::Direct).halfWidth == 40 && m.corridorFor(WeaponKind::Missile).halfWidth == 80);
+    CHECK(m.corridorFor(WeaponKind::Ballistic, 0.5f).halfWidth == 40);
+    // Nearest wins, whatever the angle inside the corridor.
+    const AimTarget two[] = {{{340, 40}, {340, 60}}, {{320, 120}, {320, 140}}};
+    f.targets = two;
+    f.weaponKind = WeaponKind::Missile;
+    s = aim({0, -1});
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{320, 120}));
+    // Range unknown: any distance.
+    f.targets = targets;
+    f.weaponKind = WeaponKind::Direct;
+    f.aimDistance = 0;
+    s = aim({-0.676f, 0.737f});
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{100, 470}));
     // Released: the lock stays (the aim direction is kept) and B fires there.
     f.aimDistance = 280;
     s = aim({0, -0.5f});
@@ -340,16 +508,30 @@ void testAimAssist() {
     RawInput b;
     b.set(pad::B);
     s = m.update(b, f);
-    CHECK(s.aimLocked && s.cursor == (Vec2{320, 80}) && s.right.pressed);
-    // Off: plain range.
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{320, 80}) && s.right.pressed);
+    // Reticle off (Geometry Wars style): nothing drawn while the pad aims; touch shows it.
+    st.reticle = false;
+    m.configure(st);
+    s = aim({0, -1});
+    CHECK(s.cursorHidden && s.aimLocked);
+    m.update(touch({{0.5f, 0.25f}}), f);
+    s = m.update(RawInput{}, f);
+    CHECK(!s.cursorHidden && s.source == PointerSource::Touch);
+    s = aim({0, -1});
+    CHECK(s.cursorHidden);
+    CHECK(!m.update(RawInput{}, frame(60, Context::Menu)).cursorHidden); // menus: always a cursor
+    st.reticle = true;
+    // Lock off: plain range.
     st.aimAssist = false;
     m.configure(st);
     s = aim({0, -1});
-    CHECK(!s.aimLocked && near(s.cursor.y, 240 - 280 / 1.5f));
+    CHECK(!s.aimLocked && s.aimTarget == (Vec2{320, -40}));
     // helpers
     CHECK(near(gameDistance({-10, 20}), 30) && near(gameDistance({40, 20}), 40));
     CHECK(near(rayToBorder({100, 100}, {1, 0}, 640, 480, 8), 531));
     CHECK(near(rayToBorder({100, 100}, {0, -1}, 640, 480, 8), 92));
+    CHECK(reticleOnScreen({100, 100}, {50, 60}, {640, 480}) == (Vec2{50, 60}));
+    CHECK(reticleOnScreen({100, 100}, {100, -300}, {640, 480}) == (Vec2{100, 2}));
 }
 
 // L1/R1 follow the weapon the game reports, and repeat the key until the game has switched
@@ -549,7 +731,9 @@ int main() {
     testCursorStick();
     testDirect();
     testDirectFrameRate();
-    testAimAssist();
+    testInvisibleLock();
+    testCursorSchemeGameplay();
+    testDirectZoom();
     testWeaponRequests();
     testTouch();
     testMouse();

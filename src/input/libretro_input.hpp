@@ -21,7 +21,9 @@ inline constexpr retro_variable coreOptions[] = {
     {"gromada_pointer", "Touchscreen e mouse; Entrambi|Solo touchscreen|Solo mouse|Disattivati"},
     {"gromada_keyboard", "Tastiera fisica; Disattivata|Attiva"},
     {"gromada_camera", "Telecamera; Automatica (segue il giocatore nello schema diretto e col touch)|Segue sempre il giocatore|Originale (scorrimento ai bordi)"},
-    {"gromada_aim_assist", "Mira assistita (schema diretto); Attiva|Disattivata"},
+    {"gromada_aim_assist", "Mira assistita: aggancio del bersaglio (schema diretto); Attiva|Disattivata"},
+    {"gromada_reticle", "Mirino (schema diretto); Visibile|Nascosto (stile Geometry Wars)"},
+    {"gromada_lock_corridor", "Larghezza corridoio di aggancio; Normale|Stretta (0.6x)|Larga (1.5x)|Molto larga (2x)"},
 };
 
 // getVar(key) -> value or nullptr (the core's RETRO_ENVIRONMENT_GET_VARIABLE wrapper).
@@ -40,7 +42,10 @@ Settings readSettings(GetVar&& getVar) {
     if (const char* v = getVar("gromada_keyboard")) s.keyboard = is(v, "Attiva");
     if (const char* v = getVar("gromada_camera"))
         s.camera = is(v, "Segue sempre") ? CameraFollow::Always : is(v, "Originale") ? CameraFollow::Off : CameraFollow::Auto;
-    if (const char* v = getVar("gromada_aim_assist")) s.aimAssist = !is(v, "Disattivata");
+    if (const char* v = getVar("gromada_aim_assist")) s.aimAssist = !is(v, "Disattiva");
+    if (const char* v = getVar("gromada_reticle")) s.reticle = !is(v, "Nascosto");
+    if (const char* v = getVar("gromada_lock_corridor"))
+        s.corridorScale = is(v, "Stretta") ? 0.6f : is(v, "Larga") ? 1.5f : is(v, "Molto larga") ? 2.0f : 1.0f;
     return s;
 }
 
@@ -50,6 +55,8 @@ inline std::span<const retro_input_descriptor> inputDescriptors(Scheme scheme) {
 #define GROMADA_PAD(id, text) {0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_##id, text}
 #define GROMADA_STICK(side, axis, text) \
     {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_##side, RETRO_DEVICE_ID_ANALOG_##axis, text}
+#define GROMADA_TRIGGER(id, text) \
+    {0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_##id, text}
 #define GROMADA_COMMON                                                                  \
     GROMADA_PAD(L, "Arma precedente (tasti 1-4)"),                                      \
     GROMADA_PAD(R, "Arma successiva (tasti 1-4)"),                                      \
@@ -60,8 +67,10 @@ inline std::span<const retro_input_descriptor> inputDescriptors(Scheme scheme) {
     GROMADA_PAD(LEFT, "Gira a sinistra (freccia)"), GROMADA_PAD(RIGHT, "Gira a destra (freccia)")
     static constexpr retro_input_descriptor cursor[] = {
         GROMADA_COMMON,
-        GROMADA_PAD(A, "Muovi / conferma (click sinistro)"),
-        GROMADA_PAD(B, "Attacca (click destro)"),
+        GROMADA_PAD(A, "Zoom avanti (tenuto) / conferma nei menu (click sinistro)"),
+        GROMADA_PAD(B, "Zoom indietro (tenuto) / indietro nei menu (click destro)"),
+        GROMADA_PAD(L2, "Muovi (click sinistro)"),
+        GROMADA_PAD(R2, "Attacca (click destro)"),
         GROMADA_STICK(LEFT, X, "Cursore (orizzontale)"),
         GROMADA_STICK(LEFT, Y, "Cursore (verticale)"),
         GROMADA_STICK(RIGHT, X, "Cursore lento, preciso (orizzontale)"),
@@ -71,12 +80,17 @@ inline std::span<const retro_input_descriptor> inputDescriptors(Scheme scheme) {
         GROMADA_COMMON,
         GROMADA_PAD(A, "Vai al punto mirato / conferma (click sinistro)"),
         GROMADA_PAD(B, "Spara al punto mirato (click destro)"),
+        GROMADA_PAD(L2, "Zoom indietro"),
+        GROMADA_PAD(R2, "Zoom avanti"),
+        GROMADA_TRIGGER(L2, "Zoom indietro (pressione = velocita')"),
+        GROMADA_TRIGGER(R2, "Zoom avanti (pressione = velocita')"),
         GROMADA_STICK(LEFT, X, "Guida (ordini di movimento, orizzontale)"),
         GROMADA_STICK(LEFT, Y, "Guida (ordini di movimento, verticale)"),
-        GROMADA_STICK(RIGHT, X, "Mira, in fondo spara (orizzontale)"),
-        GROMADA_STICK(RIGHT, Y, "Mira, in fondo spara (verticale)"),
+        GROMADA_STICK(RIGHT, X, "Mira (aggancia il bersaglio), in fondo spara (orizzontale)"),
+        GROMADA_STICK(RIGHT, Y, "Mira (aggancia il bersaglio), in fondo spara (verticale)"),
     };
 #undef GROMADA_COMMON
+#undef GROMADA_TRIGGER
 #undef GROMADA_STICK
 #undef GROMADA_PAD
     if (scheme == Scheme::Direct) return direct;
@@ -98,6 +112,10 @@ inline RawInput pollRaw(retro_input_state_t state, const Settings& s) {
                     axis(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y)};
     in.rightStick = {axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X),
                      axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y)};
+    // Analog triggers 0..0x7fff (RetroArch reports the digital button as 0x7fff on pads
+    // without them; a frontend that reports 0 falls back to the digital bit in the mapper).
+    in.l2 = std::max(0.0f, axis(RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2));
+    in.r2 = std::max(0.0f, axis(RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2));
 
     if (s.touch) {
         // [-0x7fff, 0x7fff] across the game image (RetroArch maps the viewport, so the black

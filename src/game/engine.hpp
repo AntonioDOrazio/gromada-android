@@ -308,6 +308,41 @@ inline CursorKind GameEngine::cursorAt(int screenX, int screenY) const {
     return CursorKind::Move;
 }
 
+// What a weapon head fires (issue #19, PlayerAim::FireChain): its act_fight children, then
+// the act_fight child of each object and the impact (act_death) child of what flies or lies
+// (projectiles, missiles, mines), up to 6 objects.
+inline PlayerAim::FireChain fireChain(World& w, int headNvid) {
+    PlayerAim::FireChain c;
+    const auto count = static_cast<int>(w.vids().size());
+    if (headNvid < 0 || headNvid >= count) return c;
+    c.headNvid = headNvid;
+    const VidInfo& hv = w.vid(headNvid);
+    static const Weapon none{};
+    const Weapon& hw = hv.weapon < w.weapons().size() ? w.weapons()[hv.weapon] : none;
+    c.flags = hw.flags;
+    c.targetCategory = static_cast<std::uint8_t>(hw.targetCategory);
+    const auto flies = [](std::uint8_t k) {
+        return k == cls::Projectile || k == cls::CannonMissile || k == cls::AviaMissile || k == cls::Mine ||
+               k == cls::RepairCannon;
+    };
+    int n = hv.childNvid[act::fight];
+    for (int step = 0; step < 6 && n > 0 && n < count; ++step) {
+        const VidInfo& v = w.vid(n);
+        if (v.cls < 32) c.classes |= 1u << v.cls;
+        int next = v.childNvid[act::fight];
+        if (flies(v.cls)) {
+            if (c.projectileClass < 0) {
+                c.projectileClass = v.cls;
+                c.projectileSpeedX = v.speedX;
+                c.projectileSpeedY = v.speedY;
+            }
+            if (next <= 0) next = v.childNvid[act::death];
+        }
+        n = next;
+    }
+    return c;
+}
+
 // Controls query (issue #16): the units FindTarget (0x40c970) would accept for the flagman's
 // current weapon, wherever they are, with the point that selects them under the cursor
 // (unitAt's box centre), so that a right click there attacks them.
@@ -332,6 +367,7 @@ inline PlayerAim GameEngine::playerAim() const {
         if (ua == 2 || ua == myArmy) continue;
         out.targets.push_back({World::idOf(u), u->x, u->y - u->z - (uv.sizeZ >> 1), u->x, u->y, u->hp});
     }
+    if (const Sprite* head = f->child) out.fire = fireChain(w, head->nvid);
     return out;
 }
 

@@ -1,6 +1,7 @@
 // Controls on the real gameplay (issue #16), synthetic: move orders and the edge band in the
 // input record, the camera that follows the player (dead zone, look-ahead, 60 = 120 fps),
-// weapon availability from the script globals, the weapon indicator.
+// weapon availability from the script globals, the weapon indicator; issue #19: the aim point
+// (also off screen) in the input record, the weapon kind from the fire chain.
 #include "game/session_controls.hpp"
 #include "game/session_input.hpp"
 #include "test.hpp"
@@ -46,6 +47,64 @@ void testMoveOrderRecord() {
     pc.edgeScroll = false;
     r = b.build(pc, 2, 478, 0, 0, 1.0f / 60);
     CHECK(r.mouseScreenX == 2 && r.mouseScreenY == 478);
+}
+
+// Issue #19: the direct scheme's aim point is the record's mouse point, also off screen; the
+// reticle (cursor) is only drawn. A move order still wins its frame.
+void testAimTargetRecord() {
+    InputRecordBuilder b;
+    input::PcState pc;
+    pc.cursor = {320, 2};                // reticle on the top border
+    pc.hasAimTarget = true;
+    pc.aimTarget = {330.5f, -90.2f};     // locked target 330 px up, off screen
+    pc.right = {true, true, false};
+    pc.edgeScroll = false;
+    auto r = b.build(pc, 320, 2, 1000, 2000, 1.0f / 60, InputView{640, 480});
+    CHECK(r.mouseWorldX == 1330 && r.mouseWorldY == 2000 - 91); // the turret aims and fires there
+    CHECK(r.mouseScreenX == 330 && r.mouseScreenY == InputRecordBuilder::EdgeBand); // no edge scroll
+    CHECK_EQ(r.bits, OriginalInput::RClick | OriginalInput::RDown);
+    // View offset (16:9 menus centred, demo view): the same shift applies to the aim point.
+    r = b.build(pc, 300, 2, 0, 0, 1.0f / 60, InputView{640, 480});
+    CHECK(r.mouseWorldX == 310 && r.mouseWorldY == -91);
+    // A move order wins the frame (left click at its point, no right button).
+    pc.moveOrder = true;
+    pc.moveTarget = {100, 200};
+    r = b.build(pc, 320, 2, 0, 0, 1.0f / 60, InputView{640, 480});
+    CHECK(r.mouseWorldX == 100 && r.mouseWorldY == 200 && r.bits == (OriginalInput::LClick | OriginalInput::LDown));
+    // Without an aim point (cursor scheme): the cursor.
+    pc.moveOrder = false;
+    pc.hasAimTarget = false;
+    r = b.build(pc, 320, 2, 0, 0, 1.0f / 60, InputView{640, 480});
+    CHECK(r.mouseWorldX == 320 && r.mouseWorldY == 2);
+}
+
+// Issue #19: weapon kinds from the fire chain (the player heads' data, see weaponKind()).
+void testWeaponKind() {
+    using K = input::WeaponKind;
+    auto chain = [](int head, std::uint8_t flags, std::initializer_list<int> classes, int pcls, int sx, int sy) {
+        PlayerAim::FireChain c;
+        c.headNvid = head;
+        c.flags = flags;
+        for (int k : classes) c.classes |= 1u << k;
+        c.projectileClass = pcls;
+        c.projectileSpeedX = sx;
+        c.projectileSpeedY = sy;
+        return c;
+    };
+    CHECK(weaponKind({}) == K::Unknown);
+    CHECK(weaponKind(chain(88, 0, {12, 5}, 5, 280, 100)) == K::Direct);   // HEPHEST laser
+    CHECK(weaponKind(chain(89, 0, {12, 5}, 5, 9999, 80)) == K::Direct);   // PHOEBUS cannon
+    CHECK(weaponKind(chain(207, 0, {5}, 5, 280, 100)) == K::Direct);      // PHOENIX flamethrower
+    CHECK(weaponKind(chain(91, 0, {12, 5, 11}, 5, 200, 400)) == K::Ballistic); // HAIL
+    CHECK(weaponKind(chain(90, 1, {12, 6, 5}, 6, 400, 200)) == K::Missile);    // ZEPHYR
+    CHECK(weaponKind(chain(204, 1, {12, 15, 5}, 15, 300, 80)) == K::Missile);  // HARPY (homing)
+    CHECK(weaponKind(chain(209, 1, {12, 11}, -1, 0, 0)) == K::Missile);        // HYDRA
+    CHECK(weaponKind(chain(210, 0, {12, 5, 13}, 5, 200, 400)) == K::MineLayer); // PLUTO
+    CHECK(weaponKind(chain(205, 5, {13}, 13, 30, 0)) == K::FixedMineLayer);     // CHAOS
+    CHECK(weaponKind(chain(1, 0, {12}, -1, 0, 0)) == K::Unknown);               // nothing flies
+    CHECK(!input::magneticWeapon(K::Direct) && !input::magneticWeapon(K::Unknown));
+    CHECK(input::magneticWeapon(K::Ballistic) && input::magneticWeapon(K::Missile) &&
+          input::magneticWeapon(K::MineLayer) && input::magneticWeapon(K::FixedMineLayer));
 }
 
 // Runs the follower for `seconds` with the player moving at (vx, vy) px/s from (px, py).
@@ -134,6 +193,8 @@ void testWeaponHud() {
 
 int main() {
     testMoveOrderRecord();
+    testAimTargetRecord();
+    testWeaponKind();
     testFollowCamera();
     testWeaponSlots();
     testWeaponHud();
