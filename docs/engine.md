@@ -126,7 +126,9 @@ engine.takeSounds();            // SoundEvent con coordinate di mondo
   analizzato).
 - **D8 Camera.** Scroll, guinzaglio e clamp sono tutti in `updateCamera()`; nell'originale lo scroll
   avviene prima dei giocatori. I margini della barra di stato e i tasti `+`/`-` (finestra di gioco
-  ridotta) non sono gestiti: la vista è `camera().width × height`.
+  ridotta) non sono gestiti: la vista è `camera().width × height`. Il guinzaglio (586×440 =
+  vista 640×480 meno 54×40) su viste più larghe (16:9) mantiene lo stesso margine dal bordo
+  (`larghezza − 54`, `altezza − 40`): identico in 640×480 (issue #16).
 - **D9 Torretta del giocatore.** Come nell'originale ruota di un passo per frame disegnato
   (`0x40b220` in `Player::Tact`): a 60/120 fps gira più in fretta che a 25–35 fps. Non è stato
   normalizzato per non cambiare il ritmo del gioco senza un riferimento.
