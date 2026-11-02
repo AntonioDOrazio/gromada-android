@@ -197,7 +197,10 @@ Cursore: nascosto con `SetCursor(<0)`; freccia nei menu; altrimenti la forma di
 
 ## Audio e filmati
 
-- `PlaySFX(n)`: effetto `n` di `fw.res` **a base 1** (0x408dd0 accetta 1..numero di effetti),
+- `PlaySFX(n)`: effetto `n` = suono di indice `n` di `fw.res` (**da 0**: 0x408730 carica il suono *i*
+  nel descrittore *i*; 0x408dd0 accetta `1..N`, il suono 0 è un segnaposto muto e `N` è lo slot
+  di `PlayWAV`). Fino alla correzione del 2/11/2026 il core suonava `fw.res[n−1]`: ogni effetto
+  era quello accanto, e i loop (motori al minimo 40, teletrasporto 14) diventavano colpi ripetuti;
   a volume pieno e centrato. Suoni del motore (`takeSounds`, uno per ciclo d'animazione
   dell'azione) con pan `4·dx` e attenuazione `−2·max(|dx|,|dy|)` in centesimi di dB rispetto al
   centro della camera (0x409a20).

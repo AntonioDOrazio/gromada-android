@@ -318,7 +318,7 @@ public:
         case script::BuiltinId::PlayAudio: playAudio({argInt(args, 0), argInt(args, 1), argInt(args, 2), argInt(args, 3)}); return Value{0};
         case script::BuiltinId::StopMusic: // also stops the PlayWAV slot (0x412e00 -> 0x408d80)
             stopMusic();
-            m_sfx.stop(m_sfxSink, static_cast<int>(m_sounds.size() + m_wavs.size()));
+            m_sfx.stop(m_sfxSink, playWavSlot());
             return Value{0};
         case script::BuiltinId::SetSound: m_scriptSfx = std::clamp(argInt(args, 0), 0, 100); applyVolumes(); return Value{0};
         case script::BuiltinId::SetMusic: setMusic(std::clamp(argInt(args, 0), 0, 100)); return Value{0};
@@ -795,12 +795,16 @@ private:
     }
 
     // ---- audio ------------------------------------------------------------------------------------
+    // Effect numbers index fw.res sounds from 0, as the original's descriptor table
+    // (0x408730 loads sound i into descriptor i): nsfx 1..N-1 are playable (sound 0 is a
+    // silent placeholder, nsfx 0 is rejected by 0x408dd0) and nsfx N = number of fw.res
+    // sounds is the single PlayWAV slot.
+    [[nodiscard]] int playWavSlot() const { return static_cast<int>(m_sounds.size()); }
     [[nodiscard]] const SoundData* sound(int nsfx) const {
-        if (nsfx >= 1 && nsfx <= static_cast<int>(m_sounds.size()))
-            return &m_sounds[static_cast<std::size_t>(nsfx - 1)];
-        const int extra = nsfx - static_cast<int>(m_sounds.size()) - 1;
-        if (extra >= 0 && extra < static_cast<int>(m_wavs.size()))
-            return &m_wavs[static_cast<std::size_t>(extra)];
+        if (nsfx >= 1 && nsfx < playWavSlot())
+            return &m_sounds[static_cast<std::size_t>(nsfx)];
+        if (nsfx == playWavSlot() && !m_wavs.empty())
+            return &m_wavs.back(); // older WAVs stay alive: voices may still point at them
         return nullptr;
     }
 
@@ -884,7 +888,7 @@ private:
             const auto size = std::filesystem::file_size(*path);
             BinaryStreamReader reader{in, static_cast<std::size_t>(size)};
             m_wavs.emplace_back(reader);
-            return static_cast<int>(m_sounds.size() + m_wavs.size());
+            return playWavSlot(); // the original has one slot: a new WAV replaces the previous one
         } catch (const std::exception& e) {
             log(LogLevel::Warn, std::format("PlayWAV({}): {}", file, e.what()));
             return 0;
@@ -1019,7 +1023,7 @@ private:
 
     MixerSink m_sfxSink;
     SoundChannels m_sfx{[this](int n) { return sound(n); },
-                        [this] { return static_cast<int>(m_sounds.size() + m_wavs.size()); }};
+                        [this] { return playWavSlot(); }};
     std::deque<SoundData> m_wavs;  // PlayWAV
     std::array<int, 4> m_playlist{};
     bool m_playing = false;

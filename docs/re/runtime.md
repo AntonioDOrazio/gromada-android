@@ -367,7 +367,7 @@ virtuale `unit->Action(act, var1, var2)` (vtable[0]) delle unità, documentato d
 | 88 | `GetKey()` | int | Tasto del frame: codice `WM_CHAR` (13 Invio, 27 Esc, 9 Tab, ' ', '1'..'4', lettere) oppure 1 ←, 2 →, 3 ↑, 4 ↓, 5 Canc; 0 se nessuno. Vale per un solo frame | 0x41304e | alta |
 | 89 | `Pause(int flag)` | — | ≠0: pausa (salva l'orologio e mette il cursore 0); 0: riprende, **riporta l'orologio al valore salvato** e sposta i timer delle unità (0x40ac70) | 0x41306a | alta |
 | 90 | `Random(int max)` | int | `rand() % (max+1)` (LCG MSVC, 0..max) | 0x4130a4 | alta |
-| 91 | `PlaySFX(int nsfx)` | — | Mette in coda l'effetto `nsfx` (1..numero di effetti in `fw.res`) a volume pieno, centrato (0x408dd0); richieste uguali di effetti non ciclici nello stesso frame si fondono (§9.1) | 0x4130ca | alta |
+| 91 | `PlaySFX(int nsfx)` | — | Mette in coda l'effetto `nsfx` (= suono `nsfx` di `fw.res`, indice da 0; validi `1..N`, `N` = slot `PlayWAV`) a volume pieno, centrato (0x408dd0); richieste uguali di effetti non ciclici nello stesso frame si fondono (§9.1) | 0x4130ca | alta |
 | 92 | `SetGraphMode(int mode)` | — | 1/2/3 → `PostMessage(WM_COMMAND 40007/40010/40011)` → modalità 640×480 / 800×600 / 1024×768 dopo il frame | 0x4130ec | alta |
 | 93 | `GetInputState()` | int | Bit `INPUT_*` del frame (§6) | 0x413ebb | alta |
 | 94 | `GetUnitVid(int unit)` | int | nvid dell'unità (`unit+0x14`), 0 se unit=0 | 0x413162 | alta |
@@ -566,7 +566,8 @@ al marcatore di fine, con il numero di globali calcolato dal compilatore replica
   alterna 8 e 9, `5,5,5,5` ripete la 5). Quando la finestra perde il fuoco il CD viene fermato e
   poi ripreso sulla traccia corrente (0x4095c0/0x4095e0, confidenza media). Menu: `PlayMusic(10,10,10,10)`.
 - `StopMusic()` ferma il CD. Volumi con `SetSound`/`SetMusic` 0–100 lineari (0 disattiva).
-- Effetti: `PlaySFX(n)` con n indice degli effetti di `fw.res` (1-based).
+- Effetti: `PlaySFX(n)` con n indice **da 0** degli effetti di `fw.res` (0x408730 carica il suono *i* nel
+  descrittore *i*); il suono 0 è un segnaposto muto e non è suonabile (`nsfx > 0` in 0x408dd0).
 
 ### 9.1 Sistema degli effetti sonori (DirectSound, issue #17)
 
