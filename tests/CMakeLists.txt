@@ -44,6 +44,11 @@ gromada_add_test(music_test music_test.cpp
     ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
 target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 
+# Sound-effect channels of the original (issue #17) and the Mixer's looping voices.
+gromada_add_test(sound_channels_test sound_channels_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/third_party/stb_vorbis_impl.c
+    ${PROJECT_SOURCE_DIR}/src/third_party/dr_libs_impl.c)
+
 # Differential oracle (issue #11): reference math vs vectors from the original exe (no game data).
 gromada_add_test(oracle_test oracle_test.cpp)
 target_compile_definitions(oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
@@ -76,3 +81,9 @@ add_test(NAME core_e2e COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_e2e.sh $<TARG
 add_test(NAME core_e2e_169_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_e2e.sh $<TARGET_FILE:harness>
          $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_e2e_169_out gromada_aspect=16:9 gromada_fps=120)
 set_tests_properties(core_e2e core_e2e_169_120fps PROPERTIES SKIP_RETURN_CODE 77)
+# Vehicle engine sounds loop instead of restarting every animation cycle (issue #17).
+add_test(NAME core_sfx_loop COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_out)
+add_test(NAME core_sfx_loop_120fps COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/core_sfx_loop.sh $<TARGET_FILE:harness>
+         $<TARGET_FILE:gromada_libretro> ${CMAKE_BINARY_DIR}/core_sfx_loop_120_out gromada_fps=120)
+set_tests_properties(core_sfx_loop core_sfx_loop_120fps PROPERTIES SKIP_RETURN_CODE 77)
