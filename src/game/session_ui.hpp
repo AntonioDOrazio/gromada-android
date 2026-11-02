@@ -78,6 +78,7 @@ struct MenuState {
 
 class SessionUi {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     explicit SessionUi(std::span<const Vid> vids)
         : m_vids{vids}, m_fonts{vids}, m_texts{m_fonts} {}
 

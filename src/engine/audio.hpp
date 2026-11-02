@@ -17,6 +17,7 @@ namespace gromada {
 
 class Mixer {
 public:
+    friend struct SaveStateAccess; // save states (engine/audio_state.hpp)
     explicit Mixer(int outputRate = 44100) : m_outRate{outputRate} {}
     ~Mixer() { closeMusic(); }
     Mixer(const Mixer&) = delete;
@@ -110,6 +111,7 @@ public:
 
 private:
     static constexpr std::size_t MaxVoices = 24;
+    static constexpr std::size_t MusicHistoryFrames = 8192; // decoded frames kept behind (save states)
 
     struct Voice {
         const SoundData* sound;
@@ -204,11 +206,13 @@ private:
     // Ensures the decoded window covers source frame index `needed`; false at end of track.
     bool fillMusic(std::size_t needed) {
         while (needed >= m_musicBufStart + m_musicBuf.size() / 2) {
-            // keep only the last frame (needed for interpolation), then decode more
+            // keep the last frames (one is needed for interpolation; a few thousand let a save
+            // state restored a moment back reuse the window), then decode more
             if (m_musicBuf.size() >= 2) {
                 const std::size_t total = m_musicBuf.size() / 2;
-                m_musicBufStart += total - 1;
-                m_musicBuf.erase(m_musicBuf.begin(), m_musicBuf.end() - 2);
+                const std::size_t keep = std::min(total, MusicHistoryFrames);
+                m_musicBufStart += total - keep;
+                m_musicBuf.erase(m_musicBuf.begin(), m_musicBuf.end() - static_cast<std::ptrdiff_t>(keep * 2));
             }
             std::int16_t chunk[4096];
             const std::size_t got = m_music->read(chunk, 2048);
@@ -284,8 +288,9 @@ private:
             if (m_streamEof)
                 return false;
             if (m_streamBuf.size() >= 2) {
-                m_streamBufStart += m_streamBuf.size() / 2 - 1;
-                m_streamBuf.erase(m_streamBuf.begin(), m_streamBuf.end() - 2);
+                const std::size_t keep = std::min(m_streamBuf.size() / 2, MusicHistoryFrames); // see fillMusic
+                m_streamBufStart += m_streamBuf.size() / 2 - keep;
+                m_streamBuf.erase(m_streamBuf.begin(), m_streamBuf.end() - static_cast<std::ptrdiff_t>(keep * 2));
             }
             std::int16_t chunk[2 * 1024];
             const std::size_t got = m_stream->read(chunk, 1024);

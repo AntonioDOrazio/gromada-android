@@ -17,6 +17,7 @@ struct stb_vorbis;
 stb_vorbis* stb_vorbis_open_filename(const char* filename, int* error, const void* alloc_buffer);
 void stb_vorbis_close(stb_vorbis* f);
 int stb_vorbis_get_samples_short_interleaved(stb_vorbis* f, int channels, short* buffer, int num_shorts);
+int stb_vorbis_seek(stb_vorbis* f, unsigned int sample_number);
 }
 // stb_vorbis_get_info returns a struct by value; wrapped in the C unit (stb_vorbis_impl.c).
 extern "C" void gromada_vorbis_info(stb_vorbis* f, unsigned* sample_rate, int* channels);
@@ -37,6 +38,8 @@ public:
 
     // Reads up to `frames` stereo frames into `out` (2 * frames values); 0 at the end.
     virtual std::size_t read(std::int16_t* out, std::size_t frames) = 0;
+    // Moves to source frame `frame` (save states); false if the decoder cannot.
+    virtual bool seek(std::uint64_t frame) { (void)frame; return false; }
 
 protected:
     unsigned m_rate = 0;
@@ -71,6 +74,9 @@ public:
         const int got = stb_vorbis_get_samples_short_interleaved(m_file, 2, out, static_cast<int>(frames * 2));
         return got > 0 ? static_cast<std::size_t>(got) : 0;
     }
+    bool seek(std::uint64_t frame) override {
+        return frame <= 0xFFFFFFFFu && stb_vorbis_seek(m_file, static_cast<unsigned>(frame)) != 0;
+    }
 
 private:
     stb_vorbis* m_file = nullptr;
@@ -93,6 +99,7 @@ public:
         toStereo(out, got);
         return got;
     }
+    bool seek(std::uint64_t frame) override { return drflac_seek_to_pcm_frame(m_file, frame) != 0; }
 
 private:
     drflac* m_file;
@@ -116,6 +123,7 @@ public:
         toStereo(out, got);
         return got;
     }
+    bool seek(std::uint64_t frame) override { return drwav_seek_to_pcm_frame(&m_wav, frame) != 0; }
 
 private:
     drwav m_wav{};

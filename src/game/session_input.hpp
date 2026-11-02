@@ -42,6 +42,7 @@ struct InputView {
 
 class InputRecordBuilder {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     // GetKey() code of a game key, 0 if the key produces none.
     static std::uint8_t keyCode(input::Key k) {
         using enum input::Key;

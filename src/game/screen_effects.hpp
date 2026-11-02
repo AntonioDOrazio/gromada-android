@@ -38,6 +38,7 @@ namespace gromada::game {
 
 class ScreenEffects {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     // Mean frame time of gromada.exe in its demos (33.7, 37.5 and 40.0 ms): the original's
     // per-frame behaviours (turret turning, eff_openwindow) are paced on it.
     static constexpr int ReferenceFrameMs = 37;

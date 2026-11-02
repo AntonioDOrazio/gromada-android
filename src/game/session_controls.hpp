@@ -64,6 +64,7 @@ WeaponSlots weaponSlots(GlobalInt&& globalInt, GetAmmo&& ammo) {
 // the new position as its own.
 class FollowCamera {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     struct Params {
         float deadZone = 0.10f;  // fraction of the view size, each side of the centre
         float rate = 4.0f;       // 1/s: catch-up speed on the part outside the dead zone
@@ -131,6 +132,7 @@ private:
 // status bar is hidden: "2 ZEPHYR: LANCIAMISSILI  12".
 class WeaponHud {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     static constexpr float Duration = 2.0f;
 
     // Returns true while the indicator should be drawn. `poke`: a weapon key was pressed

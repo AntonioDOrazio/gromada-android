@@ -30,6 +30,10 @@ public:
     }
     AudioStream* audio() override { return m_movie ? m_movie->audio() : nullptr; }
     void close() override { m_movie.reset(); }
+    [[nodiscard]] std::optional<double> position() const override {
+        return m_movie ? std::optional<double>{m_movie->time()} : std::nullopt;
+    }
+    bool seek(double seconds) override { return m_movie && m_movie->seek(seconds); }
 
 private:
     std::unique_ptr<video::Movie> m_movie;

@@ -68,6 +68,7 @@ inline TypewriterTiming typewriterTimingOf(const Vid& font) {
 
 class TextManager {
 public:
+    friend struct SaveStateAccess; // save states (ui/text_state.hpp)
     using TimingLookup = std::function<TypewriterTiming(int font)>;
 
     TextManager() = default;

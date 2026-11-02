@@ -25,6 +25,7 @@ namespace gromada::script {
 
 class StringMemory {
 public:
+    friend struct SaveStateAccess; // save states (script/vm_state.hpp)
     // Fixed blocks (the two static buffers keep the original's addresses).
     static constexpr std::uint32_t kConcatBase = 0x0044498C; // 1024 bytes, up to 0x444d8c
     static constexpr std::uint32_t kConcatSize = 1024;

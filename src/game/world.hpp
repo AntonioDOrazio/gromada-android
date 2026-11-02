@@ -46,6 +46,7 @@ struct Group {
 
 class World {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     static constexpr int MaxLayers = 16;
     static constexpr int MaxPlayers = 4;
     // Where the original sometimes uses a sprite pointer as an x coordinate (D15): a typical

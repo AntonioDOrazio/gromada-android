@@ -16,6 +16,8 @@ public:
     // Writes up to `frames` interleaved stereo int16 frames; returns how many were written.
     // Returning fewer than requested means the stream has ended.
     virtual std::size_t read(std::int16_t* stereo, std::size_t frames) = 0;
+    // Moves to source frame `frame` (save states); false if the stream cannot.
+    virtual bool seek(std::uint64_t frame) { (void)frame; return false; }
 };
 
 } // namespace gromada

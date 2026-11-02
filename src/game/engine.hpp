@@ -19,6 +19,7 @@ namespace gromada::game {
 
 class GameEngine final : public Engine {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     explicit GameEngine(const GameResources& resources) : m_res(&resources), m_world(resources) {
         m_palettes.resize(m_world.vids().size());
     }

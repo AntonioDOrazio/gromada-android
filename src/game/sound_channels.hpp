@@ -52,6 +52,7 @@ public:
 
 class SoundChannels {
 public:
+    friend struct SaveStateAccess; // save states (game/savestate.hpp)
     static constexpr int QueueSize = 32;
     static constexpr int ChannelCount = 8;
     static constexpr int MinAttenuation = -2000;   // quieter requests are ignored (0x408e11)
