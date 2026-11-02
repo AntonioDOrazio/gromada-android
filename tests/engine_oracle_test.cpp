@@ -494,8 +494,9 @@ void testCommands() {
 
 // ---- collisions and damage (grids of gen_checkmove.py / gen_damage.py: 32 px cells, 64x64) -----
 struct GridWorld {
-    std::vector<Vid> vids = blankVids(16);
-    World w{vids, {}};
+    std::vector<Vid> vids = blankVids(96);
+    std::vector<Weapon> weapons = std::vector<Weapon>(4);
+    World w{vids, weapons};
     GridWorld() {
         VidInfo& g = w.vid(15);
         g.flags = vf::PresentOnGrid;
@@ -898,6 +899,193 @@ void testWeapons() {
     });
 }
 
+// ---- issue #12 families: per-class Action (Projectile, Vehicle, Kassandra, Building) ---------
+// tools/oracle/gen_actions.py: the real Action of the class with real collaborators on a unit
+// (vid 1), an optional target (vid 2, Static, in the grid and the unit list) and an optional
+// turret (vid 3); CreateUnit never creates anything (here: MaxUnit 0).
+void testClassActions() {
+    const char* sprCols[] = {"x", "y", "z", "direction", "action", "frame", "firstFrame", "lastFrame", "state", "speed", "vz",
+                             "fracX", "fracY", "fracZ", "goX", "goY", "goZ", "timer", "attackX", "attackY", "attackZ", "hp"};
+    auto field = [](Sprite& s, int k) -> std::int64_t {
+        switch (k) {
+            case 0: return s.x; case 1: return s.y; case 2: return s.z; case 3: return s.direction; case 4: return s.action;
+            case 5: return s.frame; case 6: return s.firstFrame; case 7: return s.lastFrame; case 8: return s.state;
+            case 9: return s.speed; case 10: return s.vz; case 11: return s.fracX; case 12: return s.fracY;
+            case 13: return s.fracZ; case 14: return s.goX; case 15: return s.goY; case 16: return s.goZ;
+            case 17: return s.timer; case 18: return s.attackX; case 19: return s.attackY; case 20: return s.attackZ;
+            default: return s.hp;
+        }
+    };
+    auto setField = [](Sprite& s, int k, std::int64_t v) {
+        switch (k) {
+            case 0: s.x = std::int16_t(v); break; case 1: s.y = std::int16_t(v); break; case 2: s.z = std::int16_t(v); break;
+            case 3: s.direction = std::uint8_t(v); break; case 4: s.action = std::uint8_t(v); break;
+            case 5: s.frame = std::int16_t(v); break; case 6: s.firstFrame = std::int16_t(v); break;
+            case 7: s.lastFrame = std::int16_t(v); break; case 8: s.state = std::uint16_t(v); break;
+            case 9: s.speed = std::int16_t(v); break; case 10: s.vz = std::int16_t(v); break;
+            case 11: s.fracX = std::int8_t(v); break; case 12: s.fracY = std::int8_t(v); break;
+            case 13: s.fracZ = std::int8_t(v); break; case 14: s.goX = std::int16_t(v); break;
+            case 15: s.goY = std::int16_t(v); break; case 16: s.goZ = std::int16_t(v); break;
+            case 17: s.timer = std::uint16_t(v); break; case 18: s.attackX = std::int16_t(v); break;
+            case 19: s.attackY = std::int16_t(v); break; case 20: s.attackZ = std::int16_t(v); break;
+            default: s.hp = std::uint8_t(v); break;
+        }
+    };
+    GridWorld g;
+    World& w = g.w;
+    for (const char* fam : {"action_projectile", "action_vehicle", "action_kassandra", "action_building"}) {
+        const bool kass = std::string_view{fam} == "action_kassandra", building = std::string_view{fam} == "action_building";
+        forCases(fam, [&](Tally& t, int i, Row r, const Family&) {
+            g.reset();
+            VidInfo& v = w.vid(1);
+            v.cls = std::uint8_t(r("cls"));
+            v.category = std::uint8_t(r("category"));
+            v.flags = std::uint16_t(r("vidFlags"));
+            setDirs(v, int(r("dirs")));
+            v.speedX = std::int16_t(r("speedX")); v.speedY = std::int16_t(r("speedY"));
+            v.acceleration = std::uint16_t(r("acceleration"));
+            v.maxHP = std::uint8_t(r("maxHP"));
+            setSizes(v, int(r("sizeX")), int(r("sizeY")), int(r("sizeZ")));
+            v.visibilityRadius = std::int16_t(std::uint16_t(r("visibilityRadius")));
+            v.army = std::uint8_t(r("vidArmy"));
+            v.rotationPeriod = std::int8_t(r("rotationPeriod"));
+            v.weapon = std::uint8_t(r("weaponIndex"));
+            const int cn = int(r("childNvid"));
+            v.linkedObjectVid = r("hasChild") ? std::uint16_t(cn) : 0;
+            v.childNvid = {};
+            v.childNvid[act::wound] = std::int16_t(r("woundChild"));
+            for (int k = 0; k < 16; ++k) v.animLen[std::size_t(k)] = std::uint8_t(r("len" + std::to_string(k)));
+            VidInfo& tv = w.vid(2);
+            tv.cls = cls::Static; tv.category = cat::Vehicle; tv.flags = vf::PresentOnGrid;
+            setSizes(tv, 20, 20, int(r("targetSizeZ")));
+            tv.maxHP = std::uint8_t(r("targetMaxHP")); tv.army = std::uint8_t(r("targetArmy"));
+            setDirs(tv, 1);
+            tv.animLen.fill(1);
+            VidInfo& cv = w.vid(cn);
+            cv.childCount = {};
+            cv.childCount[act::fight] = std::uint8_t(r("childShots"));
+            cv.cls = cls::Superstructure;
+            setDirs(cv, int(r("childDirs")));
+            cv.animLen = {1, 0, 0, 0, 1, 1, 0, 0, 2};
+            cv.childNvid = {};
+            cv.childNvid[act::fight] = std::int16_t(r("childFightChild"));
+            for (int k : {4, 5}) { w.vid(k).cls = cls::Vehicle; w.vid(k).category = cat::Vehicle; setSizes(w.vid(k), 20, 20, 0); }
+            for (auto& o : w.weapons()) o = Weapon{static_cast<ObjectCategory>(4), 0, 0, 100, 0, 10};   // as the generator
+            Weapon& wpn = w.weapons()[std::size_t(r("weaponIndex"))];
+            wpn.targetCategory = static_cast<ObjectCategory>(r("wTargetCategory"));
+            wpn.flags = std::uint8_t(r("wFlags"));
+            wpn.weaponRange = std::uint16_t(r("wRange"));
+            wpn.scatter = std::uint8_t(r("wScatter"));
+            wpn.cooldown = std::uint16_t(r("wCooldown"));
+
+            Sprite* me = spawn(w, 1, 1000, 1000, 0, false);
+            Sprite* target = r("hasTarget") ? spawn(w, 2, int(r("targetX")), int(r("targetY")), int(r("targetZ")), true) : nullptr;
+            if (target) { target->hp = std::uint8_t(r("targetHP")); target->action = 0; }
+            Sprite* child = nullptr;
+            if (r("hasChild")) {
+                child = spawn(w, cn, 1000, 1000, 0, false);
+                child->direction = std::uint8_t(r("childDirection"));
+                child->action = std::uint8_t(r("childAction"));
+                child->attackX = child->attackY = child->attackZ = 0;
+                me->child = child;
+            }
+            for (auto& vi : w.vids()) vi.maxUnit = 0;   // CreateUnit is stubbed (returns 0) in the oracle
+            for (int k = 0; k < 22; ++k) setField(*me, k, r(sprCols[k]));
+            me->target = r("target") && target ? target->id : 0;
+            me->army = std::uint8_t(r("army"));
+            me->behave = std::uint8_t(r("behave"));
+            me->wpX = std::int16_t(r("wpX")); me->wpY = std::int16_t(r("wpY"));
+            me->buildTime = std::uint8_t(r("buildTime"));
+            me->turn = std::int8_t(r("turn"));
+            me->items.clear();
+            me->commands.reset();
+            if (kass) for (int k = 0; k < 8; ++k) me->ammo[std::size_t(k)] = std::int16_t(r("ammo" + std::to_string(k)));
+            if (building) me->buildNvid = std::uint16_t(r("buildNvid"));
+            w.rng().seed(std::uint32_t(r("seed")));
+            w.setClock(std::uint32_t(r("curclock")));
+            w.setLastDistance(int(r("gDist")));
+            w.localInput() = InputRecord{};
+            w.localInput().bits = std::uint16_t(r("inputBits"));
+            auto refOf = [&](std::int64_t kind, std::int64_t lit) -> int {
+                return kind == 0 ? int(lit) : kind == 1 ? (target ? target->id : 0) : me->id;
+            };
+            const int a = int(r("act"));
+            int ret = w.action(*me, a, refOf(r("v1ref"), r("v1")), refOf(r("v2ref"), r("v2")));
+            if (r("crash")) {   // the original reads past the end of the sub-object chain (D10)
+                ++t.skipped;
+                return;
+            }
+            if (a == act::gettarget && ret) ret = target && ret == target->id ? -1001 : ret == me->id ? -1002 : ret;
+            for (int k = 0; k < 22; ++k) EXPECT(t, i, sprCols[k], r(std::string(sprCols[k]) + "'"), field(*me, k));
+            const int tgt = me->target == 0 ? 0 : target && me->target == target->id ? 1 : me->target == me->id ? 2 : 3;
+            EXPECT(t, i, "target", r("target'"), tgt);
+            EXPECT(t, i, "army", r("army'"), me->army);
+            EXPECT(t, i, "behave", r("behave'"), me->behave);
+            EXPECT(t, i, "wpX", r("wpX'"), me->wpX);
+            EXPECT(t, i, "wpY", r("wpY'"), me->wpY);
+            EXPECT(t, i, "buildTime", r("buildTime'"), me->buildTime);
+            EXPECT(t, i, "turn", r("turn'"), me->turn);
+            if (kass)
+                for (int k = 0; k < 8; ++k) EXPECT(t, i, "ammo", r("ammo" + std::to_string(k) + "'"), me->ammo[std::size_t(k)]);
+            if (building) EXPECT(t, i, "buildNvid", r("buildNvid'"), me->buildNvid);
+            EXPECT(t, i, "ret", r("ret"), ret);
+            EXPECT(t, i, "seed", r("seed'"), w.rng().state);
+            EXPECT(t, i, "gDist", r("gDist'"), w.lastDistance());
+            if (target) {
+                EXPECT(t, i, "target.x", r("target.x'"), target->x);
+                EXPECT(t, i, "target.y", r("target.y'"), target->y);
+                EXPECT(t, i, "target.hp", r("target.hp'"), target->hp);
+                EXPECT(t, i, "target.action", r("target.action'"), target->action);
+            }
+            if (child) {
+                EXPECT(t, i, "child.direction", r("child.direction'"), child->direction);
+                EXPECT(t, i, "child.action", r("child.action'"), child->action);
+                EXPECT(t, i, "child.attackX", r("child.attackX'"), child->attackX);
+                EXPECT(t, i, "child.attackY", r("child.attackY'"), child->attackY);
+                EXPECT(t, i, "child.attackZ", r("child.attackZ'"), child->attackZ);
+            }
+        });
+    }
+}
+
+// ---- regressions read from the disassembly (no vectors) ---------------------------------------
+// Player::Tact 0x4169b0: the turret follows the mouse with the HEAD's weapon: flag 4 = keep the
+// body's direction (0x416b8b), anti-aircraft = targetCategory & Avia aims 80 px lower on screen
+// (0x416be1). The engine used the flagman's weapon flags & 8.
+void testPlayerTurret() {
+    std::vector<Vid> vids = blankVids(4);
+    vids[1].type = static_cast<ObjectClass>(cls::Vehicle);
+    vids[1].category = static_cast<ObjectCategory>(cat::Vehicle);
+    vids[1].linkedObjectVid = 2;
+    vids[2].type = static_cast<ObjectClass>(cls::Superstructure);
+    vids[2].directionsCount = 8;
+    std::vector<Weapon> weapons(3);
+    weapons[1].targetCategory = static_cast<ObjectCategory>(cat::Avia);   // anti-aircraft, flags 0
+    weapons[2].targetCategory = static_cast<ObjectCategory>(cat::Vehicle);
+    weapons[2].flags = 8;                                                   // flag 8 alone is not "aim higher"
+    auto turretAfter = [&](int headWeapon, int mouseDy) {
+        vids[2].someWeaponIndex = std::uint8_t(headWeapon);
+        GameEngine eng{vids, weapons};
+        eng.loadEmptyMap(100, 100, 1);
+        World& w = eng.world();
+        Sprite* f = w.createUnit(1, 500, 500, 0, 0, 0, nullptr);
+        if (!f || !f->child) { CHECK(false); return -1; }
+        f->child->direction = 64;   // east
+        w.players()[0].flagman = f->id;
+        w.players()[0].weapon = 2;   // the flagman's weapon: flags 8, targets vehicles
+        OriginalInput in;
+        in.mouseWorldX = 500;
+        in.mouseWorldY = std::int16_t(500 + mouseDy);
+        eng.setInput(in);
+        eng.tactPlayers();
+        return int(f->child->direction);
+    };
+    // the mouse 40 px north: a plain turret turns left (towards 0), an anti-aircraft head aims at
+    // y + 80 (south of the flagman) and turns right (towards 128)
+    CHECK_EQ(turretAfter(2, -40), 32);
+    CHECK_EQ(turretAfter(1, -40), 96);
+}
+
 } // namespace
 
 int main() {
@@ -912,5 +1100,7 @@ int main() {
     testDamage();
     testCollisionQueries();
     testWeapons();
+    testClassActions();
+    testPlayerTurret();
     return gromada_test::finish();
 }

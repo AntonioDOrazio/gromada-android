@@ -24,7 +24,7 @@ MODULES = ["gen_rand", "gen_direction", "gen_tables", "gen_distance", "gen_physi
            "gen_setdest", "gen_turnto", "gen_anim", "gen_checkmove", "gen_damage",
            "gen_vm", "gen_timing", "gen_commands",
            # issue #12
-           "gen_collide", "gen_weapons"]
+           "gen_collide", "gen_weapons", "gen_actions"]
 
 
 def main():

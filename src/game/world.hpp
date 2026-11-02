@@ -48,6 +48,9 @@ class World {
 public:
     static constexpr int MaxLayers = 16;
     static constexpr int MaxPlayers = 4;
+    // Where the original sometimes uses a sprite pointer as an x coordinate (D15): a typical
+    // heap address of the original's sprites.
+    static constexpr int kPointerX = 0x00800000;
 
     explicit World(const GameResources& resources) : World(resources.vids(), resources.weapons()) {}
     // Vids and weapons only (synthetic tests): vids without graphics tick every 71 ms.
@@ -1003,7 +1006,7 @@ public:
             if (!take) {
                 if (bestDist <= d) continue;
                 if (directional) {
-                    int dd = std::abs(static_cast<int>(fx::getDirection(s.x, s.y, u->x, u->y).dir()) - s.direction);
+                    int dd = std::abs(static_cast<int>(getDirection(s.x, s.y, u->x, u->y).dir()) - s.direction);
                     if (dd > 128) dd = 255 - dd;
                     if (dd >= 32) continue;
                 }

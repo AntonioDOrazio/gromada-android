@@ -248,13 +248,16 @@ inline void GameEngine::playerTact(Player& p) {
     if (!m_world.vidOf(*f).linkedObjectVid || !head || head->action == act::fight) return;
     const Weapon& w = m_world.weaponOf(*f);
     if (under && !(m_world.vidOf(*under).category & static_cast<std::uint8_t>(w.targetCategory))) under = nullptr;
-    if (w.flags & 4) { m_world.turnStep(*head, f->direction); return; }
+    // the head's own weapon decides the aiming (0x416b8b: flag 4; 0x416be1: anti-aircraft =
+    // targetCategory & Avia, 80 px higher)
+    const Weapon& hw = m_world.weaponOf(*head);
+    if (hw.flags & 4) { m_world.turnStep(*head, f->direction); return; }
     if (under) {
-        m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, under->y).dir());
+        m_world.turnStep(*head, m_world.getDirection(f->x, f->y, mx, under->y).dir());
         return;
     }
-    const int ty = my + ((w.flags & 8) ? 80 : 0);
-    m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, ty).dir());
+    const int ty = my + ((static_cast<std::uint8_t>(hw.targetCategory) & cat::Avia) ? 80 : 0);
+    m_world.turnStep(*head, m_world.getDirection(f->x, f->y, mx, ty).dir());
 }
 
 inline CursorKind GameEngine::cursorAt(int screenX, int screenY) const {
