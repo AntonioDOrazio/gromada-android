@@ -530,6 +530,7 @@ inline int World::actionAvia(Sprite& s, int a, int v1, int v2) {
             bool turned = false;
             if (t && s.timer == 0 && distance(s, *t) <= static_cast<std::int16_t>(w.weaponRange)) {
                 changeAction(s, act::fight, -1);
+                ++fireCount;
                 s.timer = static_cast<std::uint16_t>(w.cooldown * 10);
                 s.attackX = t->x; s.attackY = t->y; s.attackZ = t->z;
                 turned = true;

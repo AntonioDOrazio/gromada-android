@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <regex>
 
 using namespace gromada;
 using namespace gromada::game;
@@ -71,6 +72,22 @@ std::pair<int, int> freePlace(World& w, int nvid, int x, int y) {
     return {x, y};
 }
 
+// Where the level script puts the Kassandra: Create(kassandra,X,Y,..) or the first
+// teleport of tp_x[]/tp_y[] (most levels start at tp_in = 0).
+std::optional<std::pair<int, int>> scriptSpawn(const std::filesystem::path& ini) {
+    std::ifstream f(ini, std::ios::binary);
+    if (!f) return std::nullopt;
+    const std::string text{std::istreambuf_iterator<char>(f), {}};
+    std::smatch m;
+    if (std::regex_search(text, m, std::regex(R"(Create\(kassandra,\s*(\d+)\s*,\s*(\d+))")))
+        return std::pair{std::stoi(m[1]), std::stoi(m[2])};
+    std::smatch mx, my;
+    if (std::regex_search(text, mx, std::regex(R"(tp_x\[\d+\]\s*=\s*\{\s*(\d+))")) &&
+        std::regex_search(text, my, std::regex(R"(tp_y\[\d+\]\s*=\s*\{\s*(\d+))")))
+        return std::pair{std::stoi(mx[1]), std::stoi(my[1])};
+    return std::nullopt;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -84,6 +101,7 @@ int main(int argc, char** argv) {
     std::string events;
     bool player = true, quiet = false;
     int width = 640, height = 480;
+    int spawnX = -1, spawnY = -1;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -97,6 +115,7 @@ int main(int argc, char** argv) {
         else if (a == "--trace") traceEvery = std::stoi(next());
         else if (a == "--input") events = next();
         else if (a == "--no-player") player = false;
+        else if (a == "--spawn") { const auto v = next(); const auto c = v.find(','); spawnX = std::stoi(v.substr(0, c)); spawnY = std::stoi(v.substr(c + 1)); }
         else if (a == "--quiet") quiet = true;
         else if (a == "--size") { const auto s = next(); const auto x = s.find('x'); width = std::stoi(s.substr(0, x)); height = std::stoi(s.substr(x + 1)); }
         else if (a == "--shots") {
@@ -129,7 +148,13 @@ int main(int argc, char** argv) {
     if (player) {
         const int kassandra = 81;
         auto& cam = engine.camera();
-        auto [px, py] = freePlace(w, kassandra, cam.x + width / 2, cam.y + height / 2);
+        int px = cam.x + width / 2, py = cam.y + height / 2;
+        std::filesystem::path ini = mapFile;
+        ini.replace_extension(".INI");
+        if (!std::filesystem::exists(ini)) ini.replace_extension(".ini");
+        if (spawnX >= 0) { px = spawnX; py = spawnY; }
+        else if (auto sp = scriptSpawn(ini)) { px = sp->first; py = sp->second; }
+        else std::tie(px, py) = freePlace(w, kassandra, px, py);
         call(127, {kassandra, 1, 60});                         // SetVid(kassandra, VID_MAXHP, 40*3/2)
         flagman = call(68, {kassandra, px, py, 0}).toInt();     // Create
         call(119, {0, flagman});                                // SetFlagman(0, ...)
@@ -155,6 +180,7 @@ int main(int argc, char** argv) {
     const int startClock = engine.clock();
     double acc = 0;
     long frames = 0;
+    std::vector<double> frameTimes;
     double simMs = 0, simMax = 0, drawMs = 0;
     std::size_t shotIdx = 0;
     std::sort(shots.begin(), shots.end());
@@ -199,7 +225,9 @@ int main(int argc, char** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         engine.beginFrame(dt);
         engine.setInput(in);
+        const auto tw0 = std::chrono::steady_clock::now();
         engine.tactWorld();
+        const double twMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw0).count();
         engine.tactPlayers();
         engine.tactGroupAi();
         engine.updateCamera();
@@ -208,6 +236,8 @@ int main(int argc, char** argv) {
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         simMs += ms;
         simMax = std::max(simMax, ms);
+        frameTimes.push_back(ms);
+        if (ms > 3.0 && !quiet) std::printf("  slow frame %ld at t=%d: %.3fms (world %.3fms) sprites=%zu\n", frames, now, ms, twMs, w.liveCount());
         ++frames;
 
         const int units = static_cast<int>(w.gridUnits().size());
@@ -247,5 +277,12 @@ int main(int argc, char** argv) {
     std::printf("frames=%ld step=%.2fms sim avg=%.3fms max=%.3fms draw(last)=%.3fms sprites=%zu units=%zu unit-losses=%d sounds=%ld\n",
                 frames, step, simMs / std::max(1L, frames), simMax, lastDraw, w.liveCount(), w.gridUnits().size(), deaths, sounds);
     (void)drawMs;
+    if (!frameTimes.empty()) {
+        auto sorted = frameTimes;
+        std::ranges::sort(sorted);
+        const auto worst = std::ranges::max_element(frameTimes) - frameTimes.begin();
+        std::printf("frame time p50=%.3fms p99=%.3fms p99.9=%.3fms max=%.3fms (frame %ld)\n", sorted[sorted.size() / 2],
+                    sorted[sorted.size() * 99 / 100], sorted[sorted.size() * 999 / 1000], sorted.back(), static_cast<long>(worst));
+    }
     return 0;
 }

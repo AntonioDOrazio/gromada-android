@@ -48,11 +48,12 @@ public:
     static constexpr int MaxLayers = 16;
     static constexpr int MaxPlayers = 4;
 
-    explicit World(const GameResources& resources) : m_res(resources) {
-        const auto vids = resources.vids();
+    explicit World(const GameResources& resources) : World(resources.vids(), resources.weapons()) {}
+    // Vids and weapons only (synthetic tests): vids without graphics tick every 71 ms.
+    World(std::span<const Vid> vids, std::span<const Weapon> weapons) {
         m_vids.resize(vids.size());
         for (std::size_t i = 0; i < vids.size(); ++i) initVidInfo(m_vids[i], vids[i]);
-        m_weapons.assign(resources.weapons().begin(), resources.weapons().end());
+        m_weapons.assign(weapons.begin(), weapons.end());
         m_persp.build(24, 16);
     }
 
@@ -61,7 +62,6 @@ public:
     ~World() { clear(); }
 
     // ------------------------------------------------------------------ accessors
-    [[nodiscard]] const GameResources& resources() const noexcept { return m_res; }
     [[nodiscard]] std::span<VidInfo> vids() noexcept { return m_vids; }
     [[nodiscard]] std::span<const VidInfo> vids() const noexcept { return m_vids; }
     [[nodiscard]] VidInfo& vid(int nvid) { return m_vids[static_cast<std::size_t>(nvid)]; }
@@ -99,6 +99,7 @@ public:
     InputRecord& localInput() noexcept { return m_localInput; }
     // Diagnostics for tools and tests: called for every act_damage (target, amount, source).
     std::function<void(const Sprite&, int, int)> damageHook;
+    std::uint64_t fireCount = 0;   // successful Fire() calls (diagnostics)
     [[nodiscard]] Sprite* flagman(int player) const noexcept {
         return player >= 0 && player < MaxPlayers ? byId(m_players[static_cast<std::size_t>(player)].flagman) : nullptr;
     }
@@ -163,6 +164,16 @@ public:
                 m_groups.insert(m_groups.begin(), std::move(g));   // 0x4165f0 pushes at the head
             }
         }
+    }
+
+    // Empty map of the given size (tests, tools).
+    void loadEmpty(int width, int height, std::uint32_t seed, std::uint32_t clock = 0) {
+        Map map;
+        map.header.width = static_cast<std::uint32_t>(width);
+        map.header.height = static_cast<std::uint32_t>(height);
+        map.header.startTimer = clock;
+        for (auto& a : map.armies) a = Army{};
+        load(map, seed);
     }
 
     // Destroys every sprite (map unload).
@@ -1015,6 +1026,7 @@ public:
         if (!aim(s, x, y, z)) return 0;
         s.timer = static_cast<std::uint16_t>(weaponOf(s).cooldown * 10);
         if (!v.linkedObjectVid) changeAction(s, act::fight, -1);
+        ++fireCount;
         return 1;
     }
 
@@ -1251,15 +1263,20 @@ private:
     // z-layer lists: 0x40bcf0 (push front), 0x40bd40 (sorted by y, z, x), 0x40be60 (remove).
     void pushFront(Sprite* s) {
         const int l = vidOf(*s).zLayer;
+        s->layer = static_cast<std::uint8_t>(l);
         s->next = m_layers[l];
+        s->prev = nullptr;
+        if (s->next) s->next->prev = s;
         m_layers[l] = s;
     }
     void insertSorted(Sprite* s) {
         const int l = vidOf(*s).zLayer;
+        s->layer = static_cast<std::uint8_t>(l);
         Sprite* h = m_layers[l];
-        if (!h) { m_layers[l] = s; s->next = nullptr; return; }
-        if (h->y > s->y || (h->y == s->y && h->z > s->z) || (h->y == s->y && h->z == s->z && h->x >= s->x)) {
+        if (!h || h->y > s->y || (h->y == s->y && h->z > s->z) || (h->y == s->y && h->z == s->z && h->x >= s->x)) {
             s->next = h;
+            s->prev = nullptr;
+            if (h) h->prev = s;
             m_layers[l] = s;
             return;
         }
@@ -1269,16 +1286,20 @@ private:
         while (cur && cur->y == s->y && cur->z < s->z) { prev = cur; cur = cur->next; }
         while (cur && cur->y == s->y && cur->z == s->z && cur->x < s->x) { prev = cur; cur = cur->next; }
         s->next = prev->next;
+        s->prev = prev;
+        if (s->next) s->next->prev = s;
         prev->next = s;
         if (m_iterNext == s->next && m_iterNext) m_iterNext = s;
     }
     void listRemove(Sprite* s) {
         if (m_iterNext == s) m_iterNext = s->next;
-        const int l = vidOf(*s).zLayer;
-        Sprite** link = &m_layers[l];
-        while (*link && *link != s) link = &(*link)->next;
-        if (*link) *link = s->next;
-        s->next = nullptr;
+        if (s->layer >= MaxLayers) return;   // not in a list (sub-object chain only)
+        const int l = s->layer;
+        if (s->prev) s->prev->next = s->next;
+        else m_layers[l] = s->next;
+        if (s->next) s->next->prev = s->prev;
+        s->next = s->prev = nullptr;
+        s->layer = 0xff;
     }
 
 public:
@@ -1315,7 +1336,6 @@ private:
             if (p == s) { p = cell.back(); cell.pop_back(); return; }
     }
 
-    const GameResources& m_res;
     std::vector<VidInfo> m_vids;
     std::vector<Weapon> m_weapons;
     fx::PerspectiveTables m_persp;

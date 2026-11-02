@@ -113,6 +113,8 @@ struct CommandStack {
 struct Sprite {
     // base SPRITE (0x3f bytes)
     Sprite* next = nullptr;            // z-layer list
+    Sprite* prev = nullptr;            // (back link for O(1) removal; not in the original)
+    std::uint8_t layer = 0xff;         // list the sprite is linked in (0xff = none)
     Sprite* child = nullptr;           // sub-object chain
     std::int16_t x = 0, y = 0, z = 0;
     std::uint8_t direction = 0, action = 0;
