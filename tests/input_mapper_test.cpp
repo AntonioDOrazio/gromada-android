@@ -467,7 +467,7 @@ void testInvisibleLock() {
     s = aim({-0.6f, 0.8f}); // 3 is in the corridor but out of range
     CHECK(!s.aimLocked && near((s.aimTarget - Vec2{320, 240}).length(), 280, 0.05f));
     // Off screen and beyond the old fixed distance (280 / 1.5 = 187 px up): locked when in range.
-    f.aimDistance = 420; // HEPHEST after HEADER.INI's SetVid(18, VID_WEAPONRANGE, 280*3/2)
+    f.aimDistance = 420; // a longer range (SetVid VID_WEAPONRANGE, as NetTact does)
     const AimTarget far[] = {targets[2]};
     f.targets = far;
     s = aim({0, -1});
@@ -476,6 +476,15 @@ void testInvisibleLock() {
     f.aimDistance = 300; // 310 px away: out of range, the shot goes to the full 300 px
     s = aim({0, -1});
     CHECK(!s.aimLocked && s.aimTarget == (Vec2{320, -60}));
+    // Anti-aircraft weapon: the original takes the point as an aircraft 80 px up, so the full
+    // range point is lifted by 80 px (the shot lands 300 px up); a locked point is not.
+    f.aimLift = 80;
+    s = aim({0, -1});
+    CHECK(!s.aimLocked && s.aimTarget == (Vec2{320, -140}));
+    f.aimDistance = 420;
+    s = aim({0, -1});
+    CHECK(s.aimLocked && s.aimTarget == (Vec2{330, -90}));
+    f.aimLift = 0;
     // The near end of the corridor is a cone: a unit beside the player is not "ahead".
     const AimTarget beside[] = {{{345, 215}, {345, 235}}}; // 5 px ahead, 25 px to the side
     f.targets = beside;

@@ -192,9 +192,14 @@ per 0,45 s diventerebbe un click destro.
   | il primo proiettile ha velocità verticale ≥ orizzontale (parabola alta) | `Ballistic` | 91 HAIL (200/400) |
   | altrimenti | `Direct` | 88 HEPHEST, 202 HELIOS, 89 PHOEBUS, 203 THUNDER, 208 VULCAN, 207 PHOENIX |
 
-  Il lanciafiamme PHOENIX ha corto raggio perché la sua gittata resta 280 mentre `HEADER.INI`
-  allunga quella di laser, cannoni e mitragliatrice (`SetVid(..., VID_WEAPONRANGE, 280*3/2)`):
-  l'aggancio usa la gittata attuale dell'arma, quindi ne tiene conto da sé.
+  Il lanciafiamme PHOENIX (corto raggio) sta nel corridoio stretto: è un'arma diretta e veloce.
+  L'aggancio usa sempre la gittata attuale dell'arma letta dal motore (`weapons[]` dei dati, che
+  gli script possono cambiare con `SetVid(n, VID_WEAPONRANGE, …)`: `HEADER.INI` lo fa solo nel
+  gioco in rete, `NetTact`).
+  Le armi antiaeree (`targetCategory` con gli aerei: THUNDER, HARPY, HYDRA, ZEPHYR) trattano il
+  punto del mouse senza unità sotto come un aereo 80 px più in alto (`act_coor_attack`, 0x411c41):
+  il punto a gittata massima è alzato di 80 px (`FrameInfo::aimLift`), così il colpo arriva a
+  gittata piena lungo lo stick.
 - **Grilletti.** RetroArch dà la pressione di L2/R2 (`RETRO_DEVICE_INDEX_ANALOG_BUTTON`) e, sui pad
   con grilletti digitali, 0x7fff quando sono premuti; se un frontend riporta 0, conta il pulsante
   digitale come pressione piena. Zona morta 8 %. Nel cursore virtuale un grilletto clicca oltre

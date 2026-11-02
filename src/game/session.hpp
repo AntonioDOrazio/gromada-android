@@ -244,6 +244,7 @@ public:
             c.flagmanY = aim.flagmanY;
             c.weaponRange = static_cast<float>(aim.weaponRange);
             c.weaponKind = weaponKind(aim.fire);
+            c.aimLift = (aim.fire.targetCategory & 0x08) ? 80.0f : 0.0f; // cat::Avia (act_coor_attack 0x411c41)
             for (const auto& t : aim.targets) {
                 c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
                 c.targetHp += t.hp;

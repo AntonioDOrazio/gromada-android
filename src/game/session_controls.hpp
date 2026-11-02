@@ -25,6 +25,7 @@ struct ControlsFrame {
     std::vector<input::AimTarget> targets;   // attackable units, on the output
     float weaponRange = 0;                   // world px, Euclidean (PlayerAim); 0 = unknown
     input::WeaponKind weaponKind = input::WeaponKind::Unknown; // lock corridor (issue #19)
+    float aimLift = 0;                       // 80 for anti-aircraft weapons (input::FrameInfo)
     std::uint8_t weaponMask = 0x0F;          // bit k: weapon k+1 selectable
     int currentWeapon = -1;                  // 0..3, -1 = no flagman / not a level
     // for logs and tests

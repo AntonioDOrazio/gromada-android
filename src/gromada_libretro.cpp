@@ -496,6 +496,7 @@ void runSession(float dt) {
     f.currentWeapon = controls.currentWeapon;
     f.aimDistance = controls.weaponRange;
     f.weaponKind = controls.weaponKind;
+    f.aimLift = controls.aimLift;
     f.targets = controls.targets;
     const Settings& set = core->input.settings();
     const PcState& pc = core->input.update(pollRaw(input_state_cb, set), f);

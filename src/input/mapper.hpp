@@ -135,6 +135,11 @@ struct FrameInfo {
     // shots are pulled back to this distance along their direction: game::PlayerAim)
     float aimDistance = 0;
     WeaponKind weaponKind = WeaponKind::Unknown; // current weapon (lock corridor)
+    // World px the original adds below the mouse point for this weapon when no unit is under
+    // it: anti-aircraft weapons take the point as an aircraft 80 px up (act_coor_attack,
+    // 0x411c41). The full-range aim point is lifted by as much, so the shot lands at full
+    // range along the stick.
+    float aimLift = 0;
     // Screen px per world px (the view zoom): scales the range and the corridors. Positions
     // (player, targets) are already in screen px.
     float zoom = 1;
@@ -519,7 +524,7 @@ private:
                 return f.targets[static_cast<std::size_t>(t)].point;
             }
         }
-        return player + m_aimDir * range;
+        return player + m_aimDir * range - Vec2{0, f.aimLift * zoom};
     }
 
     // The weapon the game reports: requests are repeated until it has switched (the original
