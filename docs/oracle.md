@@ -74,11 +74,14 @@ Il motore (issue #8) può chiamare direttamente queste funzioni o essere confron
 | `clock` | `SVGA::BeginFrame` `0x401fb0..0x401feb` | intervallo (`timeGetTime` stub) | 600 | limite 71 ms, wraparound di `timeGetTime` |
 | `tick_schedule` | `World::Tact` `0x40bc35..0x40bc9d` | intervallo (`edi`=sprite) | 1200 | `Randomized`, `SkipUpdate`, dt "negativi" |
 | `sprite_timer` | `SPRITE::Tact` `0x409b39..0x409b76` | intervallo | 600 | timer a 16 bit |
+| `sound_edge`, `sound_random` | oggetto audio: `0x408dd0`, `0x408f20`, `0x408910`, `0x409550`, `0x408d80`, `0x408c50` | thiscall | 255 + 1100 sequenze | famiglia "suono" (§8): chiamate DirectSound registrate |
+| `sound_table` | `0x407640` + `0x408730` su `fw.res` | thiscall | 48 descrittori | solo con i dati; tipo, formato, CRC32 |
 
 Formato dei file: `{"family", "function", "columns", "notes", "cases": [[...], ...]}`, un caso per
 riga; `tables` ha invece `"arrays"`. Le famiglie con oggetti in numero variabile (`check_move`,
 `area_damage`, `commands`) hanno `"objectColumns"`: ogni caso è formato dalle colonne fisse
-seguite da `nObjects` gruppi di `objectColumns`. Dimensione totale ≈ 1,9 MB.
+seguite da `nObjects` gruppi di `objectColumns`. Dimensione totale ≈ 1,9 MB, più ≈ 1,5 MB della
+famiglia "suono" (righe di lunghezza variabile, formato in §8).
 
 ### Convenzioni di chiamata trovate
 
@@ -248,3 +251,76 @@ Versioni usate: unicorn 2.1.4, pefile, Python 3.13. Poi `cmake --build build && 
    (totale < 2 MB) e copertura dei rami.
 4. Scrivere la funzione pura in `reference_math.hpp` e il controllo in `tests/oracle_test.cpp`
    (`forCases("nome", ...)`).
+
+## 8. Famiglia "suono" (issue #18)
+
+`tools/oracle/gen_sound.py` esegue le funzioni **non modificate** dell'oggetto audio (`0x42e0c8`,
+`docs/re/runtime.md` §9.1) su un oggetto sintetico costruito dal costruttore originale `0x4080c0`
+(come la globale in `.bss`), con una tabella dei descrittori sintetica (N effetti, tipi 0, 1, 40,
+50, 90, 100 e byte casuali, dati PCM casuali) e un **DirectSound finto**:
+
+- `IDirectSound` (vtable a stub): `CreateSoundBuffer` `+0x0c`, `DuplicateSoundBuffer` `+0x14`;
+  `IDirectSoundBuffer`: `Release` `+0x08`, `GetStatus` `+0x24`, `Lock` `+0x2c`, `Play` `+0x30`,
+  `SetCurrentPosition` `+0x34`, `SetVolume` `+0x3c`, `SetPan` `+0x40`, `Stop` `+0x48`, `Unlock` `+0x4c`.
+  Ogni altro slot → `UnexpectedCall`. Metodi stdcall (COM): l'harness controlla i byte tolti dalla
+  pila. Verificati: `DSBUFFERDESC` (dimensione 0x14, flag `0xe2` = STATIC|CTRLFREQUENCY|CTRLPAN|
+  CTRLVOLUME, byte e formato del descrittore), il riempimento `Lock`/`memcpy`/`Unlock` di `0x408b30`
+  (contenuto identico ai dati del descrittore), nessun buffer perso o orfano dopo ogni chiamata.
+- Stato simulato: un buffer suona da `Play` fino a `Stop`/`Release` o a un evento **FINISH**
+  scelto dal generatore (solo buffer non ciclici: il suono è arrivato in fondo). `GetStatus`
+  restituisce `DSBSTATUS_PLAYING | DSBSTATUS_LOOPING`. `DuplicateSoundBuffer(NULL)` restituisce
+  `DSERR_INVALIDPARAM` come il vero DirectSound (`0x408910` la chiama quando il canale scelto
+  precede quello da duplicare: prova anche il proprio buffer, ancora nullo).
+- Stub deterministici: orologio `curclock` `0x42bf94` scritto prima di ogni Tact; per `PlayWAV`
+  `fopen`/`fclose`/`free` e il caricatore WAV `0x408570` (riempie il descrittore N come un WAV
+  valido, oppure lo lascia vuoto, oppure `fopen` fallisce); il log `0x407fb0` è contato.
+
+Ogni riga è una **sequenza di eventi** (interi; formato completo nel campo `notes`):
+`TACT(clock)`, `REQUEST(nsfx, pan, att)`, `STOPALL`, `STOPONE(nsfx)`, `PLAYWAV(file, esito, ritorno)`,
+`FINISH(canale)`; per ognuno le operazioni DirectSound prodotte (`GetStatus` con il risultato,
+`SetPan`, `SetVolume`, `Play(flag)`, `Stop`, `LOAD` = Create+riempimento o Duplicate dal buffer di
+un altro canale, `Release`, `SetCurrentPosition`), identificate dal **canale** che possiede il
+buffer. In fondo lo stato dei canali (attivo, buffer, nsfx, istante) e della coda.
+
+- `sound_random` (1100): N da 2 a 45, effetti "caldi" (fusioni, duplicati, riuso), nsfx invalidi
+  (0, −1, N senza WAV, N+1, int32), pan e attenuazioni limite (±10000/±10001, −2000/−2001,
+  positive, int32), passi di orologio (16/17/33/39 ms, 49/50/51, 499/500/501, grandi, riavvolgimento
+  a 32 bit), da 0 a 40 richieste per frame (coda piena), StopSFX/StopSFX(n)/PlayWAV, Tact doppi.
+- `sound_edge` (255): loop tenuti vivi con periodi 16..520 ms e scadenza a 499/500/501/502 ms,
+  guardia dei 50 ms (one-shot, ciclici, non posizionali, finiti o no), più richieste che canali
+  liberi (parità: vince l'ultima), attenuazioni positive, coda piena (one-shot e ciclici), fusioni
+  con pan fuori limite, StopSFX/StopSFX(n)/StopMusic e ripresa, PlayWAV (stesso file, altro file,
+  file mancante o non valido), più di 8 canali occupati, orologio che si riavvolge o torna indietro.
+- `sound_table` (solo con `fw.res`): `0x407640` apre il `.res` e `0x408730` carica la tabella con il
+  vero `0x408570`; `fopen`/`fread`/`fseek`/`ftell`/`malloc` sono sostituite da Python sul file
+  reale. Per ogni descrittore: tipo, byte, campi `WAVEFORMATEX`, CRC32 dei dati (solo numeri).
+
+`tests/sound_oracle_test.cpp` rigioca ogni sequenza su `game::SoundChannels` con un `SoundSink`
+che simula lo stesso dispositivo e registra le stesse operazioni: devono coincidere **esattamente**
+evento per evento (anche gli argomenti interi di pan e volume), così come lo stato finale. Con
+`GROMADA_DATA` confronta anche `GameResources::sounds()` e `effectSound()` con `sound_table`
+(N = 47, 47/47 suoni identici per tipo, dimensione, frequenza e CRC32).
+
+Controlli fatti sul test: le mutazioni di guardia (50→49), scadenza (500→501), parità del
+"più debole", scadenza solo dei canali attivi e partenza dall'elemento 0 vengono tutte rilevate
+(da 29 a 338 sequenze diverse). `ORACLE_GARBAGE=0` dà vettori identici.
+
+### Risultati
+
+- Il vecchio scheduler (b456dcd), rigiocato sugli stessi vettori a livello di ciò che si sente,
+  differiva in 582 sequenze su 1355 per due motivi raggiungibili nel gioco: **ripresa dopo `Stop`**
+  (un motore che riparte sullo stesso canale continua da dove era stato fermato, non ricomincia;
+  idem un effetto interrotto da `StopSFX()`) e lo **slot `PlayWAV`** (mai accodato, non ciclico);
+  più differenze solo con attenuazioni positive (mai prodotte dal gioco: aritmetica a 32 bit della
+  fusione, ciclo di scarto che parte dall'elemento 0).
+- Sound 0 di `fw.res` ha tipo 1 (non ciclico): i canali mai usati, che il costruttore lascia con
+  nsfx 0, non vengono mai fermati dal passo 3 del Tact (con tipo 0 l'originale chiamerebbe `Stop`
+  su un buffer nullo).
+- `SetCurrentPosition` non viene mai chiamata: il riavvio di un buffer fermato riprende dalla
+  posizione corrente.
+
+Limiti: `0x408730` è verificata solo su `fw.res`; i casi in cui l'originale andrebbe in crash
+(creazione del buffer fallita, dati del descrittore vuoti, `#DE` nella fusione con
+`INT_MIN / −1`) sono esclusi; l'audio disattivato (`+0x2a4`) fa uscire subito tutte le funzioni e
+non è modellato. L'ordine delle richieste fra sprite in una partita è verificato dall'oracolo di
+partita (#13), non qui.
