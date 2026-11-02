@@ -1,13 +1,15 @@
 #pragma once
 // IDs of the builtins declared by the game in maps/HEADER.INI (`extern Name(params) ID;`).
 //
-// The script's own extern declarations remain the source of truth at run time (the registry is
-// built from them); this table lets the engine dispatch on symbolic IDs and lets tools and tests
-// compile scripts that do not include the header. tests/script_data_test.cpp checks that it
-// matches the header shipped with the game.
+// The script's extern declarations decide which opcode a name compiles to; what an opcode does
+// is fixed by the original's handler (0x412b30). This table gives the handlers' parameter
+// counts (how many values the interpreter pops for a builtin opcode) and lets the engine
+// dispatch on symbolic IDs. tests/script_data_test.cpp checks that it matches the header
+// shipped with the game.
 //
 // Parameter signatures: one letter per parameter, 'i' int, 's' string, 'a' untyped
-// (`FWrite(int file,variable)`). StopSFX is declared twice: StopSFX() 134 and StopSFX(int) 136.
+// (`FWrite(int file,variable)`). StopSFX is declared twice: StopSFX() 134 and StopSFX(int) 136;
+// the first declaration wins, so 136 is unreachable from the game scripts.
 #include <array>
 #include <cstdint>
 #include <string_view>
@@ -181,6 +183,22 @@ inline constexpr std::array<KnownBuiltin, 76> kKnownBuiltins{{
 }};
 
 constexpr std::int32_t toInt(BuiltinId id) { return static_cast<std::int32_t>(id); }
+
+// Opcodes with a handler in the original (64..139). Every other opcode that is not a VM
+// instruction is an "Unknown command" that ends the frame.
+constexpr bool isBuiltinOpcode(std::int32_t op) { return op >= 64 && op <= 139; }
+
+constexpr const KnownBuiltin* findKnownBuiltin(std::int32_t id) {
+    if (!isBuiltinOpcode(id)) return nullptr;
+    const KnownBuiltin& k = kKnownBuiltins[std::size_t(id - 64)];
+    return toInt(k.id) == id ? &k : nullptr;
+}
+
+// Number of values the original's handler pops for builtin opcode `id` (0 if unknown).
+constexpr std::size_t knownBuiltinArity(std::int32_t id) {
+    const KnownBuiltin* k = findKnownBuiltin(id);
+    return k ? k->params.size() : 0;
+}
 
 // Registry holding every builtin of kKnownBuiltins (parameters unnamed).
 inline BuiltinRegistry knownBuiltinRegistry() {

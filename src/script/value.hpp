@@ -3,7 +3,8 @@
 //
 // Strings are raw bytes in the script's code page (CP866/CP1251/CP1252 depending on the file);
 // the interpreter never re-encodes them. Integers follow the 32-bit two's complement arithmetic
-// of the original x86 executable (wrap-around, no undefined behaviour).
+// of the original x86 executable (wrap-around, no undefined behaviour). Values are what builtins
+// receive and return; inside the interpreter they live in cells (see interpreter.hpp).
 #include <charconv>
 #include <cstdint>
 #include <format>
@@ -25,27 +26,21 @@ constexpr std::int32_t add(std::int32_t a, std::int32_t b) { return wrap(std::ui
 constexpr std::int32_t sub(std::int32_t a, std::int32_t b) { return wrap(std::uint32_t(a) - std::uint32_t(b)); }
 constexpr std::int32_t mul(std::int32_t a, std::int32_t b) { return wrap(std::uint32_t(a) * std::uint32_t(b)); }
 constexpr std::int32_t neg(std::int32_t a) { return wrap(0u - std::uint32_t(a)); }
-// Division and remainder truncate toward zero like C. x/0 and x%0 yield 0 (documented choice:
-// the original would raise a CPU exception), INT_MIN/-1 wraps to INT_MIN.
-constexpr std::int32_t div(std::int32_t a, std::int32_t b) {
-    if (b == 0) return 0;
-    if (b == -1) return neg(a);
-    return a / b;
-}
-constexpr std::int32_t mod(std::int32_t a, std::int32_t b) {
-    if (b == 0 || b == -1) return 0;
-    return a % b;
-}
+// The original's DIV opcode: x/0 = 0x0FFFFFFF; otherwise x86 `idiv` (truncation toward zero).
+// INT_MIN/-1 raises a CPU exception in the original: callers decide (see ExecConfig).
+inline constexpr std::int32_t kDivByZero = 0x0FFFFFFF;
+constexpr bool divideFaults(std::int32_t a, std::int32_t b) { return b == 0 || (b == -1 && a == INT32_MIN); }
 // Shift counts are masked to 5 bits like the x86 SHL/SAR instructions; >> is arithmetic.
 constexpr std::int32_t shl(std::int32_t a, std::int32_t b) { return wrap(std::uint32_t(a) << (std::uint32_t(b) & 31u)); }
 constexpr std::int32_t shr(std::int32_t a, std::int32_t b) { return a >> (std::uint32_t(b) & 31u); }
 } // namespace intops
 
-// Converts a string to an integer like C atoi(): optional leading blanks, optional sign,
-// decimal digits; anything else stops the conversion; no digits -> 0. Wraps on overflow.
+// Converts a string to an integer like the MSVC CRT atoi() used by the original: leading
+// isspace() characters, optional sign, decimal digits; anything else stops; no digits -> 0.
+// Wraps on overflow (the CRT accumulates without checks).
 constexpr std::int32_t stringToInt(std::string_view s) {
     std::size_t i = 0;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+    while (i < s.size() && (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r'))) ++i;
     bool negative = false;
     if (i < s.size() && (s[i] == '+' || s[i] == '-')) negative = s[i++] == '-';
     std::uint32_t v = 0;
@@ -84,8 +79,9 @@ public:
         return t == ValueType::Int ? Value{toInt()} : Value{toString()};
     }
 
-    // Truth value in conditions: non-zero integer, non-empty string.
-    bool truthy() const { return isInt() ? intValue() != 0 : !stringValue().empty(); }
+    // Truth value in conditions: like the original, a string is converted with atoi
+    // ("12" is true, "abc" and "0" are false).
+    bool truthy() const { return toInt() != 0; }
 
     friend bool operator==(const Value&, const Value&) = default;
 
