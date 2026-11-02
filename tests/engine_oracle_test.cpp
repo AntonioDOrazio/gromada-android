@@ -1067,6 +1067,7 @@ void testPlayerTurret() {
         vids[2].someWeaponIndex = std::uint8_t(headWeapon);
         GameEngine eng{vids, weapons};
         eng.loadEmptyMap(100, 100, 1);
+        eng.setClock(1000); // one turret step per call, as in the original's frames (D9 pacing off)
         World& w = eng.world();
         Sprite* f = w.createUnit(1, 500, 500, 0, 0, 0, nullptr);
         if (!f || !f->child) { CHECK(false); return -1; }
