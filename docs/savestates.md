@@ -193,6 +193,14 @@ Procedura (anche per chi fonde un branch e vede fallire la compilazione):
 - Uno stato salvato a 16:9 si carica anche a 4:3 (e viceversa): la vista prende la dimensione
   attuale dal frame successivo; il determinismo vale a parità di opzioni.
 
+## Campi della issue #19 (versione 4)
+
+- Salvato: `Mapper::m_zoomArmed` (schema a puntamento: A/B premuti nel livello e ancora tenuti,
+  cioè quelli che fanno zoom; un tasto tenuto dal menu non zooma).
+- Non salvati, perché ricalcolati a ogni frame: `PcState::aimTarget`, `hasAimTarget`,
+  `cursorHidden` (come `zoomRate`), i grilletti analogici `RawInput::l2/r2` (letti solo nel
+  frame corrente, mai dall'input precedente), le nuove impostazioni del mapper (opzioni core).
+
 ## Campi della issue #13 (versione 3)
 
 - Salvati: per ogni testo, lo stato della macchina da scrivere a tempo di gioco (`started`,

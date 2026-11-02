@@ -1,8 +1,9 @@
 #pragma once
 // Save states of the input mapper (issue #14, docs/savestates.md): the PC state it produced
 // last (cursor, buttons for edge detection), the previous raw input, pulses, aim offset,
-// cursor acceleration, touch tracker and the name-entry repeat. The Settings come from the
-// core options and are not stored. Header-only.
+// cursor acceleration, touch tracker, the name-entry repeat and the zoom buttons (v4). The
+// Settings come from the core options and are not stored; per-frame outputs (zoomRate,
+// aimTarget, cursorHidden) and the analog triggers are recomputed every frame. Header-only.
 
 #include "core/state_io.hpp"
 #include "input/mapper.hpp"
@@ -141,6 +142,7 @@ struct MapperState {
     float touchGrace = 0;
     int repeatDir = 0;
     float repeatHeld = 0;
+    std::uint8_t zoomArmed = 0;
 };
 
 struct SaveStateAccess {
@@ -172,6 +174,7 @@ struct SaveStateAccess {
         w.f32(m.m_touchGrace);
         w.i32(m.m_repeatDir);
         w.f32(m.m_repeatHeld);
+        w.u8(m.m_zoomArmed); // v4 (issue #19)
         w.endChunk(chunk);
     }
 
@@ -202,6 +205,7 @@ struct SaveStateAccess {
         s.touchGrace = r.finite32();
         s.repeatDir = r.ranged<std::int32_t>(-1, 1, "repeat direction");
         s.repeatHeld = r.finite32();
+        s.zoomArmed = r.ranged<std::uint8_t>(0, 3, "zoom buttons");
         r.expectEnd("input mapper");
         return s;
     }
@@ -231,6 +235,7 @@ struct SaveStateAccess {
         m.m_touchGrace = s.touchGrace;
         m.m_repeatDir = s.repeatDir;
         m.m_repeatHeld = s.repeatHeld;
+        m.m_zoomArmed = s.zoomArmed;
     }
 };
 

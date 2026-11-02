@@ -66,10 +66,26 @@ struct PlayerAim {
         int groundX = 0, groundY = 0; // the unit on the ground (distances, ranges)
         int hp = 0;
     };
+    // What the current weapon head fires (issue #19: the controls classify the weapon from
+    // the data, e.g. a wider lock corridor for slow or inaccurate weapons). The chain starts
+    // at the head's act_fight children and follows, for up to 6 objects, the act_fight child
+    // of each object and the act_death (impact) child of the projectiles.
+    struct FireChain {
+        int headNvid = -1;               // the flagman's sub-object (weapon head), -1 none
+        std::uint8_t flags = 0;          // head weapon flags: 1 fires without turning, 4 fixed head
+        std::uint8_t targetCategory = 0; // head weapon target categories (cat::*)
+        std::uint32_t classes = 0;       // bit c: an object of class c (cls::*) is in the chain
+        int projectileClass = -1;        // class of the first object that flies or lies (-1 none)
+        int projectileSpeedX = 0, projectileSpeedY = 0; // its vid speeds (9999 = instantaneous)
+    };
     bool valid = false;          // false: no local flagman (menus, cutscenes)
     int flagmanX = 0, flagmanY = 0;
-    int weaponRange = 0;         // current weapon, game metric max(|dx|, 1.5·|dy|); 0 = unknown
+    // Current weapon range. The flagman's shots (act_coor_attack → Aim 0x40ada0) compare it
+    // with GetDirection's distance, which is Euclidean: a farther point is pulled back to
+    // this distance along the same direction. (AI units use the game metric max(|dx|, 1.5|dy|).)
+    int weaponRange = 0;         // 0 = unknown
     std::vector<Target> targets; // hostile units the current weapon can hit, anywhere on the map
+    FireChain fire;              // (default: nothing known)
 };
 
 class Engine {

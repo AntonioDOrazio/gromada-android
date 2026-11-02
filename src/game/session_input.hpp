@@ -74,13 +74,15 @@ public:
     // view origin in the world. `dt` (seconds) drives the key repeat.
     // A move order of the direct scheme (PcState::moveOrder) is a left click at its target
     // instead of the cursor, without the right button (Player::Tact would fire at that point).
+    // Otherwise the aim point of the direct scheme (PcState::aimTarget, issue #19) is the mouse
+    // point, also off screen: the reticle (cursor) is only where it is drawn.
     OriginalInput build(const input::PcState& pc, int screenX, int screenY, int cameraX, int cameraY, float dt,
                         View view = {}) {
         OriginalInput r;
         int sx = screenX, sy = screenY;
-        if (pc.moveOrder) {
-            sx = static_cast<int>(std::floor(pc.moveTarget.x)) + (screenX - pc.cursorX());
-            sy = static_cast<int>(std::floor(pc.moveTarget.y)) + (screenY - pc.cursorY());
+        if (const input::Vec2* point = pc.moveOrder ? &pc.moveTarget : pc.hasAimTarget ? &pc.aimTarget : nullptr) {
+            sx = static_cast<int>(std::floor(point->x)) + (screenX - pc.cursorX());
+            sy = static_cast<int>(std::floor(point->y)) + (screenY - pc.cursorY());
         }
         r.mouseWorldX = static_cast<std::int16_t>(sx + cameraX);
         r.mouseWorldY = static_cast<std::int16_t>(sy + cameraY);

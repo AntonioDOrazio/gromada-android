@@ -243,9 +243,12 @@ public:
             c.flagmanX = aim.flagmanX;
             c.flagmanY = aim.flagmanY;
             c.weaponRange = static_cast<float>(aim.weaponRange);
+            c.weaponKind = weaponKind(aim.fire);
+            c.aimLift = (aim.fire.targetCategory & 0x08) ? 80.0f : 0.0f; // cat::Avia (act_coor_attack 0x411c41)
             for (const auto& t : aim.targets) {
                 c.targets.push_back({toScreen(t.x, t.y), toScreen(t.groundX, t.groundY)});
                 c.targetHp += t.hp;
+                c.targetHps.push_back(t.hp);
             }
             c.targetCount = static_cast<int>(aim.targets.size());
         } else {
@@ -1207,6 +1210,8 @@ private:
     void drawCursor() {
         if (!m_cursors || m_cursorType < 0)
             return;
+        if (m_pc.cursorHidden && !m_demo && !m_ui.hasMenu() && !m_movieActive)
+            return; // direct scheme without the reticle (issue #19)
         int x = m_pc.cursorX(), y = m_pc.cursorY();
         input::CursorShape shape = input::CursorShape::Arrow;
         if (m_demo) {

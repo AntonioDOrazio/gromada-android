@@ -78,6 +78,11 @@ si usano invece i passi registrati nella demo.
   `ViewZoom`, lo integra col tempo reale del frame (0,5×–2×, esponenziale) e lo passa alla pipeline
   di rendering, che decide la vista (dimensione = uscita / zoom) e la conversione schermo ↔ mondo
   per cursore, touch e record di input.
+  Per i controlli (issue #19) la pipeline deve anche: convertire allo stesso modo
+  `PcState::aimTarget` (il punto mirato dello schema diretto, anche fuori schermo: è il punto del
+  mouse nel record, come `moveTarget`), dare a `input::FrameInfo::zoom` lo zoom corrente (pixel
+  di schermo per pixel di mondo: scala gittata e corridoi di aggancio) e posizionare giocatore e
+  bersagli di `ControlsFrame` in pixel di schermo dopo lo zoom. Con lo zoom a 1 tutto coincide.
 - **Risoluzione interna** e **interpolazione** delle posizioni: solo nel disegno. La simulazione,
   le demo, l'oracolo e i save state non cambiano.
 - Agenti: controlli (`zoomRate`, schemi), pipeline di rendering (`ViewZoom` → vista, risoluzione
