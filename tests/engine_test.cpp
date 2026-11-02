@@ -361,6 +361,26 @@ void testPause() {
     CHECK(t->x - x0 < 20);                   // no jump forward after the pause
 }
 
+// 0x40f757 Projectile act_nextcommand: while TurnTo is still rotating the projectile keeps
+// its rotation action; act_go only once aligned (issue #13: demo2 diverged here).
+void testProjectileTurn() {
+    std::vector<Vid> vids{makeVid({.cls = cls::Projectile, .category = cat::Cannon, .flags = 0, .speedX = 200,
+                                   .dirs = 32, .anim = {1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}})};
+    World w{vids, {}};
+    w.loadEmpty(2000, 2000, 1);
+    Sprite* p = w.createUnit(0, 500, 500, 20, 0, 0, nullptr);
+    CHECK(p != nullptr);
+    w.setDestination(*p, 900, 500, 20);           // east, the projectile points north
+    CHECK(p->state & st::Move);
+    w.action(*p, act::nextcommand, 0, 0);
+    CHECK(p->direction != 0 && p->direction != 64);   // one rotation step
+    CHECK(p->action == act::l_rotate || p->action == act::r_rotate);
+    for (int i = 0; i < 16 && p->direction != 64; ++i) w.action(*p, act::nextcommand, 0, 0);
+    CHECK_EQ(static_cast<int>(p->direction), 64);
+    w.action(*p, act::nextcommand, 0, 0);
+    CHECK_EQ(static_cast<int>(p->action), act::go);
+}
+
 void testBaseActions() {
     std::vector<Vid> vids{makeVid({.speedX = 50, .dirs = 32, .maxHP = 10})};
     World w{vids, {}};
@@ -477,6 +497,71 @@ void testBuiltins() {
     CHECK(!f->commands);   // clearcom before act_move
     CHECK(e.cursorAt(1400 - e.camera().x, 900 - e.camera().y) == CursorKind::Move);
     CHECK(e.cursorAt(1500 - e.camera().x, 800 - e.camera().y) == CursorKind::Fight);
+    // 0x414838: the view rectangle is inclusive (x1 = 639): the camera stops at mapW - 640,
+    // like the recorded cameras of the demos (issue #13)
+    e.setScrollLock(true);
+    call(128, {0});
+    call(126, {3990, 2990});
+    e.updateCamera();
+    CHECK_EQ(e.camera().x, 4000 - 640);
+    CHECK_EQ(e.camera().y, 3000 - 480);
+}
+
+// 0x4169b0 Player::Tact, turret: the unit under the cursor is filtered with the flagman's
+// weapon, but "fixed forward" (flags & 4) and "aim 80 px higher" (targets include aircraft)
+// come from the weapon of the turret's own vid (issue #13: demo2/demo3 diverged on a weapon
+// change). The coor_attack aim uses targetCategory & Avia too (0x40eadb, 0x411c41).
+void testPlayerTurret() {
+    VidSpec k{.cls = cls::Kassandra, .speedX = 100, .accel = 200, .dirs = 32, .rot = 35, .maxHP = 40, .army = 0};
+    k.anim.fill(1);
+    VidSpec t{.cls = cls::Superstructure, .category = cat::Object, .flags = 0, .dirs = 32, .weapon = 1};
+    t.anim.fill(1);
+    std::vector<Vid> vids{makeVid(k), makeVid(t)};
+    vids[0].linkedObjectVid = 1;
+    std::vector<Weapon> weapons(2);
+    weapons[0] = Weapon{.targetCategory = ObjectCategory::Vehicle, .flags = 0, .alwaysZero = 0, .weaponRange = 150,
+                        .scatter = 0, .cooldown = 10};
+    weapons[1] = Weapon{.targetCategory = ObjectCategory::Vehicle, .flags = 4, .alwaysZero = 0, .weaponRange = 150,
+                        .scatter = 0, .cooldown = 10};
+    GameEngine e{vids, weapons};
+    e.loadEmptyMap(3000, 3000, 5);
+    World& w = e.world();
+    Sprite* f = w.createUnit(0, 1500, 1500, 0, 0, 0, nullptr);   // facing north
+    w.players()[0].flagman = f->id;
+    Sprite* head = f->child;
+    CHECK(head != nullptr);
+    auto aimAt = [&](int x, int y, int frames) {
+        for (int i = 0; i < frames; ++i) {
+            OriginalInput in;
+            in.mouseWorldX = static_cast<std::int16_t>(x);
+            in.mouseWorldY = static_cast<std::int16_t>(y);
+            e.setInput(in);
+            e.tactPlayers();
+        }
+    };
+    aimAt(1800, 1500, 10);                       // mouse to the east
+    CHECK_EQ(static_cast<int>(head->direction), 0); // turret weapon flags & 4: stays forward
+    weapons[1].flags = 0;
+    weapons[1].targetCategory = static_cast<ObjectCategory>(cat::Vehicle | cat::Avia);
+    vids.push_back(makeVid({.weapon = 1}));      // 2: a vehicle with that anti-aircraft weapon
+    GameEngine e2{vids, weapons};
+    e2.loadEmptyMap(3000, 3000, 5);
+    World& w2 = e2.world();
+    Sprite* f2 = w2.createUnit(0, 1500, 1500, 0, 0, 0, nullptr);
+    w2.players()[0].flagman = f2->id;
+    for (int i = 0; i < 20; ++i) {
+        OriginalInput in;
+        in.mouseWorldX = 1700;
+        in.mouseWorldY = 1420;                   // 80 px above the east
+        e2.setInput(in);
+        e2.tactPlayers();
+    }
+    CHECK_EQ(static_cast<int>(f2->child->direction), 64); // aimed at (1700, 1500): east
+    // act_coor_attack of a vehicle with an anti-aircraft weapon aims 80 px higher
+    Sprite* v = w2.createUnit(2, 1000, 1000, 0, 0, 0, nullptr);
+    w2.action(*v, act::coor_attack, 1600, 1400);
+    CHECK_EQ(static_cast<int>(v->attackY), 1480);
+    CHECK_EQ(static_cast<int>(v->attackZ), 80);
 }
 
 void testKassandraKeys() {
@@ -528,6 +613,8 @@ int main() {
     testDamage();
     testTargets();
     testPause();
+    testProjectileTurn();
+    testPlayerTurret();
     testBaseActions();
     testBuiltins();
     testKassandraKeys();

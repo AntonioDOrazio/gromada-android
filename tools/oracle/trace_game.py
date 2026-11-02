@@ -70,6 +70,7 @@ VIDS_PTR, NVIDS = 0x42df57, 0x42df4f
 VID_SIZE = 0x136
 CAMERA = 0x439cf4           # s16 x, s16 y
 SCREEN_W, SCREEN_H = 0x42da00, 0x42da04
+VIEW_RECT = 0x42da0c
 FIELD_DEMO_PLAY = 0x32f3
 WM_COMMAND, CMD_LOAD = 0x111, 0x9c4c
 
@@ -175,6 +176,10 @@ class Game:
         # recorded at 640x480 (recorded screen mouse < 640x480, world - screen = camera).
         o.w32(SCREEN_W, 640)
         o.w32(SCREEN_H, 480)
+        # View rectangle [x0, x1] x [y0, y1] (0x42da0c..0x42da18, inclusive; the +/- keys move
+        # it by 27x20). The recorded cameras reach mapW - 640 and mapH - 480: x1 = 639, y1 = 479.
+        for addr, v in ((VIEW_RECT, 0), (VIEW_RECT + 4, 639), (VIEW_RECT + 8, 0), (VIEW_RECT + 12, 479)):
+            o.w32(addr, v)
         # Sound::Init (0x4083f0) runs with a fake DirectSound and no mixer/CD volume devices
         self.dsound = FakeDirectSound(o)
         self.dsound.ops = self.audio
@@ -252,8 +257,10 @@ class Game:
         self.pending = None
         sp = self.o.s32(logic + 0x114)
         rec = [bid, args]
-        if sp == base + 1:
-            rec.append(self._cell(logic, base))
+        # the result is the new top of the stack (sp > base: FOpen/FCreate during a demo push
+        # 0 without popping their argument, 0x413782/0x41380a)
+        if sp > base:
+            rec.append(self._cell(logic, sp - 1))
         self.builtins.append(rec)
 
     # ------------------------------------------------------------------ game
@@ -303,7 +310,11 @@ class Game:
                             c = struct.unpack_from("<I", cb, 8)[0]
                 p = nxt
             crcs.append(zlib.crc32(b"".join(crc_data)))
+        # camera of the recording at the start of this frame: world mouse - screen mouse of
+        # the replayed input record (Field+0x32dd)
+        wx, wy, sx, sy = struct.unpack("<hhhh", o.read(FIELD + 0x32dd, 8))
         return {"f": index, "clock": o.u32(CURCLOCK), "rng": o.u32(RAND_STATE), "n": total,
+                "rcam": [wx - sx, wy - sy],
                 "cam": [o.s16(CAMERA), o.s16(CAMERA + 2)], "crc": crcs, "s": sprites,
                 "b": self.builtins, "a": list(self.audio)}
 

@@ -68,6 +68,7 @@ def main():
     plays = {"orig": collections.Counter(), "core": collections.Counter()}   # (op, nsfx) -> count
     end_note = ""
     go, gc = frames(fo), frames(fc)
+    prev = None
     while True:
         a = next(go, None)
         b = next(gc, None)
@@ -88,9 +89,23 @@ def main():
             if verbose:
                 diffs.append(f"{aspect}: {detail}")
 
+        if a.get("post") and a.get("post") == b.get("post"):
+            # both scripts asked for another map: the original posts it (the world is sampled
+            # before the load), our session loads it inside the frame: only the calls compare
+            ba, bb = a.get("b", []), b.get("b", [])
+            if ba != bb:
+                mark("builtins", f"last frame: orig {ba[:4]} core {bb[:4]}")
+            break
         for k in ("clock", "rng", "n"):
             if a[k] != b[k]:
                 mark(k, f"orig {a[k]} core {b[k]}")
+        if prev is not None and "rcam" in a:
+            # the recorded camera at the start of frame f is the camera after frame f - 1
+            if prev[0]["cam"] != a["rcam"]:
+                mark("cam-vs-recording-orig", f"frame {f - 1}: emulated {prev[0]['cam']} recorded {a['rcam']}")
+            if prev[1]["cam"] != a["rcam"]:
+                mark("cam-vs-recording-core", f"frame {f - 1}: core {prev[1]['cam']} recorded {a['rcam']}")
+        prev = (a, b)
         if a["cam"] != b["cam"]:
             mark("cam", f"orig {a['cam']} core {b['cam']}")
         bad_layers = [i for i, (x, y) in enumerate(zip(a["crc"], b["crc"])) if x != y]

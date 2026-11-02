@@ -246,14 +246,18 @@ inline void GameEngine::playerTact(Player& p) {
         head = f->child;
     }
     if (!m_world.vidOf(*f).linkedObjectVid || !head || head->action == act::fight) return;
+    // The unit under the cursor is filtered with the flagman's weapon (the player's, written
+    // above), the turret's behaviour comes from the weapon of the turret's own vid (0x416b6a):
+    // flag 4 = turret fixed forward, targets including aircraft = aim 80 px higher.
     const Weapon& w = m_world.weaponOf(*f);
     if (under && !(m_world.vidOf(*under).category & static_cast<std::uint8_t>(w.targetCategory))) under = nullptr;
-    if (w.flags & 4) { m_world.turnStep(*head, f->direction); return; }
+    const Weapon& tw = m_world.weaponOf(*head);
+    if (tw.flags & 4) { m_world.turnStep(*head, f->direction); return; }
     if (under) {
         m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, under->y).dir());
         return;
     }
-    const int ty = my + ((w.flags & 8) ? 80 : 0);
+    const int ty = my + ((static_cast<std::uint8_t>(tw.targetCategory) & cat::Avia) ? 80 : 0);
     m_world.turnStep(*head, fx::getDirection(f->x, f->y, mx, ty).dir());
 }
 
@@ -289,21 +293,25 @@ inline void GameEngine::scrollCamera() {
         m_camera.x = static_cast<std::int16_t>(m_camera.x + ((dt * m_scrollVX) >> 10));
         m_camera.y = static_cast<std::int16_t>(m_camera.y + ((dt * m_scrollVY) >> 10));
         if (f) {
+            // 0x416004: the view rectangle is [x0, x1] x [y0, y1] (0x42da0c..0x42da18), inclusive:
+            // x1 = width - 1, y1 = height - 1 without the status-bar margins.
             if (m_camera.x < f->x - 586) m_camera.x = f->x - 586;
             if (m_camera.y < f->y - 440) m_camera.y = f->y - 440;
-            if (m_camera.x + w > f->x + 586) m_camera.x = f->x - w + 586;
-            if (m_camera.y + h > f->y + 440) m_camera.y = f->y - h + 440;
+            if (m_camera.x + (w - 1) > f->x + 586) m_camera.x = f->x - (w - 1) + 586;
+            if (m_camera.y + (h - 1) > f->y + 440) m_camera.y = f->y - (h - 1) + 440;
         }
     }
 }
 
-// 0x414838: keep the view inside the map.
+// 0x414838: keep the view inside the map: camX <= mapW - x1 - 1 with x1 = width - 1 (the view
+// rectangle is inclusive), i.e. the last column of the map is the last visible one. Checked on
+// the demos (issue #13): the recorded camera reaches mapH - 480 (demo2) and mapW - 640 (demo3).
 inline void GameEngine::clampCamera() {
     if (!m_loaded) return;
     if (m_camera.x < 0) m_camera.x = 0;
     if (m_camera.y < 0) m_camera.y = 0;
-    if (m_camera.x > m_world.mapWidth() - m_camera.width - 1) m_camera.x = m_world.mapWidth() - m_camera.width - 1;
-    if (m_camera.y > m_world.mapHeight() - m_camera.height - 1) m_camera.y = m_world.mapHeight() - m_camera.height - 1;
+    if (m_camera.x > m_world.mapWidth() - m_camera.width) m_camera.x = m_world.mapWidth() - m_camera.width;
+    if (m_camera.y > m_world.mapHeight() - m_camera.height) m_camera.y = m_world.mapHeight() - m_camera.height;
 }
 
 // ---------------------------------------------------------------------------- effects

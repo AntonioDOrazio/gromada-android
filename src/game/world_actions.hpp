@@ -156,7 +156,8 @@ inline int World::actionVehicle(Sprite& s, int a, int v1, int v2) {
             s.attackX = static_cast<std::int16_t>(v1);
             s.state |= st::Attack;
             s.target = 0;
-            if (weaponOf(s).flags & 8) { s.attackZ = 80; s.attackY = static_cast<std::int16_t>(v2 + 80); }
+            // 0x40eadb: weapons that can hit aircraft (targetCategory & Avia) aim 80 px higher
+            if (static_cast<std::uint8_t>(weaponOf(s).targetCategory) & cat::Avia) { s.attackZ = 80; s.attackY = static_cast<std::int16_t>(v2 + 80); }
             else { s.attackZ = 19; s.attackY = static_cast<std::int16_t>(v2); }
             return 0;
         case act::additem: addItem(s, v1); return 0;
@@ -621,8 +622,10 @@ inline int World::actionProjectile(Sprite& s, int a, int v1, int v2) {
             if (s.state & st::Move) {
                 std::uint8_t d = getDirection(s.x, s.y, s.goX, s.goY).dir();
                 if (s.speed < 0) d = static_cast<std::uint8_t>(d + 0x80);
+                // 0x40f7ed: while turning (TurnTo == 0) the rotation action stays; act_go only
+                // once aligned (issue #13, demo2: a projectile in l_rotate)
                 if (!turnTo(s, d)) s.frame = static_cast<std::int16_t>(s.lastFrame + 1);
-                if (s.action != act::go) changeAction(s, act::go, -1);
+                else if (s.action != act::go) changeAction(s, act::go, -1);
             }
             return 0;
         case act::init:
@@ -1080,7 +1083,7 @@ inline int World::actionKassandra(Sprite& s, int a, int v1, int v2) {
             if (t) {
                 const auto tsz = vidOf(*t).sizeZ;
                 fired = fire(s, v1, t->y, t->z - (tsz >> 2) + tsz);   // x from the mouse (sic)
-            } else if (weaponOf(s).flags & 8) {
+            } else if (static_cast<std::uint8_t>(weaponOf(s).targetCategory) & cat::Avia) {   // 0x411c41
                 fired = fire(s, v1, v2 + 80, 80);
             } else {
                 fired = fire(s, v1, v2, 19);
