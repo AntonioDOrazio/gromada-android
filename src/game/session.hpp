@@ -87,6 +87,8 @@ public:
         finishRecording();
         m_files.closeAll();
         stopMovie();
+        if (m_mixer)
+            m_mixer->stopSfx(); // voices may point at PlayWAV sounds owned here
         if (m_engine)
             m_engine->unloadMap();
     }

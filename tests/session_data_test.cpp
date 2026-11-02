@@ -192,7 +192,82 @@ void flow(const GameResources& res, const std::filesystem::path& game) {
     CHECK_EQ(s.mapHistory().size(), std::size_t{6});
     CHECK_EQ(s.scriptErrors(), std::size_t{0});
     CHECK_EQ(mv->opened.size(), std::size_t{3});
+
+    // Mission 1 again, won with the original cheat code ("cheat" + 'w' -> Win()): the profile
+    // records the mission, "YOU WIN" appears, a click goes back to the mission map.
+    d.run(10);
+    d.key(input::Key::Enter);
+    CHECK(d.until("levels\\01.map"));
+    d.run(10);
+    d.key(input::Key::Enter); // close the briefing
+    d.run(10);
+    for (const char c : std::string{"cheatw"}) { d.type(c); d.run(1); }
+    d.run(5);
+    CHECK_EQ(s.globalInt("win"), 1);
+    CHECK_EQ(s.globalInt("map") & 1, 1);
+    {
+        const auto profile = s.files().read("save2");
+        CHECK(profile && profile->starts_with("ZETA 9\r\n1\r\n"));
+    }
+    d.run(150); // 2.5 s: V_YOURWIN
+    bool yourWin = false;
+    for (const auto& o : s.ui().objects()) yourWin |= o.nvid == ui::vids::YourWin;
+    CHECK(yourWin);
+    d.run(150); // clickable after 4 s (Tact returns early before) and the birth animation
+    d.press(d.pc.left);
+    d.run(2);
+    CHECK(d.until("maps.map", 120));
+    d.run(5);
+    CHECK_EQ(s.globalInt("map") & 1, 1); // LoadPlayer() of MAPS.INI reads the saved profile
+
+    // Options from the mission map: music volume +10, Esc writes fw.ini (save directory only).
+    d.pc.cursor = {0, 0}; // the options rows follow the mouse: keep it away
+    d.run(30);
+    d.key(input::Key::Down);
+    CHECK_EQ(s.globalInt("nmenu"), 28);
+    d.key(input::Key::Enter);
+    d.run(60);
+    CHECK_EQ(s.globalInt("gamestate"), 1);
+    CHECK_EQ(s.globalInt("nmenu"), 12);
+    for (int i = 0; i < 3; ++i) d.key(input::Key::Down);
+    CHECK_EQ(s.globalInt("nmenu"), 15);
+    const int music = s.globalInt("opt_music");
+    d.key(input::Key::Right);
+    CHECK_EQ(s.globalInt("opt_music"), music + 10);
+    d.key(input::Key::Escape);
+    d.run(60);
+    CHECK_EQ(s.globalInt("gamestate"), 0);
+    {
+        const auto fw = s.files().read("fw.ini");
+        CHECK(fw.has_value());
+        if (fw) {
+            std::string expected = "1\r\n1\r\n50\r\n" + std::to_string(music + 10) + "\r\n1\r\n";
+            CHECK_EQ(*fw, expected);
+        }
+        std::ifstream original{game / "fw.ini", std::ios::binary};
+        CHECK_EQ(std::string(std::istreambuf_iterator<char>{original}, {}), std::string{"1\r\n1\r\n50\r\n0\r\n1\r\n"});
+    }
+    CHECK_EQ(s.scriptErrors(), std::size_t{0});
     std::filesystem::remove_all(save);
+}
+
+// Main menu -> Esc -> credits -> any key -> Exit().
+void credits(const GameResources& res, const std::filesystem::path& game) {
+    SessionConfig cfg;
+    cfg.gameDir = game;
+    Session s{res.vids(), res.sounds(), std::make_unique<ViewerEngine>(res), nullptr, nullptr, cfg};
+    s.start("maps\\mainmenu.map"); // without movies
+    Driver d{s};
+    d.run(10);
+    d.key(input::Key::Escape);
+    CHECK(d.until("credits.map", 120));
+    d.run(10);
+    bool creditsShown = false;
+    for (const auto& o : s.ui().objects()) creditsShown |= o.nvid == ui::vids::Credits;
+    CHECK(creditsShown);
+    d.key(input::Key::Enter);
+    d.run(60);
+    CHECK(s.exitRequested());
 }
 
 void runDemo(const GameResources& res, const std::filesystem::path& game, int n) {
@@ -227,6 +302,7 @@ int main() {
     const auto game = *gromada_test::dataDir();
     GameResources res{game / "fw.res"};
     flow(res, game);
+    credits(res, game);
     for (int n = 1; n <= 3; ++n)
         runDemo(res, game, n);
     return gromada_test::finish();
