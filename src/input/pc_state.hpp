@@ -55,6 +55,9 @@ struct PcState {
     // the border is not a request to scroll) and the aim point of the direct scheme.
     bool edgeScroll = true;
     char textCandidate = 'A';           // name entry with the pad: character under selection
+    // Analog view zoom request of this frame, -1..+1 (+1 = zoom in), see game/view_zoom.hpp.
+    // Presentation only: never part of the original input record.
+    float zoomRate = 0.0f;
     int weaponSlot = 0;                 // 0..3, last weapon requested (keys 1-4)
     bool weaponPending = false;         // weaponSlot asked for, the game has not switched yet
     PointerSource source = PointerSource::Pad;

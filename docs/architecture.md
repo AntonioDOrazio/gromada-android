@@ -69,3 +69,16 @@ si usano invece i passi registrati nella demo.
 - Il motore non dipende dalla sessione; la sessione non dipende dall'implementazione del motore
   (solo dal contratto).
 - Valgono le regole di `AGENTS.md` (dati del gioco mai nel repo, test con `GROMADA_DATA`, 60/120 fps).
+
+## Zoom e risoluzione (ondata 4)
+
+- **Zoom analogico** (non presente nell'originale, solo presentazione): `src/game/view_zoom.hpp`.
+  L'input produce `input::PcState::zoomRate` (−1..+1 per frame: grilletti L2/R2 analogici nel
+  twin-stick, A/B tenuti nello schema a puntamento, 0 nei menu). La sessione possiede un
+  `ViewZoom`, lo integra col tempo reale del frame (0,5×–2×, esponenziale) e lo passa alla pipeline
+  di rendering, che decide la vista (dimensione = uscita / zoom) e la conversione schermo ↔ mondo
+  per cursore, touch e record di input.
+- **Risoluzione interna** e **interpolazione** delle posizioni: solo nel disegno. La simulazione,
+  le demo, l'oracolo e i save state non cambiano.
+- Agenti: controlli (`zoomRate`, schemi), pipeline di rendering (`ViewZoom` → vista, risoluzione
+  interna, interpolazione), miglioramenti grafici (passaggio separato sopra la pipeline).
