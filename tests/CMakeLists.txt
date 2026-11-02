@@ -47,3 +47,11 @@ target_compile_definitions(music_test PRIVATE GROMADA_TEST_DATA_DIR="${CMAKE_CUR
 # Differential oracle (issue #11): reference math vs vectors from the original exe (no game data).
 gromada_add_test(oracle_test oracle_test.cpp)
 target_compile_definitions(oracle_test PRIVATE GROMADA_ORACLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/oracle")
+# Simulation engine (src/game, issue #8): synthetic tests, data-backed level runs and the
+# desktop driver tools/engine_run (screenshots + trace).
+gromada_add_test(engine_test engine_test.cpp)
+gromada_add_test(engine_data_test engine_data_test.cpp)
+set_tests_properties(engine_data_test PROPERTIES TIMEOUT 1800)
+add_executable(engine_run ${PROJECT_SOURCE_DIR}/tools/engine_run.cpp)
+target_include_directories(engine_run PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(engine_run PRIVATE -Wall -Wno-unknown-attributes -Wno-parentheses -Wno-sign-compare)
