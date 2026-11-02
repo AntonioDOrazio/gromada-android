@@ -180,7 +180,7 @@ struct World3 {
             v.category = static_cast<ObjectCategory>(cat);
             v.type = static_cast<ObjectClass>(cls);
             v.flags = static_cast<ObjectFlags>(flags);
-            v.collisionMask = 0;
+            v.collisionMask = 1;   // terrain passable for everyone
             v.sizeX = v.sizeY = 8;
             v.sizeZ = 4;
             v.speedX = static_cast<std::uint16_t>(speed);
@@ -195,6 +195,7 @@ struct World3 {
         vids.push_back(vid(1, cls::Vehicle, cat::Vehicle, vf::Shadow | vf::NoCollision, 5, 60));
         vids.push_back(vid(2, cls::Projectile, cat::Object, vf::NoCollision, 6, 400));
         vids.push_back(vid(3, cls::Image, cat::Object, 0, 9, 0));
+        vids.push_back(vid(1, cls::Vehicle, cat::Vehicle, vf::PresentOnGrid, 5, 60));   // collides
         e = std::make_unique<GameEngine>(vids, weapons);
         e->loadEmptyMap(1200, 900, 7);
         e->camera() = {100, 80, 640, 480};
@@ -357,6 +358,25 @@ void testMotion() {
     p->speed = 400;
     const auto mp = t.e->motion(*p, t.e->clock() + 10);
     CHECK(mp.y < -3 && mp.y > -5);   // 400 * 4096 / 2^20 px/ms * 10 ms
+    // a vehicle that will be refused its next step (another unit in front, the map's edge) is
+    // drawn where it is, not pushed forward and pulled back at the tick
+    Sprite* a = w.createUnit(4, 600, 700, 0, 0, 64, nullptr);
+    w.createUnit(4, 609, 700, 0, 0, 0, nullptr);   // right in front (sizes 8)
+    a->speed = 60;
+    a->state |= st::Accelerate;   // driving (without it the physics brakes to 0)
+    a->direction = 64;
+    CHECK(t.e->motion(*a, t.e->clock() + 20).x == a->fracX / 128.0);
+    a->direction = 192;   // west: free
+    CHECK(t.e->motion(*a, t.e->clock() + 20).x < a->fracX / 128.0 - 0.5);
+    Sprite* edge = w.createUnit(4, 1199, 100, 0, 0, 64, nullptr);
+    edge->speed = 60;
+    edge->state |= st::Accelerate;
+    edge->direction = 64;   // east, out of the 1200 px map
+    CHECK(t.e->motion(*edge, t.e->clock() + 20).x == edge->fracX / 128.0);
+    edge->direction = 192;  // west: free
+    CHECK(t.e->motion(*edge, t.e->clock() + 20).x < edge->fracX / 128.0 - 0.5);
+    edge->direction = 64;
+    CHECK(t.e->motion(*edge, t.e->clock() + 20).x == edge->fracX / 128.0);
     // pause: nothing moves
     t.e->callBuiltin(89, std::array{script::Value{1}});
     CHECK(t.e->motion(*p, t.e->clock() + 10).y == p->fracY / 128.0);

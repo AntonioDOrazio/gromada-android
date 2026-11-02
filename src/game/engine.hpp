@@ -547,7 +547,19 @@ inline GameEngine::Motion GameEngine::motion(const Sprite& s, double renderClock
     }
     // (No limit at the destination: the arrival bits do not stop the physics, the command
     // that follows does, and the tick that crosses the destination moves the whole step.)
-    const double ex = vx * tau, ey = vy * tau;
+    double ex = vx * tau, ey = vy * tau;
+    if ((ex != 0 || ey != 0) && s.speed != fx::Instant && (v.cls == cls::Vehicle || v.cls == cls::Kassandra)) {
+        // A move the next tick will refuse (an obstacle, the map's edge: path_block,
+        // path_limit) is not drawn: a vehicle pushing against a wall would otherwise go forward
+        // and snap back at every tick. (Only the ground units: for projectiles path_block is
+        // a hit their class handles, they keep flying.) The step of the next tick, one period:
+        const auto period = static_cast<std::uint32_t>(v.frameDuration);
+        const auto sp = fx::integrateSpeed(s.speed, v.acceleration, v.speedX, period, (s.state & st::Accelerate) != 0);
+        const bool wind = m_world.windStrength() != 0 && (v.flags & vf::Wind);
+        const auto step = fx::moveStep(sp, period, s.direction, s.fracX, s.fracY, m_world.windStrength(),
+                                       static_cast<std::uint8_t>(m_world.windDir()), wind);
+        if (const_cast<World&>(m_world).moveWouldBlock(s, s.x + step.mx, s.y + step.my, s.z)) ex = ey = 0;
+    }
     double ez = 0;
     double vz = s.vz;
     if ((v.flags & vf::Gravity) && s.z) vz -= tau * fx::Gravity / 1024.0;   // fx::applyGravity

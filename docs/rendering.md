@@ -187,29 +187,60 @@ gancio non è salvato.
 - Demo, oracolo e save state: `trace_oracle`, `savestate_*` (con il movimento fluido attivo, il
   valore predefinito) restano verdi.
 
-### Fluidità (120 fps, livello 1, schema diretto, `GROMADA_TRACE_VIEW`)
+### Fluidità (120 fps, livello 1, `GROMADA_TRACE_VIEW`)
 
-Passi per frame della posizione a schermo mentre l'oggetto si muove (scarto tipo e media del
-cambiamento del passo tra frame consecutivi; "fermo" = frame senza movimento dentro il moto):
+Passi per frame della posizione disegnata mentre l'oggetto si muove (\|Δpasso\| = media del
+cambiamento del passo tra frame consecutivi, 0 per un moto uniforme; "fermo" = frame senza
+movimento dentro un tratto di moto). Prima = movimento fluido spento (l'originale), dopo = acceso.
 
-| oggetto | senza movimento fluido | con movimento fluido |
+| oggetto (schema) | prima: \|Δpasso\|, fermo, sd | dopo: \|Δpasso\|, fermo, sd |
 |---|---|---|
-| veicolo nemico (mondo) | sd 1,95 px, fermo 89 %, \|Δpasso\| 1,34 px | sd 0,155, fermo 0 %, \|Δpasso\| 0,009 px |
-| Kassandra (mondo) | sd 1,23 px, fermo 81 %, \|Δpasso\| 1,15 px | sd 0,215, fermo 1,8 %, \|Δpasso\| 0,048 px |
-| scorrimento della vista | sd 0,57 px, fermo 32 %, \|Δpasso\| 0,58 px | sd 0,31, fermo 6,5 %, \|Δpasso\| 0,019 px |
-| proiettile | fermo 82 %, \|Δpasso\| 3,26 px | fermo 21 %*, \|Δpasso\| 0,044 px |
+| veicolo nemico, mondo | 1,34 px, 89 %, 1,95 | 0,009 px, 0 %, 0,155 |
+| Kassandra, mondo (diretto) | 1,15 px, 81 %, 1,23 | 0,048 px, 1,8 %, 0,215 |
+| Kassandra, mondo (cursore) | 0,80 px, 83 %, 0,98 | 0,080 px, 28 %*, 0,27 |
+| scorrimento della vista (diretto, camera che segue) | 0,58 px, 32 %, 0,57 | 0,019 px, 6,5 %, 0,31 |
+| scorrimento della vista (cursore, bordi) | 0,56 px, 68 %, 1,58 | 0,54 px, 64 %, 1,57 (invariato, §4) |
+| proiettile (y − z) | 3,26 px, 82 %, 3,38 | 0,044 px, 21 %**, 0,89 |
 
-\* il campione del proiettile comprende la sua esplosione ferma. Lo scarto tipo residuo del veicolo
-è la sua accelerazione (il passo cresce davvero); i passi anomali residui della Kassandra sono gli
-ordini di movimento (§4, limite noto).
-
-### Prestazioni
-
-Vedi §8.
+\* la Kassandra striscia contro un ostacolo: si ferma davvero nei tick rifiutati (prima della
+verifica dell'ostacolo vibrava: 0,27 px, massimo 4 px). \*\* comprende l'esplosione ferma. Lo
+scarto tipo residuo del veicolo è la sua accelerazione (il passo cresce davvero); i passi anomali
+residui della Kassandra nello schema diretto sono gli ordini di movimento (§4).
 
 ## 8. Prestazioni
 
-`tools/render_bench` (tempo CPU del thread, livello 19: 15.200 sprite, il più pesante; 120 fps;
-movimento fluido attivo). "immagine" = frame con disegno − frame senza disegno.
+`tools/render_bench --level 19` (15.200 sprite, il livello più pesante), 120 fps, movimento
+fluido attivo, tempo CPU di un thread su un core Xeon Granite Rapids (VM a 2 vCPU condivisa);
+"immagine" = frame con disegno − frame senza (la simulazione costa 0,17 ms).
 
-(tabella in fondo, misurata a fine lavoro)
+| immagine (ms) | 4:3 | 16:9 |
+|---|---|---|
+| originale 1× (`draw()`, senza movimento fluido) | 1,7–1,8 | 2,1 |
+| 1× | 1,9–2,1 | 2,5–2,7 (culling più largo in 16:9) |
+| 2× | 5,7 | 6,9 |
+| 3× | 9,0 | 10,9 |
+| 4× | 14–15 | 16,4 |
+| zoom 0,5 a 1× / 2× | 3,3 / 5,2 | 4,7 / 7,2 |
+| zoom 2 a 1× / 2× | 2,2 / 6,4 | 2,5 / 7,4 |
+
+Con i thread (`gromada_render_threads`, automatico = core − 1, al più 4; la lista di disegno è
+costruita su un thread, poi le bande dell'immagine e la composizione sono in parallelo; immagine
+identica per ogni numero di thread) — tempo reale, 4:3, 1 → 2 thread sulla VM: 1× 2,3 → 2,0 ms,
+2× 5,9 → 3,9 ms, 3× 9,2 → 6,3 ms, 4× 15,5 → 9,5 ms.
+
+**Stima per il Retroid Pocket Nova** (QCS8550: 1 Cortex-X3 a 3,2 GHz, 2 A715 + 2 A710 a 2,8 GHz,
+3 A510): un X3 è circa 1,4–1,7 volte più lento di questo core su questo carico (intero e memoria),
+un A715/A710 circa 2–2,5 volte; con 4 thread la parte parallela (~85 % da 2× in su) va su ~3
+"core X3 equivalenti". Livello 19, budget a 120 Hz 8,3 ms (meno simulazione ~0,3 ms e la copia
+dell'immagine nel frontend):
+
+| Nova, livello 19 | 1 thread | 4 thread (automatico) | 120 Hz |
+|---|---|---|---|
+| 1× (640×480) | ~3,5 ms | ~1,5–2 ms | sì |
+| 2× (1280×960, nativo) | ~9 ms | ~4–4,5 ms | **sì** (consigliato) |
+| 3× (1920×1440) | ~14 ms | ~6–6,5 ms + copia di 11 MB | al limite: non garantito sui livelli pesanti |
+| 4× (2560×1920) | ~23 ms | ~9–10 ms + copia di 20 MB | **no** (va a 60 Hz) |
+
+Sul Flip 2 (16:9, 1080p a 60 Hz, budget 16,7 ms) 2× (1708×960) e 3× stanno nel budget; oltre
+1080p 4× non serve. Sono stime: da verificare sul dispositivo con `render_bench` (Termux) o con
+le statistiche di RetroArch.
