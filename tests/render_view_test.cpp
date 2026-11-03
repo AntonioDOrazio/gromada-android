@@ -632,6 +632,29 @@ void testOutputScaler() {
     std::fprintf(stderr, "output scaler: blocks exact for every pair of scales, weighted means checked\n");
 }
 
+// ---------------------------------------------------------------------------- worker pool
+void testWorkerPool() {
+    // every band runs exactly once and run() returns only when all are done, also with workers
+    // that wake late (a later run must never run a band with an earlier run's function)
+    view::WorkerPool pool{4};
+    int bad = 0;
+    std::vector<std::atomic<int>> hits(64);
+    for (int r = 0; r < 20000; ++r) {
+        const int n = 1 + r % 37;
+        for (int i = 0; i < n; ++i) hits[static_cast<std::size_t>(i)].store(0);
+        const int tag = r;
+        std::atomic<int> wrong{0};
+        pool.run(n, [&](int i) {
+            if (tag != r) wrong.fetch_add(1);
+            hits[static_cast<std::size_t>(i)].fetch_add(1);
+        });
+        for (int i = 0; i < n; ++i) bad += hits[static_cast<std::size_t>(i)].load() != 1;
+        bad += wrong.load();
+    }
+    std::fprintf(stderr, "worker pool: 20000 runs, %d bands not run exactly once\n", bad);
+    CHECK_EQ(bad, 0);
+}
+
 } // namespace
 
 int main() {
@@ -644,5 +667,6 @@ int main() {
     testComposite();
     testPictureCache();
     testOutputScaler();
+    testWorkerPool();
     return gromada_test::finish();
 }

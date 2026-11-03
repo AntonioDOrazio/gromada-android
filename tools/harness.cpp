@@ -24,10 +24,11 @@
 //             statefuzz=<n>           after the run: n corrupted/truncated copies of a fresh state
 //                                     must be rejected by retro_unserialize without crashing
 //   timing=<from>-<to>        retro_run time of those frames: mean, median, p95, p99, max (ms)
-//   frametimes=<file>         retro_run time of every frame: "<frame> <ms>" per line
+//   frametimes=<file>         retro_run time of every frame: "<frame> <ms> <thread CPU ms>" per line
 //   Exit() from the game (RETRO_ENVIRONMENT_SHUTDOWN) stops the run.
 #include <dlfcn.h>
 #include <chrono>
+#include <ctime>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -323,11 +324,15 @@ int main(int argc, char** argv) {
         }
         videoHash = audioHash = 0xcbf29ce484222325ull;
         const auto r0 = std::chrono::steady_clock::now();
+        timespec c0{}, c1{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
         retro_run();
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+        const double cpuMs = (c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6;
         const double runMsThis = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
         if (frame >= timingFrom && frame <= timingTo)
             runMs.push_back(runMsThis);
-        if (frameTimes) std::fprintf(frameTimes, "%d %.3f\n", frame, runMsThis);
+        if (frameTimes) std::fprintf(frameTimes, "%d %.3f %.3f\n", frame, runMsThis, cpuMs);
         if (hashes) std::fprintf(hashes, "%d %016llx %016llx\n", frame, (unsigned long long)videoHash, (unsigned long long)audioHash);
         if (runAhead > 0 && !shutdownRequested) {
             if (!doSave(scratch)) { std::fprintf(stderr, "[f%d] run-ahead: retro_serialize failed\n", frame); ++failures; }

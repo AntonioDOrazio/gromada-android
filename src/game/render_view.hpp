@@ -26,8 +26,12 @@
 namespace gromada::game::view {
 
 // A few threads that run the bands of a picture: run(n, fn) calls fn(0..n-1) on the caller and
-// the workers and returns when every call is done (and every worker is idle again). Workers
-// sleep between pictures; the destructor joins them.
+// the workers and returns as soon as every call is done. It does not wait for workers that
+// have not woken up yet (on phones a sleeping thread on a slow core can take milliseconds): a
+// late worker finds the bands taken and goes back to sleep. Bands are taken through one atomic
+// ticket (run number << 32 | next band), so a late worker never takes a band of a later run
+// with the function of an earlier one. Workers spin briefly before sleeping (a picture runs
+// several passes in a row); the destructor joins them.
 class WorkerPool {
 public:
     explicit WorkerPool(int threads) {
@@ -37,6 +41,7 @@ public:
         {
             std::lock_guard lock{m_mutex};
             m_stop = true;
+            m_stopFlag = true;
         }
         m_wake.notify_all();
         for (auto& t : m_threads) t.join();
@@ -50,19 +55,23 @@ public:
             for (int i = 0; i < n; ++i) fn(i);
             return;
         }
+        std::uint64_t run;
         {
             std::lock_guard lock{m_mutex};
             m_fn = &fn;
             m_n = n;
-            m_next = 0;
-            m_active = static_cast<int>(m_threads.size());
-            ++m_generation;
+            run = ++m_generation;
+            m_done.store(0);
+            m_ticket.store(run << 32);
+            m_published.store(run);
         }
         m_wake.notify_all();
-        work(fn, n);
-        std::unique_lock lock{m_mutex};
-        m_idle.wait(lock, [&] { return m_active == 0; });
-        m_fn = nullptr;
+        work(run, &fn, n);
+        for (int spin = 0; spin < 2000 && m_done.load() != n; ++spin) pause();
+        if (m_done.load() != n) {
+            std::unique_lock lock{m_mutex};
+            m_finished.wait(lock, [&] { return m_done.load() == n; });
+        }
     }
 
     // Threads for the pictures: the cores minus one (the frontend's), at most 4; 1 on a
@@ -74,12 +83,33 @@ public:
     }
 
 private:
-    void work(const std::function<void(int)>& fn, int n) {
-        for (int i; (i = m_next.fetch_add(1)) < n;) fn(i);
+    static void pause() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield");
+#endif
+    }
+    // Takes and runs bands of run `run` until none is left (or a later run has started).
+    void work(std::uint64_t run, const std::function<void(int)>* fn, int n) {
+        for (;;) {
+            std::uint64_t t = m_ticket.load();
+            for (;;) {
+                if ((t >> 32) != run || static_cast<int>(t & 0xFFFFFFFFu) >= n) return;
+                if (m_ticket.compare_exchange_weak(t, t + 1)) break;
+            }
+            (*fn)(static_cast<int>(t & 0xFFFFFFFFu));
+            if (m_done.fetch_add(1) + 1 == n) {   // the last band: wake the caller if it sleeps
+                std::lock_guard lock{m_mutex};
+                m_finished.notify_all();
+            }
+        }
     }
     void loop() {
         std::uint64_t seen = 0;
         for (;;) {
+            // a short spin: the next pass of the picture usually follows within microseconds
+            for (int spin = 0; spin < 4000 && m_published.load() == seen && !m_stopFlag.load(); ++spin) pause();
             const std::function<void(int)>* fn;
             int n;
             {
@@ -90,19 +120,19 @@ private:
                 fn = m_fn;
                 n = m_n;
             }
-            work(*fn, n);
-            std::lock_guard lock{m_mutex};
-            if (--m_active == 0) m_idle.notify_one();
+            work(seen, fn, n);
         }
     }
 
     std::vector<std::thread> m_threads;
     std::mutex m_mutex;
-    std::condition_variable m_wake, m_idle;
-    const std::function<void(int)>* m_fn = nullptr;
-    int m_n = 0, m_active = 0;
-    std::atomic<int> m_next{0};
+    std::condition_variable m_wake, m_finished;
+    const std::function<void(int)>* m_fn = nullptr;   // of run m_generation (valid while it runs)
+    int m_n = 0;
     std::uint64_t m_generation = 0;
+    std::atomic<std::uint64_t> m_ticket{0}, m_published{0};
+    std::atomic<int> m_done{0};
+    std::atomic<bool> m_stopFlag{false};
     bool m_stop = false;
 };
 
