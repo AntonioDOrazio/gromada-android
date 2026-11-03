@@ -10,6 +10,7 @@ codice: `Engine::draw()`), verificato frame per frame su tutto il percorso del g
 | file | contenuto |
 |---|---|
 | `src/game/view_raster.hpp` | `view::Raster` (trasformazione di vista in virgola fissa), `drawFrameScaled()`: `putcadr` (`hicolor::FrameVisitor`) per qualunque scala e posizione sub-pixel |
+| `src/game/output_scale.hpp` | `view::OutputScaler`: dalla risoluzione interna a quella di uscita (§ 10) |
 | `src/game/view_cache.hpp` | `view::PictureCache`: l'immagine del mondo tenuta fra i frame, ridisegnata solo dove cambia (§ 9) |
 | `src/game/render_view.hpp` | `HiResComposite` (immagine a risoluzione interna con menu/testi/effetti), `drawCursorScaled()` |
 | `src/game/engine.hpp` | `GameEngine::viewOrigin()`, `drawView()`, `motion()`, `drawnPosition()` |
@@ -26,12 +27,15 @@ codice: `Engine::draw()`), verificato frame per frame su tutto il percorso del g
 | opzione | valori | effetto |
 |---|---|---|
 | `gromada_render_scale` | 1x (predefinito), 2x, 3x, 4x | l'immagine è k × 640×480 (k × 854×480 in 16:9) |
+| `gromada_output_scale` | come la risoluzione interna (predefinito), 1x (640×480), 2x, 3x, 4x | risoluzione mandata al frontend e agli shader: m × la dimensione logica (in 16:9 1x = 854×480) (§10) |
+| `gromada_output_downscale` | media dei pixel (predefinito), pixel originali | uscita più bassa della risoluzione interna: media dei pixel disegnati, oppure disegno direttamente alla risoluzione di uscita (§10) |
 | `gromada_smooth` | attivato (predefinito), disattivato | movimento fluido (§4) |
 | `gromada_zoom` | 1x, 0.5x, 0.75x, 1.5x, 2x | zoom impostato quando l'opzione cambia (poi i grilletti / A-B, issue #19) |
 
-`retro_get_system_av_info`: `base` = dimensione logica × k, `max` = 854k × 480k (copre i due
-formati: il cambio di formato resta un `SET_GEOMETRY`). Quando cambiano k, il frame rate o la
-modalità visualizzatore il core chiama `SET_SYSTEM_AV_INFO`. Il visualizzatore resta a 1×.
+`retro_get_system_av_info`: `base` = dimensione logica × m (m = risoluzione di uscita, = k se
+"come la risoluzione interna"), `max` = 854m × 480m (copre i due formati: il cambio di formato
+resta un `SET_GEOMETRY`). Quando cambiano k, m, il frame rate o la modalità visualizzatore il core
+chiama `SET_SYSTEM_AV_INFO`. Il visualizzatore resta a 1×.
 
 ## 3. Zoom e vista
 
@@ -292,3 +296,21 @@ Battaglia nel livello 1 (stato salvato, schema diretto, sparando), 2×, 120 Hz, 
 
 Ripartizione dopo (media): `drawView` 0,53 ms, campionamento logico 0,22, composizione 0,50
 (due passate limitate dalla banda di memoria), simulazione/UI/suono il resto.
+
+## 10. Risoluzione di uscita
+
+Separata dalla risoluzione interna k: l'immagine (mondo, menu, testi, cursore, filmati) è
+disegnata a k × la dimensione logica e consegnata al frontend a m × (`Session::runFrame`,
+`view::OutputScaler`, in bande sul pool di thread). Serve agli shader di RetroArch, che lavorano
+meglio sui pixel del gioco: con m = 1 ricevono 640×480.
+
+- m = k (predefinito): nessun passaggio in più, immagine identica a prima.
+- m < k, "media dei pixel": ogni pixel di uscita è la media dei pixel interni che copre, pesati
+  per la sovrapposizione (k/m pixel per asse; per 3 → 2 i pesi sono 2/3 e 1/3), in aritmetica
+  intera con arrotondamento. Lo zoom indietro e le posizioni sub-pixel restano morbidi anche a
+  640×480; se k è multiplo di m le zone a blocchi tornano esattamente ai pixel originali.
+- m < k, "pixel originali": il core disegna direttamente a m (la risoluzione interna è ignorata),
+  quindi l'immagine a 640×480 è quella dei pixel originali.
+- m > k: ogni pixel di uscita prende il pixel interno al suo centro (nearest neighbour).
+
+Test: `tests/render_view_test.cpp` (blocchi esatti fra tutte le coppie di scale, medie pesate).

@@ -757,7 +757,7 @@ inline bool SaveStateManager::load(Session& session, std::span<const std::uint8_
 GROMADA_SAVESTATE_TRIPWIRE(World, 2848);
 GROMADA_SAVESTATE_TRIPWIRE(GameEngine, 3584);  // + picture cache (presentation, not state); + #20 effect view and draw scratch (per frame, not state); + #21 enhancement settings pointer and caches (presentation, not state)
 // + #20 zoom, anchor, mapping (state, v5); render scale, smooth, buffers, world pass (configuration/scratch)
-GROMADA_SAVESTATE_TRIPWIRE(Session, 3408);     // + hi-res world intact flag (presentation, not state); + #13 tool hooks and per-frame sound buffers (not state); #19 PcState
+GROMADA_SAVESTATE_TRIPWIRE(Session, 3504);     // + output resolution (configuration and buffers, not state); + hi-res world intact flag (presentation, not state); + #13 tool hooks and per-frame sound buffers (not state); #19 PcState
 GROMADA_SAVESTATE_TRIPWIRE(SessionUi, 416);    // + #13 per-frame screen sounds (not state)
 GROMADA_SAVESTATE_TRIPWIRE(SaveFiles, 128);
 GROMADA_SAVESTATE_TRIPWIRE(InputRecordBuilder, 104);

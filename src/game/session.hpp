@@ -45,6 +45,7 @@
 #include "game/session_input.hpp"
 #include "game/session_ui.hpp"
 #include "game/render_view.hpp"
+#include "game/output_scale.hpp"
 #include "game/view_zoom.hpp"
 #include "input/cursor_file.hpp"
 #include "input/mapper.hpp"
@@ -81,6 +82,8 @@ struct SessionConfig {
     int renderScale = 1;             // internal resolution 1..4 (issue #20)
     bool smoothMotion = false;       // positions extrapolated between ticks (issue #20)
     int renderThreads = 0;           // threads drawing the picture (0 = automatic)
+    int outputScale = 0;             // output resolution: multiple of the logical size, 0 = renderScale
+    bool outputAverage = true;       // output below renderScale: mean of the pixels (false: drawn at it)
     // Declare every known builtin before compiling. Only for synthetic scripts that do not
     // include maps\header.ini: the game's scripts declare their builtins themselves, and
     // declaring them twice exceeds the original compiler's 128-function limit.
@@ -117,7 +120,10 @@ public:
           m_loader{m_config.gameDir} {
         if (const int n = m_files.seed())
             log(LogLevel::Info, std::format("save directory {}: copied {} original file(s)", m_config.saveDir.string(), n));
-        m_renderScale = std::clamp(m_config.renderScale, 1, MaxRenderScale);
+        m_requestedScale = std::clamp(m_config.renderScale, 1, MaxRenderScale);
+        m_outputScale = std::clamp(m_config.outputScale, 0, MaxRenderScale);
+        m_outputAverage = m_config.outputAverage;
+        m_renderScale = drawScale();
         m_smooth = m_config.smoothMotion;
         setOutputSize(m_config.outputWidth, m_config.outputHeight);
         m_viewSupported = m_engine && m_engine->viewOrigin(ViewRequest{}).has_value();
@@ -146,25 +152,31 @@ public:
     void start(std::string_view map = DefaultStartMap) { loadMap(std::string{map}); }
 
     // Logical size of the output (640 x 480 or 854 x 480): the space of the cursor, touch,
-    // menus and texts. The picture is renderScale() times larger.
+    // menus and texts. The picture is drawn renderScale() times larger and handed to the
+    // frontend outputScale() times larger.
     void setOutputSize(int width, int height) {
         m_outW = std::clamp(width, 320, 1024);
         m_outH = std::clamp(height, 240, 768);
         m_view.assign(static_cast<std::size_t>(m_outW) * m_outH, RGBA8{{0, 0, 0}, 255});
         m_xrgb.assign(static_cast<std::size_t>(m_outW) * m_outH * m_renderScale * m_renderScale, 0);
+        const int m = outputScale();
+        if (m != m_renderScale) m_out.assign(static_cast<std::size_t>(m_outW) * m_outH * m * m, 0);
+        else m_out.clear();
         updateView();
     }
     // ---- presentation (issue #20, docs/rendering.md) ----------------------------------------
     static constexpr int MaxRenderScale = 4;
     // Internal resolution: the picture is k x the logical size (world drawn at that size with
     // sub-pixel positions, menus/texts/cursor scaled with nearest neighbour).
-    void setRenderScale(int k) {
-        k = std::clamp(k, 1, MaxRenderScale);
-        if (k == m_renderScale) return;
-        m_renderScale = k;
-        setOutputSize(m_outW, m_outH);
-    }
+    void setRenderScale(int k) { setScales(k, m_outputScale, m_outputAverage); }
+    // Output resolution (output_scale.hpp): m x the logical size (0: as the internal one); below
+    // the internal resolution `average` takes the mean of the drawn pixels, otherwise the
+    // picture is drawn at m directly (the original pixels).
+    void setOutputScale(int m, bool average) { setScales(m_requestedScale, m, average); }
+    // The scale the picture is drawn at (the internal resolution, or the output one when the
+    // original pixels are kept below it) and the scale handed to the frontend.
     [[nodiscard]] int renderScale() const noexcept { return m_renderScale; }
+    [[nodiscard]] int outputScale() const noexcept { return m_outputScale ? m_outputScale : m_renderScale; }
     // Smooth motion: sprites, projectiles and the camera drawn where they are at the moment of
     // the picture, between the ticks of the simulation (Engine::drawView, extrapolation).
     void setSmoothMotion(bool on) { m_smooth = on; }
@@ -212,6 +224,13 @@ public:
 
     // ---- per frame ----------------------------------------------------------------------------
     void runFrame(const input::PcState& rawPc, double dtSeconds) {
+        runFrameAt(rawPc, dtSeconds);
+        if (!m_out.empty() && m_config.render)   // the output resolution (output_scale.hpp)
+            m_scaler.resample(m_xrgb.data(), static_cast<std::size_t>(drawWidth()), m_outW, m_outH, m_renderScale, m_out.data(),
+                              outputScale(), m_outputAverage, renderBands(), parallel());
+    }
+    // One frame at the drawing scale (runFrame() without the output resampling).
+    void runFrameAt(const input::PcState& rawPc, double dtSeconds) {
         const double dtMs = std::max(0.0, dtSeconds) * 1000.0;
         m_realMs += dtMs;
         const input::PcState& pc = filterStale(rawPc);
@@ -227,7 +246,7 @@ public:
                 std::ranges::fill(m_xrgb, 0u);
                 return; // the skipping press does not reach the game
             }
-            m_movies->blit(m_xrgb.data(), width(), height(), static_cast<std::size_t>(width()));
+            m_movies->blit(m_xrgb.data(), drawWidth(), drawHeight(), static_cast<std::size_t>(drawWidth()));
             return;
         }
 
@@ -269,10 +288,10 @@ public:
     }
 
     // ---- output ---------------------------------------------------------------------------------
-    // The picture: logical size x renderScale().
-    [[nodiscard]] const std::uint32_t* xrgb() const noexcept { return m_xrgb.data(); }
-    [[nodiscard]] int width() const noexcept { return m_outW * m_renderScale; }
-    [[nodiscard]] int height() const noexcept { return m_outH * m_renderScale; }
+    // The picture: logical size x outputScale().
+    [[nodiscard]] const std::uint32_t* xrgb() const noexcept { return m_out.empty() ? m_xrgb.data() : m_out.data(); }
+    [[nodiscard]] int width() const noexcept { return m_outW * outputScale(); }
+    [[nodiscard]] int height() const noexcept { return m_outH * outputScale(); }
     [[nodiscard]] std::size_t pitch() const noexcept { return static_cast<std::size_t>(width()) * 4; }
     [[nodiscard]] int logicalWidth() const noexcept { return m_outW; }
     [[nodiscard]] int logicalHeight() const noexcept { return m_outH; }
@@ -1300,12 +1319,12 @@ private:
             const int k = m_renderScale, w = m_viewW * k, h = m_outH * k;
             if (m_viewX > 0)   // pillarbox (demos in 16:9)
                 for (int y = 0; y < h; ++y) {
-                    std::uint32_t* row = m_xrgb.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(width());
+                    std::uint32_t* row = m_xrgb.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(drawWidth());
                     std::fill(row, row + m_viewX * k, 0u);
-                    std::fill(row + m_viewX * k + w, row + width(), 0u);
+                    std::fill(row + m_viewX * k + w, row + drawWidth(), 0u);
                 }
             m_composite.compose(FramebufferRef{m_world.data(), h, w}, FramebufferRef{m_view.data(), m_outH, m_viewW},
-                                m_xrgb.data() + static_cast<std::size_t>(m_viewX) * k, static_cast<std::size_t>(width()),
+                                m_xrgb.data() + static_cast<std::size_t>(m_viewX) * k, static_cast<std::size_t>(drawWidth()),
                                 renderBands(), parallel());
         }
         drawCursor();
@@ -1336,7 +1355,8 @@ private:
             case CursorKind::Cycle: shape = input::CursorShape::Cycle; break;
             }
         }
-        view::drawCursorScaled(m_cursors->get(shape), x, y, m_renderScale, m_xrgb.data(), width(), height(), pitch());
+        view::drawCursorScaled(m_cursors->get(shape), x, y, m_renderScale, m_xrgb.data(), drawWidth(), drawHeight(),
+                               static_cast<std::size_t>(drawWidth()) * 4);
     }
 
     // ---- presentation (issue #20) -------------------------------------------------------------
@@ -1443,6 +1463,25 @@ private:
         };
     }
 
+    // The drawn picture (m_xrgb): logical size x renderScale().
+    [[nodiscard]] int drawWidth() const noexcept { return m_outW * m_renderScale; }
+    [[nodiscard]] int drawHeight() const noexcept { return m_outH * m_renderScale; }
+    // The scale drawn at: the internal resolution, or the output one below it when the
+    // original pixels are kept.
+    [[nodiscard]] int drawScale() const noexcept {
+        return m_outputScale && m_outputScale < m_requestedScale && !m_outputAverage ? m_outputScale : m_requestedScale;
+    }
+    void setScales(int k, int m, bool average) {
+        k = std::clamp(k, 1, MaxRenderScale);
+        m = std::clamp(m, 0, MaxRenderScale);
+        if (k == m_requestedScale && m == m_outputScale && average == m_outputAverage) return;
+        m_requestedScale = k;
+        m_outputScale = m;
+        m_outputAverage = average;
+        m_renderScale = drawScale();
+        setOutputSize(m_outW, m_outH);
+    }
+
     // Bands of the picture passes: several per thread, handed out as threads get free (a slow
     // core of a big.LITTLE phone takes fewer); the pictures are the same for any number.
     [[nodiscard]] int renderBands() const noexcept {
@@ -1524,6 +1563,8 @@ private:
 
     std::vector<RGBA8> m_view;      // m_viewW x m_outH, what the engine and the menus draw on
     std::vector<std::uint32_t> m_xrgb; // the picture: (m_outW x m_outH) x m_renderScale
+    std::vector<std::uint32_t> m_out;  // the output picture when outputScale() != m_renderScale
+    view::OutputScaler m_scaler;
     int m_outW = 640, m_outH = 480, m_viewW = 640, m_viewX = 0;
     int m_screenW = 640, m_screenH = 480; // script screen (SetGraphMode)
     bool m_demoView = false;
@@ -1566,7 +1607,10 @@ private:
     struct ZoomAnchor { double x = 0, y = 0; int camX = 0, camY = 0; bool valid = false; } m_anchor;
     double m_mapX = 0, m_mapY = 0, m_mapZoom = 1;
     // Configuration (core options) and per-frame scratch, not state.
-    int m_renderScale = 1;
+    int m_renderScale = 1;             // drawn at (drawScale())
+    int m_requestedScale = 1;          // internal resolution option
+    int m_outputScale = 0;             // output resolution option (0: as the internal one)
+    bool m_outputAverage = true;
     bool m_smooth = false, m_viewSupported = false, m_hiRes = false;
     std::pair<int, int> m_menuPointer{0, 0};   // cursor of this frame for the menus (logical)
     std::vector<RGBA8> m_world;                // k > 1: the world at internal resolution

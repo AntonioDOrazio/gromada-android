@@ -53,6 +53,8 @@ struct Options {
     int demo = 0;          // debug: play maps/demoN.dem (0 = none)
     // presentation (issue #20, docs/rendering.md)
     int renderScale = 1;   // internal resolution: the picture is k x 640 x 480 (k x 854 x 480)
+    int outputScale = 0;   // output resolution: m x 640 x 480 (0: as the internal one)
+    bool outputAverage = true; // output below the internal resolution: mean of the pixels
     bool smooth = true;    // positions extrapolated between the ticks of the simulation
     float zoom = 1;        // zoom of the view when the option changes (then L2/R2, A/B)
     int renderThreads = 0; // threads drawing the picture (0 = automatic)
@@ -115,6 +117,8 @@ void declareOptions() {
         {"gromada_movie", "Riproduci filmato (Start/A/B per saltare); nessuno|0|1|2|3"},
         // presentation (issue #20)
         {"gromada_render_scale", "Risoluzione interna; 1x|2x|3x|4x"},
+        {"gromada_output_scale", "Risoluzione di uscita (per gli shader); come la risoluzione interna|1x (640x480)|2x (1280x960)|3x (1920x1440)|4x (2560x1920)"},
+        {"gromada_output_downscale", "Uscita più bassa della risoluzione interna; media dei pixel|pixel originali"},
         {"gromada_smooth", "Movimento fluido (interpolazione); attivato|disattivato"},
         {"gromada_zoom", "Zoom della vista; 1x|0.5x|0.75x|1.5x|2x"},
         {"gromada_render_threads", "Thread di disegno; automatico|1|2|3|4"},
@@ -145,6 +149,8 @@ Options readOptions() {
     if (const char* v = getVar("gromada_viewer")) o.viewer = std::strcmp(v, "attivata") == 0;
     if (const char* v = getVar("gromada_demo")) o.demo = std::clamp(std::atoi(v), 0, 3);
     if (const char* v = getVar("gromada_render_scale")) o.renderScale = std::clamp(std::atoi(v), 1, 4);
+    if (const char* v = getVar("gromada_output_scale")) o.outputScale = std::clamp(std::atoi(v), 0, 4);
+    if (const char* v = getVar("gromada_output_downscale")) o.outputAverage = std::strcmp(v, "pixel originali") != 0;
     if (const char* v = getVar("gromada_smooth")) o.smooth = std::strcmp(v, "disattivato") != 0;
     if (const char* v = getVar("gromada_zoom")) o.zoom = std::clamp(static_cast<float>(std::atof(v)), 0.5f, 2.0f);
     if (const char* v = getVar("gromada_render_threads")) o.renderThreads = std::clamp(std::atoi(v), 0, 4);
@@ -156,7 +162,7 @@ retro_system_av_info makeAvInfo(const Options& o) {
     const int width = o.widescreen ? gromada::Renderer::MaxWidth : 640;
     // The viewer draws at 1x; the game at k x (internal resolution, issue #20). The maximum
     // covers both aspects, so switching the aspect only needs SET_GEOMETRY.
-    const int k = o.viewer ? 1 : o.renderScale;
+    const int k = o.viewer ? 1 : (o.outputScale ? o.outputScale : o.renderScale);   // the output resolution
     info.geometry.base_width = width * k;
     info.geometry.base_height = gromada::Renderer::Height * k;
     info.geometry.max_width = gromada::Renderer::MaxWidth * k;
@@ -269,6 +275,7 @@ void applyOptions(bool initial) {
     if (core->session) {
         core->session->setVolumes(next.musicVolume / 100.0f, next.sfxVolume / 100.0f);
         core->session->setRenderScale(next.renderScale);
+        core->session->setOutputScale(next.outputScale, next.outputAverage);
         core->session->setSmoothMotion(next.smooth);
         core->session->setRenderThreads(next.renderThreads);
         if (initial || next.zoom != prev.zoom)
@@ -279,7 +286,8 @@ void applyOptions(bool initial) {
         return;
 
     auto av = makeAvInfo(next);
-    if (next.fps != prev.fps || next.renderScale != prev.renderScale || next.viewer != prev.viewer)
+    if (next.fps != prev.fps || next.renderScale != prev.renderScale || next.outputScale != prev.outputScale ||
+        next.viewer != prev.viewer)
         env_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
     else if (next.widescreen != prev.widescreen)
         env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
@@ -529,6 +537,8 @@ void startSession() {
     config.outputWidth = core->renderer.width();
     config.outputHeight = core->renderer.height();
     config.renderScale = core->options.renderScale;
+    config.outputScale = core->options.outputScale;
+    config.outputAverage = core->options.outputAverage;
     config.smoothMotion = core->options.smooth;
     config.renderThreads = core->options.renderThreads;
     config.log = [](LogLevel level, std::string_view text) {

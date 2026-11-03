@@ -9,11 +9,13 @@
 //    teleport is not interpolated, rays and paused worlds are not extrapolated;
 //  - the screen <-> world mapping of the input record (identity = the original's), zoomed;
 //  - the internal-resolution composite: UI as k x k blocks, Effect() on the world, windows;
+//  - the output resolution: means and nearest samples between multiples of the logical size;
 //  - the picture cache: the same picture as drawing the whole list, frame after frame, with
 //    moving, appearing, disappearing and reordered commands and a moving camera.
 #include "game/engine.hpp"
 #include "game/render_view.hpp"
 #include "game/view_cache.hpp"
+#include "game/output_scale.hpp"
 #include "game/session_input.hpp"
 #include "oracle_vectors.hpp"
 #include "test.hpp"
@@ -590,6 +592,46 @@ void testPictureCache() {
     CHECK_EQ(bad, 0);
 }
 
+// ---------------------------------------------------------------------------- output resolution
+void testOutputScaler() {
+    view::OutputScaler sc;
+    constexpr int LW = 5, LH = 3;
+    std::uint32_t seed = 7;
+    const auto rnd = [&] { seed = seed * 1103515245u + 12345u; return (seed >> 8) & 0xFFFFFFu; };
+    std::vector<std::uint32_t> base(static_cast<std::size_t>(LW * LH));
+    for (auto& p : base) p = rnd();
+    const auto enlarge = [&](int k) {   // the base picture drawn at k: k x k blocks
+        std::vector<std::uint32_t> v(static_cast<std::size_t>(LW * k * LH * k));
+        for (int y = 0; y < LH * k; ++y)
+            for (int x = 0; x < LW * k; ++x) v[static_cast<std::size_t>(y * LW * k + x)] = base[static_cast<std::size_t>((y / k) * LW + x / k)];
+        return v;
+    };
+    // blocks averaged or sampled back to any lower or higher multiple: the blocks of that multiple
+    int bad = 0;
+    for (int k = 1; k <= 4; ++k)
+        for (int m = 1; m <= 4; ++m)
+            for (const bool avg : {false, true}) {
+                if (avg && m < k && k % m != 0) continue;   // fractional ratios mix neighbours (below)
+                const auto src = enlarge(k);
+                std::vector<std::uint32_t> out(static_cast<std::size_t>(LW * m * LH * m));
+                sc.resample(src.data(), static_cast<std::size_t>(LW * k), LW, LH, k, out.data(), m, avg, 2,
+                            [](int n, const std::function<void(int)>& fn) { for (int i = n - 1; i >= 0; --i) fn(i); });
+                if (out != enlarge(m)) ++bad;
+            }
+    CHECK_EQ(bad, 0);
+    // a 2 x 2 block averaged with rounding; 3 -> 2: weights 2/3 and 1/3 per axis
+    const std::uint32_t q[4] = {0x000000, 0x0A0B01, 0xFF0002, 0x010003};
+    std::uint32_t one = 0;
+    sc.resample(q, 2, 1, 1, 2, &one, 1, true);
+    CHECK_EQ(one, ((0 + 0x0A + 0xFF + 0x01 + 2) / 4) << 16 | ((0 + 0x0B + 0 + 0 + 2) / 4) << 8 | ((0 + 1 + 2 + 3 + 2) / 4));
+    const std::uint32_t row3[9] = {90, 0, 30, 90, 0, 30, 90, 0, 30};   // 3 x 3, blue only
+    std::uint32_t two[4] = {};
+    sc.resample(row3, 3, 1, 1, 3, two, 2, true);
+    CHECK_EQ(two[0], (90u * 2 + 0u * 1 + 1) / 3);   // columns 0 (weight 2) and 1 (weight 1), every row alike
+    CHECK_EQ(two[1], (0u * 1 + 30u * 2 + 1) / 3);
+    std::fprintf(stderr, "output scaler: blocks exact for every pair of scales, weighted means checked\n");
+}
+
 } // namespace
 
 int main() {
@@ -601,5 +643,6 @@ int main() {
     testMapping();
     testComposite();
     testPictureCache();
+    testOutputScaler();
     return gromada_test::finish();
 }
