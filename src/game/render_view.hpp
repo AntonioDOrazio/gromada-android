@@ -212,6 +212,7 @@ private:
         const RGBA8* ui = m_haveUi ? m_ui.data() : fin;
         const RGBA8* fx = m_haveFx ? m_fx.data() : (m_haveUi ? m_ui.data() : fin);
         const bool colour = m_haveFx && m_effect.colorKind != 0 && m_effect.colorLevel != 0;
+        const ScreenEffects::ColourLut lut = colour ? ScreenEffects::colourLut(m_effect.colorKind, m_effect.colorLevel) : ScreenEffects::ColourLut{};
         const bool window = m_haveFx && m_effect.window;
         const auto xrgb = [](const RGBA8& p) { return (std::uint32_t{p.r} << 16) | (std::uint32_t{p.g} << 8) | p.b; };
         modes.resize(static_cast<std::size_t>(lw));
@@ -221,14 +222,24 @@ private:
             const std::size_t r = static_cast<std::size_t>(y) * static_cast<std::size_t>(lw);
             const bool rowOutside = window && (y < m_effect.top || y > m_effect.bottom);
             // Fast path (most rows while playing): nothing drawn over the world on this row
-            // and no effect, i.e. every pixel would get mode 0. Whole-row comparisons (alpha
-            // included: if only alpha differs the per-pixel path below decides, same result).
-            if (!colour && !window) {
+            // and no window, i.e. every pixel would get mode 0 (1 with a colour effect: the
+            // whole row through its tables). Whole-row comparisons (alpha included: if only
+            // alpha differs the per-pixel path below decides, same result).
+            if (!window) {
                 const std::size_t bytes = static_cast<std::size_t>(lw) * sizeof(RGBA8);
                 if (std::memcmp(fin + r, fx + r, bytes) == 0 && std::memcmp(ui + r, m_world.data() + r, bytes) == 0) {
-                    for (int yy = 0; yy < k; ++yy)
-                        toXrgb(world.data_handle() + static_cast<std::size_t>(y * k + yy) * static_cast<std::size_t>(ww),
-                               dst + static_cast<std::size_t>(y * k + yy) * dstPitch, ww);
+                    for (int yy = 0; yy < k; ++yy) {
+                        const RGBA8* src = world.data_handle() + static_cast<std::size_t>(y * k + yy) * static_cast<std::size_t>(ww);
+                        std::uint32_t* out = dst + static_cast<std::size_t>(y * k + yy) * dstPitch;
+                        if (!colour) {
+                            toXrgb(src, out, ww);
+                        } else {
+                            for (int X = 0; X < ww; ++X) {
+                                const RGBA8& p = src[X];
+                                out[X] = std::uint32_t{lut.r[p.r]} << 16 | std::uint32_t{lut.g[p.g]} << 8 | lut.b[p.b];
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -256,8 +267,10 @@ private:
                     if (mode == 0) {
                         toXrgb(src + x * k, out + x * k, (e - x) * k);
                     } else {
-                        for (int X = x * k; X < e * k; ++X)
-                            out[X] = xrgb(hicolor::toPixel(ScreenEffects::applyOp(m_effect.colorKind, m_effect.colorLevel, hicolor::fromPixel(src[X]))));
+                        for (int X = x * k; X < e * k; ++X) {
+                            const RGBA8& p = src[X];
+                            out[X] = std::uint32_t{lut.r[p.r]} << 16 | std::uint32_t{lut.g[p.g]} << 8 | lut.b[p.b];
+                        }
                     }
                     x = e;
                 }

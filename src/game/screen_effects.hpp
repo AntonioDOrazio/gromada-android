@@ -62,6 +62,25 @@ public:
         }
     }
 
+    // applyOp() on displayed pixels through three tables, one per 8-bit channel: the operations
+    // work on each 565 channel alone (brighten and darken per channel; fade masks every channel
+    // before shifting, so nothing crosses into the next one; checked on every colour by
+    // tests/render_view_test), so a pixel's red only depends on its red, and so on.
+    struct ColourLut {
+        std::array<std::uint8_t, 256> r{}, g{}, b{};
+        [[nodiscard]] RGBA8 operator()(const RGBA8& p) const noexcept { return RGBA8{{r[p.r], g[p.g], b[p.b]}, 255}; }
+    };
+    [[nodiscard]] static ColourLut colourLut(int kind, int level) noexcept {
+        ColourLut t;
+        for (int v = 0; v < 256; ++v) {
+            const auto u = static_cast<std::uint8_t>(v);
+            t.r[static_cast<std::size_t>(v)] = hicolor::toRgb8(applyOp(kind, level, hicolor::fromRgb8(u, 0, 0))).r;
+            t.g[static_cast<std::size_t>(v)] = hicolor::toRgb8(applyOp(kind, level, hicolor::fromRgb8(0, u, 0))).g;
+            t.b[static_cast<std::size_t>(v)] = hicolor::toRgb8(applyOp(kind, level, hicolor::fromRgb8(0, 0, u))).b;
+        }
+        return t;
+    }
+
     [[nodiscard]] int effect() const noexcept { return m_effect; }
     [[nodiscard]] int level() const noexcept { return m_level; }
     [[nodiscard]] bool windowOpening() const noexcept { return m_effect == 6 && m_level > 1; }
@@ -169,7 +188,8 @@ private:
     void applyToSurface(int kind, int level) {
         if (level == 0) return;
         m_dirty = true;
-        for (auto& p : m_offscreen) p = hicolor::toPixel(applyOp(kind, level, hicolor::fromPixel(p)));
+        const ColourLut lut = colourLut(kind, level);
+        for (auto& p : m_offscreen) p = lut(p);
     }
 
     // Cases 1..5 of 0x406ea0.

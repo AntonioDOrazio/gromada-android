@@ -655,6 +655,27 @@ void testWorkerPool() {
     CHECK_EQ(bad, 0);
 }
 
+// ---------------------------------------------------------------------------- colour tables
+void testColourLut() {
+    // the per-channel tables give applyOp() on every 565 colour, for every effect and level
+    int bad = 0, ops = 0;
+    const auto check = [&](int kind, int level) {
+        const auto lut = ScreenEffects::colourLut(kind, level);
+        for (int c = 0; c < 65536; ++c) {
+            const auto c16 = static_cast<hc::Color16>(c);
+            const RGBA8 want = hc::toPixel(ScreenEffects::applyOp(kind, level, c16));
+            const RGBA8 got = lut(hc::toPixel(c16));
+            if (!same(want, got)) ++bad;
+        }
+        ++ops;
+    };
+    for (int level = -2; level <= 10; ++level) check(1, level);
+    for (int level = 0; level < 512; ++level) check(2, level);
+    for (int level = -1; level <= 10; ++level) check(5, level);
+    std::fprintf(stderr, "colour tables: %d operations x 65536 colours, %d differ from applyOp\n", ops, bad);
+    CHECK_EQ(bad, 0);
+}
+
 } // namespace
 
 int main() {
@@ -668,5 +689,6 @@ int main() {
     testPictureCache();
     testOutputScaler();
     testWorkerPool();
+    testColourLut();
     return gromada_test::finish();
 }
