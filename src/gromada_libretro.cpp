@@ -16,6 +16,7 @@
 #include "input/input.hpp"
 #include "libretro/libretro.h"
 #include "video/movie.hpp"
+#include "perf_overlay.hpp"
 
 #include <cstdarg>
 
@@ -58,6 +59,7 @@ struct Options {
     bool smooth = true;    // positions extrapolated between the ticks of the simulation
     float zoom = 1;        // zoom of the view when the option changes (then L2/R2, A/B)
     int renderThreads = 0; // threads drawing the picture (0 = automatic)
+    bool perfStats = false; // performance statistics on screen (perf_overlay.hpp)
 };
 
 struct Core {
@@ -70,6 +72,7 @@ struct Core {
     bool prevL = false, prevR = false, prevA = false, prevB = false;
     int soundTest = -1;
     double audioDebt = 0;
+    gromada::PerfOverlay perf;   // "Statistiche prestazioni"
     std::vector<std::int16_t> audioBuf;
     gromada::Mixer mixer{AudioRate};
     // --- input (issue #4) ---
@@ -122,6 +125,7 @@ void declareOptions() {
         {"gromada_smooth", "Movimento fluido (interpolazione); attivato|disattivato"},
         {"gromada_zoom", "Zoom della vista; 1x|0.5x|0.75x|1.5x|2x"},
         {"gromada_render_threads", "Thread di disegno; automatico|1|2|3|4"},
+        {"gromada_perf_stats", "Statistiche prestazioni (tempi del core e del frontend); disattivate|attivate"},
         // graphics enhancements (issue #21), off by default
         {gromada::game::enhance::coreOptions[0].key, gromada::game::enhance::coreOptions[0].value},
         {gromada::game::enhance::coreOptions[1].key, gromada::game::enhance::coreOptions[1].value},
@@ -154,6 +158,7 @@ Options readOptions() {
     if (const char* v = getVar("gromada_smooth")) o.smooth = std::strcmp(v, "disattivato") != 0;
     if (const char* v = getVar("gromada_zoom")) o.zoom = std::clamp(static_cast<float>(std::atof(v)), 0.5f, 2.0f);
     if (const char* v = getVar("gromada_render_threads")) o.renderThreads = std::clamp(std::atoi(v), 0, 4);
+    if (const char* v = getVar("gromada_perf_stats")) o.perfStats = std::strcmp(v, "attivate") == 0;
     return o;
 }
 
@@ -629,6 +634,10 @@ void runSession(float dt) {
             s.clearExit();
         }
     }
+    if (core->options.perfStats) {
+        core->perf.endFrame(core->options.fps);
+        core->perf.draw(const_cast<std::uint32_t*>(s.xrgb()), s.width(), s.height(), s.pitch() / 4, s.outputScale());
+    }
     video_cb(core->session->xrgb(), core->session->width(), core->session->height(), core->session->pitch());
     pushAudio();
 }
@@ -720,6 +729,7 @@ RETRO_API void retro_unload_game() {
 }
 
 RETRO_API void retro_run() {
+    if (core->options.perfStats) core->perf.beginFrame();
     bool updated = false;
     if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
         applyOptions(false);

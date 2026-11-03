@@ -314,3 +314,20 @@ meglio sui pixel del gioco: con m = 1 ricevono 640×480.
 - m > k: ogni pixel di uscita prende il pixel interno al suo centro (nearest neighbour).
 
 Test: `tests/render_view_test.cpp` (blocchi esatti fra tutte le coppie di scale, medie pesate).
+
+## 11. Statistiche prestazioni
+
+Opzione `gromada_perf_stats` ("Statistiche prestazioni", spenta di default; `src/perf_overlay.hpp`):
+in alto a sinistra, aggiornate ogni secondo:
+
+- `CORE media MAX massimo MS`: tempo di `retro_run` (simulazione, immagine, suono) fino alla
+  consegna del fotogramma;
+- `FRAME media MAX massimo MS`: tempo fra due chiamate di `retro_run`, cioè il ritmo con cui il
+  frontend fa girare il core (8,33 ms a 120 Hz);
+- `LATE n`: chiamate arrivate più di 1,5 periodi dopo la precedente (fotogrammi saltati o
+  ritardati dal frontend);
+- `OVER n`: fotogrammi in cui il core ha superato il periodo.
+
+`CORE` alto (o `OVER` > 0): il core è troppo lento su quel dispositivo. `CORE` basso con `LATE`
+> 0: il ritardo è fuori dal core (sincronizzazione video/audio del frontend, run-ahead,
+riavvolgimento, driver).
